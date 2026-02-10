@@ -45,9 +45,32 @@ let managerBackendSession = {
   backendLineMap: {},
   backendStageMap: {}
 };
+restoreRouteFromHash();
+state = appState.lines[appState.activeLineId];
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function restoreRouteFromHash() {
+  const raw = String(window.location.hash || "").replace(/^#/, "");
+  if (!raw) return;
+  const params = new URLSearchParams(raw);
+  const mode = params.get("mode");
+  if (mode === "manager" || mode === "supervisor") appState.appMode = mode;
+  const view = params.get("view");
+  if (view === "home" || view === "line") appState.activeView = view;
+  const lineId = params.get("line");
+  if (lineId) appState.activeLineId = lineId;
+}
+
+function syncRouteToHash() {
+  const params = new URLSearchParams();
+  params.set("mode", appState.appMode === "supervisor" ? "supervisor" : "manager");
+  params.set("view", appState.activeView === "line" ? "line" : "home");
+  if (appState.activeView === "line" && appState.activeLineId) params.set("line", appState.activeLineId);
+  const nextHash = `#${params.toString()}`;
+  if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
 }
 
 function generateSecretKey() {
@@ -181,7 +204,7 @@ function normalizeSupervisorSession(session, supervisors, lines) {
     });
   }
   return {
-    username: sup.username,
+    username: sup?.username || String(session.username || "").trim().toLowerCase(),
     assignedLineIds: assigned,
     backendToken: typeof session.backendToken === "string" && session.backendToken ? session.backendToken : "",
     backendLineMap
@@ -350,6 +373,7 @@ function saveState(options = {}) {
     appState.activeLineId = state.id;
     if (options.syncModel) queueLineModelSync(state.id);
   }
+  syncRouteToHash();
 }
 
 function makeDefaultLine(id, name) {
@@ -675,14 +699,15 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
   return line;
 }
 
-async function refreshHostedState() {
+async function refreshHostedState(preferredSession = null) {
   try {
-    const managerSession = await ensureManagerBackendSession();
-    const snapshot = await apiRequest("/api/state-snapshot", { token: managerSession.backendToken });
+    const activeSession = preferredSession || (await ensureManagerBackendSession());
+    if (!activeSession?.backendToken) throw new Error("Missing backend token.");
+    const snapshot = await apiRequest("/api/state-snapshot", { token: activeSession.backendToken });
     const snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
     const hostedLines = {};
-    managerSession.backendLineMap = {};
-    managerSession.backendStageMap = {};
+    activeSession.backendLineMap = {};
+    activeSession.backendStageMap = {};
     snapshotLines.forEach((bundle) => {
       const lineSummary = bundle?.line || {};
       const lineDetail = { stages: bundle?.stages || [], guides: bundle?.guides || [] };
@@ -694,9 +719,9 @@ async function refreshHostedState() {
       if (!lineSummary?.id) return;
       const line = makeLineFromBackend(lineSummary, lineDetail, logs);
       hostedLines[line.id] = line;
-      managerSession.backendLineMap[line.id] = line.id;
+      activeSession.backendLineMap[line.id] = line.id;
       (line.stages || []).forEach((stage) => {
-        managerSession.backendStageMap[`${line.id}::${stage.id}`] = stage.id;
+        activeSession.backendStageMap[`${line.id}::${stage.id}`] = stage.id;
       });
     });
 
@@ -711,22 +736,33 @@ async function refreshHostedState() {
     state = appState.lines[appState.activeLineId];
 
     const supervisors = Array.isArray(snapshot?.supervisors) ? snapshot.supervisors : [];
-    appState.supervisors = supervisors.map((sup) => ({
-      id: sup.id,
-      name: sup.name,
-      username: sup.username,
-      password: "",
-      assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => hostedLines[lineId])
-    }));
+    if (supervisors.length) {
+      appState.supervisors = supervisors.map((sup) => ({
+        id: sup.id,
+        name: sup.name,
+        username: sup.username,
+        password: "",
+        assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => hostedLines[lineId])
+      }));
+    }
 
     if (appState.supervisorSession) {
       const current = appState.supervisors.find((sup) => sup.username === appState.supervisorSession.username);
-      appState.supervisorSession = current
-        ? {
-            ...appState.supervisorSession,
-            assignedLineIds: current.assignedLineIds.slice()
-          }
-        : null;
+      if (current) {
+        appState.supervisorSession = {
+          ...appState.supervisorSession,
+          assignedLineIds: current.assignedLineIds.slice()
+        };
+      } else if (preferredSession?.backendToken || appState.supervisorSession?.backendToken) {
+        appState.supervisorSession = {
+          ...appState.supervisorSession,
+          assignedLineIds: Object.keys(hostedLines),
+          backendLineMap: { ...activeSession.backendLineMap },
+          backendToken: activeSession.backendToken
+        };
+      } else {
+        appState.supervisorSession = null;
+      }
     }
 
     hostedRefreshErrorShown = false;
@@ -1489,16 +1525,16 @@ function bindHome() {
         alert("Invalid supervisor credentials.");
         return;
       }
-      const linesPayload = await apiRequest("/api/lines", { token: loginPayload.token });
-      const backendLines = Array.isArray(linesPayload?.lines) ? linesPayload.lines : [];
       appState.supervisorSession = {
         username: loginPayload.user.username,
-        assignedLineIds: backendLines.map((line) => line.id).filter((lineId) => appState.lines[lineId]),
+        assignedLineIds: [],
         backendToken: loginPayload.token,
-        backendLineMap: Object.fromEntries(backendLines.map((line) => [line.id, line.id]))
+        backendLineMap: {},
+        backendStageMap: {},
+        role: "supervisor"
       };
       saveState();
-      await refreshHostedState();
+      await refreshHostedState(appState.supervisorSession);
       renderAll();
     } catch (error) {
       const message = String(error?.message || "");
@@ -1704,6 +1740,7 @@ function bindHome() {
 
   supervisorShiftForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
@@ -1761,7 +1798,7 @@ function bindHome() {
         submittedAt: new Date().toISOString()
       });
       addAudit(line, "SUPERVISOR_SHIFT_LOG", `${session.username} logged ${shift} shift for ${date} (crew ${crewOnShift})`);
-      event.currentTarget.reset();
+      form.reset();
       document.getElementById("superShiftDate").value = date;
       saveState();
       renderAll();
@@ -1772,6 +1809,7 @@ function bindHome() {
 
   supervisorRunForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
@@ -1824,7 +1862,7 @@ function bindHome() {
         submittedAt: new Date().toISOString()
       });
       addAudit(line, "SUPERVISOR_RUN_LOG", `${session.username} logged run ${product} (${unitsProduced} units)`);
-      event.currentTarget.reset();
+      form.reset();
       document.getElementById("superRunDate").value = date;
       saveState();
       renderAll();
@@ -1835,6 +1873,7 @@ function bindHome() {
 
   supervisorDownForm.addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
@@ -1882,7 +1921,7 @@ function bindHome() {
         submittedAt: new Date().toISOString()
       });
       addAudit(line, "SUPERVISOR_DOWNTIME_LOG", `${session.username} logged downtime on ${stageNameById(equipment)}`);
-      event.currentTarget.reset();
+      form.reset();
       document.getElementById("superDownDate").value = date;
       supervisorDownEquipment.innerHTML = supervisorEquipmentOptions(selectedSupervisorLine());
       saveState();
@@ -2550,6 +2589,7 @@ function bindForms() {
 
   document.getElementById("shiftForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
     data.crewOnShift = Math.max(0, Math.floor(num(data.crewOnShift)));
     if (!rowIsValidDateShift(data.date, data.shift)) {
@@ -2582,7 +2622,7 @@ function bindForms() {
       });
       state.shiftRows.push(data);
       addAudit(state, "MANAGER_SHIFT_LOG", `Manager logged ${data.shift} shift for ${data.date} (crew ${data.crewOnShift})`);
-      event.currentTarget.reset();
+      form.reset();
       saveState();
       renderAll();
     } catch (error) {
@@ -2592,6 +2632,7 @@ function bindForms() {
 
   document.getElementById("runForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
     if (!rowIsValidDateShift(data.date, data.shift)) {
       alert("Date and shift are required.");
@@ -2623,7 +2664,7 @@ function bindForms() {
       });
       state.runRows.push(data);
       addAudit(state, "MANAGER_RUN_LOG", `Manager logged run ${data.product} (${data.unitsProduced} units)`);
-      event.currentTarget.reset();
+      form.reset();
       saveState();
       renderAll();
     } catch (error) {
@@ -2633,6 +2674,7 @@ function bindForms() {
 
   document.getElementById("downtimeForm").addEventListener("submit", async (event) => {
     event.preventDefault();
+    const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
     if (!rowIsValidDateShift(data.date, data.shift)) {
       alert("Date and shift are required.");
@@ -2658,7 +2700,7 @@ function bindForms() {
       });
       state.downtimeRows.push(data);
       addAudit(state, "MANAGER_DOWNTIME_LOG", `Manager logged downtime on ${stageNameById(data.equipment)}`);
-      event.currentTarget.reset();
+      form.reset();
       equipmentSelect.innerHTML = stageOptionListHTML();
       saveState();
       renderAll();
@@ -3696,4 +3738,15 @@ bindStageSettingsModal();
 bindForms();
 bindDataControls();
 renderAll();
-refreshHostedState();
+if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToken) {
+  refreshHostedState(appState.supervisorSession);
+} else if (appState.appMode === "manager" || appState.activeView === "line") {
+  refreshHostedState();
+}
+
+window.addEventListener("hashchange", () => {
+  restoreRouteFromHash();
+  state = appState.lines[appState.activeLineId] || appState.lines[Object.keys(appState.lines)[0]];
+  if (state) appState.activeLineId = state.id;
+  renderAll();
+});

@@ -287,8 +287,10 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          COALESCE(to_char(break2_start, 'HH24:MI'), '') AS "break2Start",
          COALESCE(to_char(break3_start, 'HH24:MI'), '') AS "break3Start",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
+         COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM shift_logs
+       LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
        WHERE line_id = ANY($1::UUID[])
        ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
       [lineIds]
@@ -303,8 +305,10 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
          units_produced AS "unitsProduced",
+         COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM run_logs
+       LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
        WHERE line_id = ANY($1::UUID[])
        ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
       [lineIds]
@@ -318,8 +322,10 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
          COALESCE(equipment_stage_id::TEXT, '') AS equipment,
          COALESCE(reason, '') AS reason,
+         COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM downtime_logs
+       LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
        WHERE line_id = ANY($1::UUID[])
        ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
       [lineIds]
@@ -661,8 +667,10 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          COALESCE(to_char(break2_start, 'HH24:MI'), '') AS "break2Start",
          COALESCE(to_char(break3_start, 'HH24:MI'), '') AS "break3Start",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
+         COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM shift_logs
+       LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
        WHERE line_id = $1
        ORDER BY date ASC, shift ASC, submitted_at ASC`,
       [lineId]
@@ -676,8 +684,10 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
          units_produced AS "unitsProduced",
+         COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM run_logs
+       LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
        WHERE line_id = $1
        ORDER BY date ASC, shift ASC, submitted_at ASC`,
       [lineId]
@@ -690,8 +700,10 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
          COALESCE(equipment_stage_id::TEXT, '') AS equipment,
          COALESCE(reason, '') AS reason,
+         COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM downtime_logs
+       LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
        WHERE line_id = $1
        ORDER BY date ASC, shift ASC, submitted_at ASC`,
       [lineId]
