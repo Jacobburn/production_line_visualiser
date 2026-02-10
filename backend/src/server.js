@@ -31,6 +31,10 @@ const lineSchema = z.object({
   secretKey: z.string().min(4).max(64)
 });
 
+const lineRenameSchema = z.object({
+  name: z.string().min(2).max(120)
+});
+
 const lineModelSchema = z.object({
   stages: z.array(
     z.object({
@@ -70,6 +74,12 @@ const supervisorCreateSchema = z.object({
 
 const supervisorAssignmentsSchema = z.object({
   assignedLineIds: z.array(z.string().uuid())
+});
+
+const supervisorUpdateSchema = z.object({
+  name: z.string().min(1).max(120),
+  username: z.string().min(3).max(60),
+  password: z.string().min(6).max(120).optional().or(z.literal(''))
 });
 
 const shiftLogSchema = z.object({
@@ -584,6 +594,52 @@ app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireR
   }
 }));
 
+app.patch('/api/supervisors/:supervisorId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  const supervisorId = req.params.supervisorId;
+  if (!z.string().uuid().safeParse(supervisorId).success) return res.status(400).json({ error: 'Invalid supervisor id' });
+  const parsed = supervisorUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid supervisor update payload' });
+
+  const userCheck = await dbQuery(
+    `SELECT id FROM users WHERE id = $1 AND role = 'supervisor'`,
+    [supervisorId]
+  );
+  if (!userCheck.rowCount) return res.status(404).json({ error: 'Supervisor not found' });
+
+  const nextName = parsed.data.name.trim();
+  const nextUsername = parsed.data.username.trim().toLowerCase();
+  const password = String(parsed.data.password || '').trim();
+
+  try {
+    let result;
+    if (password) {
+      const passwordHash = await hashPassword(password);
+      result = await dbQuery(
+        `UPDATE users
+         SET name = $2, username = $3, password_hash = $4, updated_at = NOW()
+         WHERE id = $1 AND role = 'supervisor'
+         RETURNING id, name, username, is_active AS "isActive"`,
+        [supervisorId, nextName, nextUsername, passwordHash]
+      );
+    } else {
+      result = await dbQuery(
+        `UPDATE users
+         SET name = $2, username = $3, updated_at = NOW()
+         WHERE id = $1 AND role = 'supervisor'
+         RETURNING id, name, username, is_active AS "isActive"`,
+        [supervisorId, nextName, nextUsername]
+      );
+    }
+    if (!result.rowCount) return res.status(404).json({ error: 'Supervisor not found' });
+    return res.json({ supervisor: result.rows[0] });
+  } catch (error) {
+    if (String(error?.message || '').includes('duplicate key')) {
+      return res.status(409).json({ error: 'Supervisor username already exists' });
+    }
+    throw error;
+  }
+}));
+
 app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const supervisorId = req.params.supervisorId;
   if (!z.string().uuid().safeParse(supervisorId).success) return res.status(400).json({ error: 'Invalid supervisor id' });
@@ -768,6 +824,40 @@ app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyn
     throw error;
   } finally {
     client.release();
+  }
+}));
+
+app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  const lineId = req.params.lineId;
+  if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
+  const parsed = lineRenameSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid line rename payload' });
+
+  try {
+    const result = await dbQuery(
+      `UPDATE production_lines
+       SET name = $2, updated_at = NOW()
+       WHERE id = $1 AND is_active = TRUE
+       RETURNING id, name, secret_key AS "secretKey", updated_at AS "updatedAt"`,
+      [lineId, parsed.data.name.trim()]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'Line not found' });
+
+    await writeAudit({
+      lineId,
+      actorUserId: req.user.id,
+      actorName: req.user.name,
+      actorRole: req.user.role,
+      action: 'RENAME_LINE',
+      details: `Line renamed to: ${result.rows[0].name}`
+    });
+
+    return res.json({ line: result.rows[0] });
+  } catch (error) {
+    if (String(error?.message || '').includes('duplicate key')) {
+      return res.status(409).json({ error: 'Line name already exists' });
+    }
+    throw error;
   }
 }));
 

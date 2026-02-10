@@ -103,18 +103,21 @@
               <div class="action-row">
                 <h2 id="supervisorWelcome">Supervisor</h2>
               </div>
-              <div class="tabs" role="tablist" aria-label="Supervisor app tabs">
-                <button class="tab-btn supervisor-main-tab-btn active" data-super-main-tab="supervisorVisual" type="button">Visualisation</button>
-                <button class="tab-btn supervisor-main-tab-btn" data-super-main-tab="supervisorData" type="button">Data Entry</button>
+              <div class="supervisor-top-controls">
+                <div class="tabs" role="tablist" aria-label="Supervisor app tabs">
+                  <button class="tab-btn supervisor-main-tab-btn active" data-super-main-tab="supervisorVisual" type="button">Visualisation</button>
+                  <button class="tab-btn supervisor-main-tab-btn" data-super-main-tab="supervisorDay" type="button">Day Visualiser</button>
+                  <button class="tab-btn supervisor-main-tab-btn" data-super-main-tab="supervisorData" type="button">Data Entry</button>
+                </div>
+                <label class="supervisor-line-select-inline">
+                  Line
+                  <select id="supervisorLineSelect" required></select>
+                </label>
               </div>
 
             <section id="supervisorVisual" class="supervisor-main-panel active">
               <div class="control-row">
                 <button id="svPrevDay" class="ghost-btn" type="button">Previous Day</button>
-                <label>
-                  Line
-                  <select id="supervisorLineSelect" required></select>
-                </label>
                 <label>
                   Date
                   <input id="svSelectedDate" type="date" />
@@ -147,6 +150,14 @@
                 </article>
               </div>
               <section class="line-map" id="supervisorLineMap" aria-label="Supervisor production line map"></section>
+            </section>
+
+            <section id="supervisorDay" class="supervisor-main-panel">
+              <section class="panel">
+                <h2>Day Visualiser</h2>
+                <p class="muted">Timeline by column for the selected date. Production setup and run are split into separate blocks.</p>
+                <div id="supervisorDayVisualiserCanvas" class="day-viz-canvas"></div>
+              </section>
             </section>
 
             <section id="supervisorData" class="supervisor-main-panel">
@@ -244,6 +255,40 @@
       </div>
     </div>
 
+    <div id="editSupervisorModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="editSupervisorTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="editSupervisorTitle">Edit Supervisor</h2>
+            <p class="muted">Update supervisor details.</p>
+          </div>
+          <button id="closeEditSupervisorModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="editSupervisorForm" class="form-grid">
+          <input id="editSupervisorName" placeholder="Name" required />
+          <input id="editSupervisorUsername" placeholder="Username" required />
+          <input id="editSupervisorPassword" type="password" placeholder="New Password (optional)" />
+          <button type="submit">Save Supervisor</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="editLineModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="editLineTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="editLineTitle">Edit Production Line</h2>
+            <p class="muted">Update the production line name.</p>
+          </div>
+          <button id="closeEditLineModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="editLineForm" class="form-grid">
+          <input id="editLineName" placeholder="Line name" required />
+          <button type="submit">Save Line Name</button>
+        </form>
+      </div>
+    </div>
+
     <div id="lineWorkspace" class="app-shell hidden">
       <header class="topbar">
         <button id="goHome" class="ghost-btn home-btn" type="button" aria-label="Home">Home</button>
@@ -252,7 +297,8 @@
           <p>Shift-based production visualiser</p>
         </div>
         <div class="tabs" role="tablist" aria-label="Primary tabs">
-          <button class="tab-btn active" data-tab="visualiser" role="tab" aria-selected="true">Visualiser</button>
+          <button class="tab-btn active" data-tab="visualiser" role="tab" aria-selected="true">Line Visualiser</button>
+          <button class="tab-btn" data-tab="dayVisualiser" role="tab" aria-selected="false">Day Visualiser</button>
           <button class="tab-btn" data-tab="data" role="tab" aria-selected="false">Data Input</button>
           <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false">Line Settings</button>
         </div>
@@ -303,6 +349,14 @@
             <button id="uploadFlowShapeBtn" class="ghost-btn hidden" type="button">Upload Shape</button>
             <input id="uploadFlowShapeInput" type="file" accept="image/*" class="hidden" />
           </div>
+        </section>
+
+        <section id="dayVisualiser" class="tab-panel" role="tabpanel">
+          <section class="panel">
+            <h2>Day Visualiser</h2>
+            <p class="muted">Timeline by column for the selected date. Production setup and run are split into separate blocks.</p>
+            <div id="dayVisualiserCanvas" class="day-viz-canvas"></div>
+          </section>
         </section>
 
         <section id="data" class="tab-panel" role="tabpanel">

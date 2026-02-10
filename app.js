@@ -213,7 +213,7 @@ function normalizeSupervisorSession(session, supervisors, lines) {
 
 function selectedSupervisorLineId() {
   const sel = document.getElementById("supervisorLineSelect");
-  return sel ? sel.value : "";
+  return sel?.value || appState.supervisorSelectedLineId || "";
 }
 
 function selectedSupervisorLine() {
@@ -1247,6 +1247,8 @@ function statusClass(utilisation) {
 
 function bindTabs() {
   document.querySelectorAll(".tab-btn").forEach((btn) => {
+    const tabId = btn.dataset.tab;
+    if (!tabId) return;
     btn.addEventListener("click", () => {
       document.querySelectorAll(".tab-btn").forEach((b) => {
         b.classList.remove("active");
@@ -1255,7 +1257,8 @@ function bindTabs() {
       document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
       btn.classList.add("active");
       btn.setAttribute("aria-selected", "true");
-      document.getElementById(btn.dataset.tab).classList.add("active");
+      const panel = document.getElementById(tabId);
+      if (panel) panel.classList.add("active");
     });
   });
 }
@@ -1291,6 +1294,16 @@ function bindHome() {
   const closeAddSupervisorModalBtn = document.getElementById("closeAddSupervisorModal");
   const addSupervisorForm = document.getElementById("addSupervisorForm");
   const newSupervisorLines = document.getElementById("newSupervisorLines");
+  const editSupervisorModal = document.getElementById("editSupervisorModal");
+  const closeEditSupervisorModalBtn = document.getElementById("closeEditSupervisorModal");
+  const editSupervisorForm = document.getElementById("editSupervisorForm");
+  const editSupervisorNameInput = document.getElementById("editSupervisorName");
+  const editSupervisorUsernameInput = document.getElementById("editSupervisorUsername");
+  const editSupervisorPasswordInput = document.getElementById("editSupervisorPassword");
+  const editLineModal = document.getElementById("editLineModal");
+  const closeEditLineModalBtn = document.getElementById("closeEditLineModal");
+  const editLineForm = document.getElementById("editLineForm");
+  const editLineNameInput = document.getElementById("editLineName");
   const cards = document.getElementById("lineCards");
   const openBuilderBtn = document.getElementById("openBuilder");
   const openBuilderSecondaryBtn = document.getElementById("openBuilderSecondary");
@@ -1303,6 +1316,8 @@ function bindHome() {
   const builderCanvas = document.getElementById("builderCanvas");
   let builderDraft = null;
   let dragState = null;
+  let editingSupervisorId = "";
+  let editingLineId = "";
 
   const stripLeadingStageNumber = (name) => String(name || "").replace(/^\s*\d+\.\s*/, "").trim();
   const seedBuilderFromTemplate = () => ({
@@ -1413,6 +1428,7 @@ function bindHome() {
             </label>
             <div class="action-row">
               <button type="button" data-supervisor-save="${sup.id}">Save Assignments</button>
+              <button type="button" class="ghost-btn" data-supervisor-edit="${sup.id}">Edit</button>
               <button type="button" class="danger" data-supervisor-delete="${sup.id}">Delete Supervisor</button>
             </div>
           </section>
@@ -1447,6 +1463,44 @@ function bindHome() {
   const closeAddSupervisorModal = () => {
     addSupervisorModal.classList.remove("open");
     addSupervisorModal.setAttribute("aria-hidden", "true");
+  };
+
+  const openEditSupervisorModal = (supervisorId) => {
+    const sup = (appState.supervisors || []).find((item) => item.id === supervisorId);
+    if (!sup) return;
+    editingSupervisorId = supervisorId;
+    editSupervisorNameInput.value = sup.name || "";
+    editSupervisorUsernameInput.value = sup.username || "";
+    editSupervisorPasswordInput.value = "";
+    editSupervisorModal.classList.add("open");
+    editSupervisorModal.setAttribute("aria-hidden", "false");
+    editSupervisorNameInput.focus();
+    editSupervisorNameInput.select();
+  };
+
+  const closeEditSupervisorModal = () => {
+    editingSupervisorId = "";
+    editSupervisorModal.classList.remove("open");
+    editSupervisorModal.setAttribute("aria-hidden", "true");
+    editSupervisorForm.reset();
+  };
+
+  const openEditLineModal = (lineId) => {
+    const line = appState.lines?.[lineId];
+    if (!line) return;
+    editingLineId = lineId;
+    editLineNameInput.value = line.name || "";
+    editLineModal.classList.add("open");
+    editLineModal.setAttribute("aria-hidden", "false");
+    editLineNameInput.focus();
+    editLineNameInput.select();
+  };
+
+  const closeEditLineModal = () => {
+    editingLineId = "";
+    editLineModal.classList.remove("open");
+    editLineModal.setAttribute("aria-hidden", "true");
+    editLineForm.reset();
   };
 
   goHomeBtn.addEventListener("click", () => {
@@ -1625,7 +1679,20 @@ function bindHome() {
     if (event.target === addSupervisorModal) closeAddSupervisorModal();
   });
 
+  closeEditSupervisorModalBtn.addEventListener("click", closeEditSupervisorModal);
+  editSupervisorModal.addEventListener("click", (event) => {
+    if (event.target === editSupervisorModal) closeEditSupervisorModal();
+  });
+
   supervisorManagerList.addEventListener("click", async (event) => {
+    const editBtn = event.target.closest("[data-supervisor-edit]");
+    if (editBtn) {
+      const supId = editBtn.getAttribute("data-supervisor-edit");
+      if (!supId) return;
+      openEditSupervisorModal(supId);
+      return;
+    }
+
     const saveBtn = event.target.closest("[data-supervisor-save]");
     if (saveBtn) {
       const supId = saveBtn.getAttribute("data-supervisor-save");
@@ -1689,6 +1756,49 @@ function bindHome() {
         console.warn("Supervisor delete sync failed:", error);
         alert(`Could not delete supervisor.\n${error?.message || "Please try again."}`);
       }
+    }
+  });
+
+  editSupervisorForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const sup = (appState.supervisors || []).find((item) => item.id === editingSupervisorId);
+    if (!sup) return;
+    const name = String(editSupervisorNameInput.value || "").trim();
+    const username = String(editSupervisorUsernameInput.value || "").trim().toLowerCase();
+    const password = String(editSupervisorPasswordInput.value || "").trim();
+    if (!name || !username) {
+      alert("Name and username are required.");
+      return;
+    }
+    if (password && password.length < 6) {
+      alert("New password must be at least 6 characters.");
+      return;
+    }
+    try {
+      const session = await ensureManagerBackendSession();
+      await apiRequest(`/api/supervisors/${sup.id}`, {
+        method: "PATCH",
+        token: session.backendToken,
+        body: {
+          name,
+          username,
+          password
+        }
+      });
+      const previousUsername = sup.username;
+      sup.name = name;
+      sup.username = username;
+      if (appState.supervisorSession?.username === previousUsername) {
+        appState.supervisorSession.username = username;
+      }
+      closeEditSupervisorModal();
+      saveState();
+      await refreshHostedState();
+      renderAll();
+      openManageSupervisorsModal();
+    } catch (error) {
+      console.warn("Supervisor update sync failed:", error);
+      alert(`Could not update supervisor.\n${error?.message || "Please try again."}`);
     }
   });
 
@@ -2104,6 +2214,14 @@ function bindHome() {
   });
 
   cards.addEventListener("click", async (event) => {
+    const editBtn = event.target.closest("[data-edit-line]");
+    if (editBtn) {
+      const id = editBtn.getAttribute("data-edit-line");
+      if (!id || !appState.lines[id]) return;
+      openEditLineModal(id);
+      return;
+    }
+
     const deleteBtn = event.target.closest("[data-delete-line]");
     if (deleteBtn) {
       const id = deleteBtn.getAttribute("data-delete-line");
@@ -2157,6 +2275,46 @@ function bindHome() {
     state = appState.lines[id];
     saveState();
     renderAll();
+  });
+
+  closeEditLineModalBtn.addEventListener("click", closeEditLineModal);
+  editLineModal.addEventListener("click", (event) => {
+    if (event.target === editLineModal) closeEditLineModal();
+  });
+
+  editLineForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const lineId = editingLineId;
+    const line = appState.lines?.[lineId];
+    if (!line) return;
+    const nextName = String(editLineNameInput.value || "").trim();
+    if (nextName.length < 2) {
+      alert("Line name must be at least 2 characters.");
+      return;
+    }
+    if (nextName === line.name) {
+      closeEditLineModal();
+      return;
+    }
+    try {
+      const session = await ensureManagerBackendSession();
+      const backendLineId = UUID_RE.test(String(lineId)) ? lineId : await ensureBackendLineId(lineId, session);
+      if (!backendLineId) throw new Error("Line is not synced to server.");
+      await apiRequest(`/api/lines/${backendLineId}`, {
+        method: "PATCH",
+        token: session.backendToken,
+        body: { name: nextName }
+      });
+      line.name = nextName;
+      addAudit(line, "RENAME_LINE", `Line renamed to ${nextName}`);
+      closeEditLineModal();
+      saveState();
+      await refreshHostedState();
+      renderAll();
+    } catch (error) {
+      console.warn("Line rename sync failed:", error);
+      alert(`Could not rename line.\n${error?.message || "Please try again."}`);
+    }
   });
 }
 
@@ -2925,6 +3083,234 @@ function selectedRows(rows) {
   return rows.filter((row) => row.date === state.selectedDate && row.shift === state.selectedShift);
 }
 
+function parseTimeToMinutes(value) {
+  const fraction = parseTimeToDayFraction(value);
+  if (fraction === null) return null;
+  return Math.round(fraction * 24 * 60);
+}
+
+function formatTime12h(value) {
+  const raw = String(value || "").trim();
+  const m = raw.match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return raw;
+  let h = Number(m[1]);
+  const mins = m[2];
+  const suffix = h >= 12 ? "PM" : "AM";
+  h = h % 12;
+  if (h === 0) h = 12;
+  return `${h}:${mins}${suffix}`;
+}
+
+function htmlEscape(value) {
+  return String(value ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function splitAcrossMidnight(startMins, finishMins) {
+  if (startMins === null || finishMins === null || startMins === finishMins) return [];
+  if (finishMins > startMins) return [{ start: startMins, end: finishMins }];
+  return [
+    { start: startMins, end: 24 * 60 },
+    { start: 0, end: finishMins }
+  ];
+}
+
+function stageNameByIdForLine(line, id) {
+  const stages = line?.stages?.length ? line.stages : [];
+  const idx = stages.findIndex((stage) => stage.id === id);
+  if (idx === -1) return id || "";
+  return stageDisplayName(stages[idx], idx);
+}
+
+function buildDayVisualiserBlocks(data, selectedDate, stageNameResolver) {
+  const blocks = { shifts: [], runs: [], downtime: [] };
+  const shiftRows = data.shiftRows.filter((row) => row.date === selectedDate);
+  const runRows = data.runRows.filter((row) => row.date === selectedDate);
+  const downRows = data.downtimeRows.filter((row) => row.date === selectedDate);
+
+  shiftRows
+    .slice()
+    .sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")))
+    .forEach((row) => {
+      const start = parseTimeToMinutes(row.startTime);
+      const end = parseTimeToMinutes(row.finishTime);
+      splitAcrossMidnight(start, end).forEach((segment) => {
+        blocks.shifts.push({
+          ...segment,
+          type: "shift",
+          title: `${row.shift} Shift`,
+          sub: `${formatTime12h(row.startTime)} - ${formatTime12h(row.finishTime)}`
+        });
+      });
+
+      [
+        { label: "Break 1", start: row.break1Start, mins: 15 },
+        { label: "Break 2", start: row.break2Start, mins: 30 },
+        { label: "Break 3", start: row.break3Start, mins: 15 }
+      ].forEach((brk) => {
+        const breakStart = parseTimeToMinutes(brk.start);
+        if (breakStart === null) return;
+        const breakEnd = (breakStart + brk.mins) % (24 * 60);
+        splitAcrossMidnight(breakStart, breakEnd).forEach((segment) => {
+          blocks.shifts.push({
+            ...segment,
+            type: "break",
+            title: brk.label,
+            sub: `${formatTime12h(brk.start)} (${brk.mins} min)`
+          });
+        });
+      });
+    });
+
+  runRows
+    .slice()
+    .sort((a, b) => String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || "")))
+    .forEach((row, index) => {
+      const setupStart = parseTimeToMinutes(row.setUpStartTime);
+      const prodStart = parseTimeToMinutes(row.productionStartTime);
+      const finish = parseTimeToMinutes(row.finishTime);
+      const runLabel = `${row.product || "Run"} ${runRows.length > 1 ? `(${index + 1})` : ""}`.trim();
+
+      splitAcrossMidnight(setupStart, prodStart).forEach((segment) => {
+        blocks.runs.push({
+          ...segment,
+          type: "run-setup",
+          title: `${runLabel} Setup`,
+          sub: `${formatTime12h(row.setUpStartTime)} - ${formatTime12h(row.productionStartTime)}`
+        });
+      });
+
+      splitAcrossMidnight(prodStart, finish).forEach((segment) => {
+        blocks.runs.push({
+          ...segment,
+          type: "run-main",
+          title: runLabel,
+          sub: `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}`
+        });
+      });
+    });
+
+  downRows
+    .slice()
+    .sort((a, b) => String(a.downtimeStart || "").localeCompare(String(b.downtimeStart || "")))
+    .forEach((row) => {
+      const start = parseTimeToMinutes(row.downtimeStart);
+      const end = parseTimeToMinutes(row.downtimeFinish);
+      const equipmentLabel = stageNameResolver(row.equipment || "");
+      const reasonText = String(row.reason || "").trim();
+      splitAcrossMidnight(start, end).forEach((segment) => {
+        blocks.downtime.push({
+          ...segment,
+          type: "downtime",
+          title: equipmentLabel || "Downtime",
+          sub: `${formatTime12h(row.downtimeStart)} - ${formatTime12h(row.downtimeFinish)}${reasonText ? ` | ${reasonText}` : ""}`
+        });
+      });
+    });
+
+  return blocks;
+}
+
+function renderDayVisualiserTo(rootId, data, selectedDate, stageNameResolver) {
+  const root = document.getElementById(rootId);
+  if (!root) return;
+  const blocks = buildDayVisualiserBlocks(data, selectedDate, stageNameResolver);
+  const all = [...blocks.shifts, ...blocks.runs, ...blocks.downtime].filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end));
+  if (!all.length) {
+    root.style.removeProperty("--day-viz-hours");
+    root.innerHTML = `<div class="day-viz-empty">No shift/run/downtime records for ${selectedDate}.</div>`;
+    return;
+  }
+
+  const dayStartHour = 5;
+  let startHour = Math.max(dayStartHour, Math.floor(Math.min(...all.map((b) => b.start)) / 60) - 1);
+  let endHour = Math.min(24, Math.ceil(Math.max(...all.map((b) => b.end)) / 60) + 1);
+  if (endHour <= startHour) endHour = Math.min(24, startHour + 8);
+  if (endHour - startHour < 8) endHour = Math.min(24, startHour + 8);
+  if (endHour - startHour < 8) startHour = Math.max(dayStartHour, endHour - 8);
+
+  const startMins = startHour * 60;
+  const endMins = endHour * 60;
+  const range = Math.max(60, endMins - startMins);
+  root.style.setProperty("--day-viz-hours", String(Math.max(1, endHour - startHour)));
+  const hourMarks = [];
+  for (let h = startHour; h <= endHour; h += 1) hourMarks.push(h);
+
+  const hourLabel = (h) => {
+    const suffix = h >= 12 ? "pm" : "am";
+    const display = h % 12 === 0 ? 12 : h % 12;
+    return `${display}${suffix}`;
+  };
+
+  const renderLane = (items) => {
+    const lines = hourMarks
+      .map((h) => {
+        const top = ((h * 60 - startMins) / range) * 100;
+        return `<div class="day-viz-hour-line" style="top:${top}%"></div>`;
+      })
+      .join("");
+
+    const cards = items
+      .map((item) => {
+        const start = Math.max(startMins, item.start);
+        const end = Math.min(endMins, item.end);
+        if (end <= start) return "";
+        const top = ((start - startMins) / range) * 100;
+        const height = Math.max(2.2, ((end - start) / range) * 100);
+        return `
+          <article class="day-viz-block ${item.type}" style="top:${top}%;height:${height}%;">
+            <span class="day-viz-title">${htmlEscape(item.title)}</span>
+            <span class="day-viz-sub">${htmlEscape(item.sub)}</span>
+          </article>
+        `;
+      })
+      .join("");
+    return `<div class="day-viz-lane">${lines}${cards}</div>`;
+  };
+
+  root.innerHTML = `
+    <div class="day-viz-grid day-viz-head">
+      <div></div>
+      <div>Shifts</div>
+      <div>Production Runs</div>
+      <div>Downtime</div>
+    </div>
+    <div class="day-viz-grid">
+      <div class="day-viz-time-col">
+        ${hourMarks
+          .map(
+            (h) => `
+              <div class="day-viz-time">
+                ${hourLabel(h)}
+              </div>
+            `
+          )
+          .join("")}
+      </div>
+      ${renderLane(blocks.shifts)}
+      ${renderLane(blocks.runs)}
+      ${renderLane(blocks.downtime)}
+    </div>
+  `;
+}
+
+function renderDayVisualiser() {
+  renderDayVisualiserTo("dayVisualiserCanvas", derivedData(), state.selectedDate, stageNameById);
+}
+
+function renderSupervisorDayVisualiser(line, selectedDate) {
+  if (!line) {
+    const root = document.getElementById("supervisorDayVisualiserCanvas");
+    if (root) root.innerHTML = `<div class="day-viz-empty">No assigned lines selected.</div>`;
+    return;
+  }
+  renderDayVisualiserTo("supervisorDayVisualiserCanvas", derivedDataForLine(line), selectedDate, (id) => stageNameByIdForLine(line, id));
+}
+
 function renderVisualiser() {
   const data = derivedData();
   const selectedRunRows = selectedRows(data.runRows);
@@ -3525,6 +3911,7 @@ function renderHome() {
           <p>${stages} stages | ${shifts} shift records | ${assignedSupCount} supervisors assigned</p>
           <div class="line-card-actions">
             <button type="button" data-open-line="${line.id}">Open Line</button>
+            <button type="button" class="ghost-btn" data-edit-line="${line.id}">Edit</button>
             <button type="button" class="danger" data-delete-line="${line.id}">Delete</button>
           </div>
         </article>
@@ -3543,12 +3930,22 @@ function renderHome() {
 
   if (!isSupervisor) return;
 
-  const assignedIds = session?.assignedLineIds?.filter((id) => appState.lines[id]) || [];
+  let assignedIds = session?.assignedLineIds?.filter((id) => appState.lines[id]) || [];
+  if (!assignedIds.length) {
+    const fallbackId = appState.supervisorSelectedLineId && appState.lines[appState.supervisorSelectedLineId]
+      ? appState.supervisorSelectedLineId
+      : appState.activeLineId && appState.lines[appState.activeLineId]
+        ? appState.activeLineId
+        : Object.keys(appState.lines || {})[0] || "";
+    if (fallbackId) assignedIds = [fallbackId];
+  }
   loginSection.classList.toggle("hidden", Boolean(session));
   appSection.classList.toggle("hidden", !session);
   if (!session) return;
 
-  const activeMainTab = ["supervisorVisual", "supervisorData"].includes(appState.supervisorMainTab) ? appState.supervisorMainTab : "supervisorVisual";
+  const activeMainTab = ["supervisorVisual", "supervisorDay", "supervisorData"].includes(appState.supervisorMainTab)
+    ? appState.supervisorMainTab
+    : "supervisorVisual";
   superMainTabBtns.forEach((btn) => {
     const active = btn.dataset.superMainTab === activeMainTab;
     btn.classList.toggle("active", active);
@@ -3573,7 +3970,7 @@ function renderHome() {
   lineSelect.innerHTML = assignedIds.length
     ? assignedIds.map((id) => `<option value="${id}">${appState.lines[id].name}</option>`).join("")
     : `<option value="">No assigned lines</option>`;
-  lineSelect.value = appState.supervisorSelectedLineId || "";
+  lineSelect.value = appState.supervisorSelectedLineId || assignedIds[0] || "";
   svDateInput.value = appState.supervisorSelectedDate;
   svShiftButtons.forEach((btn) => {
     const active = btn.dataset.svShift === appState.supervisorSelectedShift;
@@ -3582,6 +3979,7 @@ function renderHome() {
   });
   downEquipment.innerHTML = supervisorEquipmentOptions(selectedSupervisorLine());
   renderSupervisorVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate, appState.supervisorSelectedShift);
+  renderSupervisorDayVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate);
 
   if (!shiftDateInput.value) shiftDateInput.value = todayISO();
   if (!runDateInput.value) runDateInput.value = todayISO();
@@ -3715,6 +4113,7 @@ function renderAll() {
   renderTrackingTables();
   renderAuditTrail();
   renderVisualiser();
+  renderDayVisualiser();
 }
 
 function setActiveDataSubtab() {
