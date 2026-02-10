@@ -189,6 +189,259 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
   res.json({ lines: result.rows });
 }));
 
+app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
+  const linesQuery = req.user.role === 'manager'
+    ? `SELECT
+         l.id,
+         l.name,
+         l.secret_key AS "secretKey",
+         l.created_at AS "createdAt",
+         (
+           SELECT COUNT(*)::INT FROM line_stages s WHERE s.line_id = l.id
+         ) AS "stageCount",
+         (
+           SELECT COUNT(*)::INT FROM shift_logs sl WHERE sl.line_id = l.id
+         ) AS "shiftCount"
+       FROM production_lines l
+       WHERE l.is_active = TRUE
+       ORDER BY l.created_at DESC`
+    : `SELECT
+         l.id,
+         l.name,
+         l.secret_key AS "secretKey",
+         l.created_at AS "createdAt",
+         (
+           SELECT COUNT(*)::INT FROM line_stages s WHERE s.line_id = l.id
+         ) AS "stageCount",
+         (
+           SELECT COUNT(*)::INT FROM shift_logs sl WHERE sl.line_id = l.id
+         ) AS "shiftCount"
+       FROM production_lines l
+       INNER JOIN supervisor_line_assignments a ON a.line_id = l.id
+       WHERE a.supervisor_user_id = $1 AND l.is_active = TRUE
+       ORDER BY l.created_at DESC`;
+
+  const linesResult = await dbQuery(linesQuery, req.user.role === 'manager' ? [] : [req.user.id]);
+  const lineRows = linesResult.rows;
+  const lineIds = lineRows.map((line) => line.id);
+  if (!lineIds.length) {
+    const payload = { lines: [], supervisors: [] };
+    if (req.user.role === 'manager') {
+      const supervisorsResult = await dbQuery(
+        `SELECT
+           u.id,
+           u.name,
+           u.username,
+           u.is_active AS "isActive",
+           COALESCE(
+             ARRAY_REMOVE(ARRAY_AGG(a.line_id::TEXT), NULL),
+             ARRAY[]::TEXT[]
+           ) AS "assignedLineIds"
+         FROM users u
+         LEFT JOIN supervisor_line_assignments a ON a.supervisor_user_id = u.id
+         WHERE u.role = 'supervisor'
+         GROUP BY u.id
+         ORDER BY u.created_at DESC`
+      );
+      payload.supervisors = supervisorsResult.rows;
+    }
+    return res.json(payload);
+  }
+
+  const [stagesResult, guidesResult, shiftLogsResult, runLogsResult, downtimeLogsResult] = await Promise.all([
+    dbQuery(
+      `SELECT
+         line_id AS "lineId",
+         id,
+         stage_order AS "stageOrder",
+         stage_name AS "stageName",
+         stage_type AS "stageType",
+         day_crew AS "dayCrew",
+         night_crew AS "nightCrew",
+         max_throughput_per_crew AS "maxThroughputPerCrew",
+         x, y, w, h
+       FROM line_stages
+       WHERE line_id = ANY($1::UUID[])
+       ORDER BY line_id, stage_order ASC`,
+      [lineIds]
+    ),
+    dbQuery(
+      `SELECT
+         line_id AS "lineId",
+         id,
+         guide_type AS "guideType",
+         x, y, w, h, angle, src
+       FROM line_layout_guides
+       WHERE line_id = ANY($1::UUID[])
+       ORDER BY line_id, created_at ASC`,
+      [lineIds]
+    ),
+    dbQuery(
+      `SELECT
+         line_id AS "lineId",
+         date::TEXT AS date,
+         shift,
+         crew_on_shift AS "crewOnShift",
+         to_char(start_time, 'HH24:MI') AS "startTime",
+         COALESCE(to_char(break1_start, 'HH24:MI'), '') AS "break1Start",
+         COALESCE(to_char(break2_start, 'HH24:MI'), '') AS "break2Start",
+         COALESCE(to_char(break3_start, 'HH24:MI'), '') AS "break3Start",
+         to_char(finish_time, 'HH24:MI') AS "finishTime",
+         submitted_at AS "submittedAt"
+       FROM shift_logs
+       WHERE line_id = ANY($1::UUID[])
+       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      [lineIds]
+    ),
+    dbQuery(
+      `SELECT
+         line_id AS "lineId",
+         date::TEXT AS date,
+         shift,
+         product,
+         COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+         to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+         to_char(finish_time, 'HH24:MI') AS "finishTime",
+         units_produced AS "unitsProduced",
+         submitted_at AS "submittedAt"
+       FROM run_logs
+       WHERE line_id = ANY($1::UUID[])
+       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      [lineIds]
+    ),
+    dbQuery(
+      `SELECT
+         line_id AS "lineId",
+         date::TEXT AS date,
+         shift,
+         to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+         to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+         COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+         COALESCE(reason, '') AS reason,
+         submitted_at AS "submittedAt"
+       FROM downtime_logs
+       WHERE line_id = ANY($1::UUID[])
+       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      [lineIds]
+    )
+  ]);
+
+  const stagesByLine = new Map();
+  stagesResult.rows.forEach((row) => {
+    const list = stagesByLine.get(row.lineId) || [];
+    list.push({
+      id: row.id,
+      stageOrder: row.stageOrder,
+      stageName: row.stageName,
+      stageType: row.stageType,
+      dayCrew: row.dayCrew,
+      nightCrew: row.nightCrew,
+      maxThroughputPerCrew: row.maxThroughputPerCrew,
+      x: row.x,
+      y: row.y,
+      w: row.w,
+      h: row.h
+    });
+    stagesByLine.set(row.lineId, list);
+  });
+
+  const guidesByLine = new Map();
+  guidesResult.rows.forEach((row) => {
+    const list = guidesByLine.get(row.lineId) || [];
+    list.push({
+      id: row.id,
+      guideType: row.guideType,
+      x: row.x,
+      y: row.y,
+      w: row.w,
+      h: row.h,
+      angle: row.angle,
+      src: row.src
+    });
+    guidesByLine.set(row.lineId, list);
+  });
+
+  const shiftByLine = new Map();
+  shiftLogsResult.rows.forEach((row) => {
+    const list = shiftByLine.get(row.lineId) || [];
+    list.push({
+      date: row.date,
+      shift: row.shift,
+      crewOnShift: row.crewOnShift,
+      startTime: row.startTime,
+      break1Start: row.break1Start,
+      break2Start: row.break2Start,
+      break3Start: row.break3Start,
+      finishTime: row.finishTime,
+      submittedAt: row.submittedAt
+    });
+    shiftByLine.set(row.lineId, list);
+  });
+
+  const runByLine = new Map();
+  runLogsResult.rows.forEach((row) => {
+    const list = runByLine.get(row.lineId) || [];
+    list.push({
+      date: row.date,
+      shift: row.shift,
+      product: row.product,
+      setUpStartTime: row.setUpStartTime,
+      productionStartTime: row.productionStartTime,
+      finishTime: row.finishTime,
+      unitsProduced: row.unitsProduced,
+      submittedAt: row.submittedAt
+    });
+    runByLine.set(row.lineId, list);
+  });
+
+  const downtimeByLine = new Map();
+  downtimeLogsResult.rows.forEach((row) => {
+    const list = downtimeByLine.get(row.lineId) || [];
+    list.push({
+      date: row.date,
+      shift: row.shift,
+      downtimeStart: row.downtimeStart,
+      downtimeFinish: row.downtimeFinish,
+      equipment: row.equipment,
+      reason: row.reason,
+      submittedAt: row.submittedAt
+    });
+    downtimeByLine.set(row.lineId, list);
+  });
+
+  const lines = lineRows.map((line) => ({
+    line,
+    stages: stagesByLine.get(line.id) || [],
+    guides: guidesByLine.get(line.id) || [],
+    shiftRows: shiftByLine.get(line.id) || [],
+    runRows: runByLine.get(line.id) || [],
+    downtimeRows: downtimeByLine.get(line.id) || []
+  }));
+
+  const payload = { lines, supervisors: [] };
+  if (req.user.role === 'manager') {
+    const supervisorsResult = await dbQuery(
+      `SELECT
+         u.id,
+         u.name,
+         u.username,
+         u.is_active AS "isActive",
+         COALESCE(
+           ARRAY_REMOVE(ARRAY_AGG(a.line_id::TEXT), NULL),
+           ARRAY[]::TEXT[]
+         ) AS "assignedLineIds"
+       FROM users u
+       LEFT JOIN supervisor_line_assignments a ON a.supervisor_user_id = u.id
+       WHERE u.role = 'supervisor'
+       GROUP BY u.id
+       ORDER BY u.created_at DESC`
+    );
+    payload.supervisors = supervisorsResult.rows;
+  }
+
+  return res.json(payload);
+}));
+
 app.post('/api/lines', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const parsed = lineSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid line payload' });

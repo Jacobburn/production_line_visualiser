@@ -678,26 +678,20 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
 async function refreshHostedState() {
   try {
     const managerSession = await ensureManagerBackendSession();
-    const linesPayload = await apiRequest("/api/lines", { token: managerSession.backendToken });
-    const lineSummaries = Array.isArray(linesPayload?.lines) ? linesPayload.lines : [];
+    const snapshot = await apiRequest("/api/state-snapshot", { token: managerSession.backendToken });
+    const snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
     const hostedLines = {};
     managerSession.backendLineMap = {};
     managerSession.backendStageMap = {};
-
-    const lineBundles = await Promise.all(
-      lineSummaries
-        .filter((lineSummary) => Boolean(lineSummary?.id))
-        .map(async (lineSummary) => {
-          const lineId = lineSummary.id;
-          const [lineDetail, logs] = await Promise.all([
-            apiRequest(`/api/lines/${lineId}`, { token: managerSession.backendToken }),
-            apiRequest(`/api/lines/${lineId}/logs`, { token: managerSession.backendToken })
-          ]);
-          return { lineSummary, lineDetail, logs };
-        })
-    );
-
-    lineBundles.forEach(({ lineSummary, lineDetail, logs }) => {
+    snapshotLines.forEach((bundle) => {
+      const lineSummary = bundle?.line || {};
+      const lineDetail = { stages: bundle?.stages || [], guides: bundle?.guides || [] };
+      const logs = {
+        shiftRows: bundle?.shiftRows || [],
+        runRows: bundle?.runRows || [],
+        downtimeRows: bundle?.downtimeRows || []
+      };
+      if (!lineSummary?.id) return;
       const line = makeLineFromBackend(lineSummary, lineDetail, logs);
       hostedLines[line.id] = line;
       managerSession.backendLineMap[line.id] = line.id;
@@ -716,8 +710,7 @@ async function refreshHostedState() {
     appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0];
     state = appState.lines[appState.activeLineId];
 
-    const supervisorsPayload = await apiRequest("/api/supervisors", { token: managerSession.backendToken });
-    const supervisors = Array.isArray(supervisorsPayload?.supervisors) ? supervisorsPayload.supervisors : [];
+    const supervisors = Array.isArray(snapshot?.supervisors) ? snapshot.supervisors : [];
     appState.supervisors = supervisors.map((sup) => ({
       id: sup.id,
       name: sup.name,
