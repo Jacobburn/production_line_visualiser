@@ -6,6 +6,7 @@ import { dbQuery, pool } from './db.js';
 import {
   authMiddleware,
   comparePassword,
+  hashPassword,
   getUserByUsername,
   requireRole,
   signAccessToken
@@ -28,6 +29,47 @@ const loginSchema = z.object({
 const lineSchema = z.object({
   name: z.string().min(2).max(120),
   secretKey: z.string().min(4).max(64)
+});
+
+const lineModelSchema = z.object({
+  stages: z.array(
+    z.object({
+      id: z.string().optional(),
+      stageOrder: z.number().int().min(1),
+      stageName: z.string().min(1).max(150),
+      stageType: z.enum(['main', 'prep', 'transfer']),
+      dayCrew: z.number().int().min(0),
+      nightCrew: z.number().int().min(0),
+      maxThroughputPerCrew: z.number().min(0),
+      x: z.number(),
+      y: z.number(),
+      w: z.number().positive(),
+      h: z.number().positive()
+    })
+  ).default([]),
+  guides: z.array(
+    z.object({
+      id: z.string().optional(),
+      guideType: z.enum(['line', 'arrow', 'shape']),
+      x: z.number(),
+      y: z.number(),
+      w: z.number(),
+      h: z.number(),
+      angle: z.number(),
+      src: z.string().optional().nullable()
+    })
+  ).default([])
+});
+
+const supervisorCreateSchema = z.object({
+  name: z.string().min(1).max(120),
+  username: z.string().min(3).max(60),
+  password: z.string().min(6).max(120),
+  assignedLineIds: z.array(z.string().uuid()).optional().default([])
+});
+
+const supervisorAssignmentsSchema = z.object({
+  assignedLineIds: z.array(z.string().uuid())
 });
 
 const shiftLogSchema = z.object({
@@ -171,6 +213,144 @@ app.post('/api/lines', authMiddleware, requireRole('manager'), async (req, res) 
   }
 });
 
+app.get('/api/supervisors', authMiddleware, requireRole('manager'), async (_req, res) => {
+  const result = await dbQuery(
+    `SELECT
+       u.id,
+       u.name,
+       u.username,
+       u.is_active AS "isActive",
+       COALESCE(
+         ARRAY_REMOVE(ARRAY_AGG(a.line_id::TEXT), NULL),
+         ARRAY[]::TEXT[]
+       ) AS "assignedLineIds"
+     FROM users u
+     LEFT JOIN supervisor_line_assignments a ON a.supervisor_user_id = u.id
+     WHERE u.role = 'supervisor'
+     GROUP BY u.id
+     ORDER BY u.created_at DESC`
+  );
+  res.json({ supervisors: result.rows });
+});
+
+app.post('/api/supervisors', authMiddleware, requireRole('manager'), async (req, res) => {
+  const parsed = supervisorCreateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid supervisor payload' });
+  const username = parsed.data.username.trim().toLowerCase();
+  const name = parsed.data.name.trim();
+  const passwordHash = await hashPassword(parsed.data.password);
+  const assignedLineIds = parsed.data.assignedLineIds || [];
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const insertUser = await client.query(
+      `INSERT INTO users(name, username, password_hash, role, is_active)
+       VALUES ($1, $2, $3, 'supervisor', TRUE)
+       RETURNING id, name, username, is_active AS "isActive"`,
+      [name, username, passwordHash]
+    );
+    const supervisor = insertUser.rows[0];
+
+    if (assignedLineIds.length) {
+      await client.query(
+        `INSERT INTO supervisor_line_assignments(supervisor_user_id, line_id, assigned_by_user_id)
+         SELECT $1, line_id::UUID, $2
+         FROM UNNEST($3::TEXT[]) AS t(line_id)
+         ON CONFLICT (supervisor_user_id, line_id) DO NOTHING`,
+        [supervisor.id, req.user.id, assignedLineIds]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.status(201).json({
+      supervisor: {
+        ...supervisor,
+        assignedLineIds
+      }
+    });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (String(error?.message || '').includes('duplicate key')) {
+      return res.status(409).json({ error: 'Supervisor username already exists' });
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireRole('manager'), async (req, res) => {
+  const supervisorId = req.params.supervisorId;
+  if (!z.string().uuid().safeParse(supervisorId).success) return res.status(400).json({ error: 'Invalid supervisor id' });
+  const parsed = supervisorAssignmentsSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid assignments payload' });
+
+  const userCheck = await dbQuery(
+    `SELECT id FROM users WHERE id = $1 AND role = 'supervisor'`,
+    [supervisorId]
+  );
+  if (!userCheck.rowCount) return res.status(404).json({ error: 'Supervisor not found' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM supervisor_line_assignments WHERE supervisor_user_id = $1`,
+      [supervisorId]
+    );
+    if (parsed.data.assignedLineIds.length) {
+      await client.query(
+        `INSERT INTO supervisor_line_assignments(supervisor_user_id, line_id, assigned_by_user_id)
+         SELECT $1, line_id::UUID, $2
+         FROM UNNEST($3::TEXT[]) AS t(line_id)
+         ON CONFLICT (supervisor_user_id, line_id) DO NOTHING`,
+        [supervisorId, req.user.id, parsed.data.assignedLineIds]
+      );
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manager'), async (req, res) => {
+  const supervisorId = req.params.supervisorId;
+  if (!z.string().uuid().safeParse(supervisorId).success) return res.status(400).json({ error: 'Invalid supervisor id' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(
+      `DELETE FROM supervisor_line_assignments WHERE supervisor_user_id = $1`,
+      [supervisorId]
+    );
+    const updateUser = await client.query(
+      `UPDATE users
+       SET is_active = FALSE, updated_at = NOW()
+       WHERE id = $1 AND role = 'supervisor'
+       RETURNING id`,
+      [supervisorId]
+    );
+    if (!updateUser.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Supervisor not found' });
+    }
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
 app.get('/api/lines/:lineId', authMiddleware, async (req, res) => {
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
@@ -204,6 +384,135 @@ app.get('/api/lines/:lineId', authMiddleware, async (req, res) => {
   ]);
 
   return res.json({ line: lineResult.rows[0], stages: stages.rows, guides: guides.rows });
+});
+
+app.get('/api/lines/:lineId/logs', authMiddleware, async (req, res) => {
+  const lineId = req.params.lineId;
+  if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
+  if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
+
+  const [shiftRows, runRows, downtimeRows] = await Promise.all([
+    dbQuery(
+      `SELECT
+         date::TEXT AS date,
+         shift,
+         crew_on_shift AS "crewOnShift",
+         to_char(start_time, 'HH24:MI') AS "startTime",
+         COALESCE(to_char(break1_start, 'HH24:MI'), '') AS "break1Start",
+         COALESCE(to_char(break2_start, 'HH24:MI'), '') AS "break2Start",
+         COALESCE(to_char(break3_start, 'HH24:MI'), '') AS "break3Start",
+         to_char(finish_time, 'HH24:MI') AS "finishTime",
+         submitted_at AS "submittedAt"
+       FROM shift_logs
+       WHERE line_id = $1
+       ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      [lineId]
+    ),
+    dbQuery(
+      `SELECT
+         date::TEXT AS date,
+         shift,
+         product,
+         COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+         to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+         to_char(finish_time, 'HH24:MI') AS "finishTime",
+         units_produced AS "unitsProduced",
+         submitted_at AS "submittedAt"
+       FROM run_logs
+       WHERE line_id = $1
+       ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      [lineId]
+    ),
+    dbQuery(
+      `SELECT
+         date::TEXT AS date,
+         shift,
+         to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+         to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+         COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+         COALESCE(reason, '') AS reason,
+         submitted_at AS "submittedAt"
+       FROM downtime_logs
+       WHERE line_id = $1
+       ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      [lineId]
+    )
+  ]);
+
+  return res.json({
+    shiftRows: shiftRows.rows,
+    runRows: runRows.rows,
+    downtimeRows: downtimeRows.rows
+  });
+});
+
+app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), async (req, res) => {
+  const lineId = req.params.lineId;
+  if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
+  const parsed = lineModelSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid line model payload' });
+
+  const lineCheck = await dbQuery(`SELECT id FROM production_lines WHERE id = $1 AND is_active = TRUE`, [lineId]);
+  if (!lineCheck.rowCount) return res.status(404).json({ error: 'Line not found' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM line_stages WHERE line_id = $1`, [lineId]);
+    await client.query(`DELETE FROM line_layout_guides WHERE line_id = $1`, [lineId]);
+
+    for (const stage of parsed.data.stages) {
+      await client.query(
+        `INSERT INTO line_stages(
+           line_id, stage_order, stage_name, stage_type, day_crew, night_crew, max_throughput_per_crew, x, y, w, h
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+        [
+          lineId,
+          stage.stageOrder,
+          stage.stageName,
+          stage.stageType,
+          stage.dayCrew,
+          stage.nightCrew,
+          stage.maxThroughputPerCrew,
+          stage.x,
+          stage.y,
+          stage.w,
+          stage.h
+        ]
+      );
+    }
+
+    for (const guide of parsed.data.guides) {
+      await client.query(
+        `INSERT INTO line_layout_guides(line_id, guide_type, x, y, w, h, angle, src)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+        [lineId, guide.guideType, guide.x, guide.y, guide.w, guide.h, guide.angle, guide.src || null]
+      );
+    }
+
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+});
+
+app.delete('/api/lines/:lineId', authMiddleware, requireRole('manager'), async (req, res) => {
+  const lineId = req.params.lineId;
+  if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
+  const result = await dbQuery(
+    `UPDATE production_lines
+     SET is_active = FALSE, updated_at = NOW()
+     WHERE id = $1
+     RETURNING id`,
+    [lineId]
+  );
+  if (!result.rowCount) return res.status(404).json({ error: 'Line not found' });
+  await dbQuery(`DELETE FROM supervisor_line_assignments WHERE line_id = $1`, [lineId]);
+  return res.json({ ok: true });
 });
 
 app.post('/api/logs/shifts', authMiddleware, async (req, res) => {

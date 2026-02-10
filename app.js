@@ -1,7 +1,6 @@
 const STORAGE_KEY = "kebab-line-data-v2";
 const STORAGE_BACKUP_KEY = "kebab-line-data-v2-backup";
 const API_BASE_URL = `${
-  localStorage.getItem("production-line-api-base") ||
   window.PRODUCTION_LINE_API_BASE ||
   "http://localhost:4000"
 }`.replace(/\/+$/, "");
@@ -39,24 +38,11 @@ let appState = loadState();
 let state = appState.lines[appState.activeLineId];
 let visualiserDragMoved = false;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
+let lineModelSyncTimer = null;
 let managerBackendSession = {
-  backendToken: localStorage.getItem("production-line-manager-token") || "",
-  backendLineMap: (() => {
-    try {
-      const parsed = JSON.parse(localStorage.getItem("production-line-manager-line-map") || "{}");
-      return parsed && typeof parsed === "object" ? parsed : {};
-    } catch {
-      return {};
-    }
-  })(),
-  backendStageMap: (() => {
-    try {
-      const parsed = JSON.parse(localStorage.getItem("production-line-manager-stage-map") || "{}");
-      return parsed && typeof parsed === "object" ? parsed : {};
-    } catch {
-      return {};
-    }
-  })()
+  backendToken: "",
+  backendLineMap: {},
+  backendStageMap: {}
 };
 
 function clone(value) {
@@ -323,101 +309,36 @@ function downloadTextFile(fileName, text, mimeType = "text/plain;charset=utf-8")
 }
 
 function loadState() {
-  const saved = localStorage.getItem(STORAGE_KEY) || localStorage.getItem(STORAGE_BACKUP_KEY);
   const defaultLine = makeDefaultLine("line-1", "Production Line 1");
-
-  if (!saved) {
-    return {
-      activeView: "home",
-      appMode: "manager",
-      dashboardDate: todayISO(),
-      dashboardShift: "Day",
-      supervisorMobileMode: false,
-      supervisorMainTab: "supervisorVisual",
-      supervisorTab: "superShift",
-      supervisorSelectedLineId: defaultLine.id,
-      supervisorSelectedDate: todayISO(),
-      supervisorSelectedShift: "Day",
-      supervisorSession: null,
-      supervisors: defaultSupervisors({ [defaultLine.id]: defaultLine }),
-      activeLineId: defaultLine.id,
-      lines: { [defaultLine.id]: defaultLine }
-    };
-  }
-
-  try {
-    const parsed = JSON.parse(saved);
-    if (parsed?.lines && parsed?.activeLineId) {
-      const lines = {};
-      Object.entries(parsed.lines).forEach(([id, line]) => {
-        lines[id] = normalizeLine(id, line);
-      });
-      const supervisors = normalizeSupervisors(parsed.supervisors, lines);
-      const activeLineId = lines[parsed.activeLineId] ? parsed.activeLineId : Object.keys(lines)[0];
-      return {
-        activeView: parsed.activeView || "home",
-        appMode: parsed.appMode === "supervisor" ? "supervisor" : "manager",
-        dashboardDate: parsed.dashboardDate || todayISO(),
-        dashboardShift: parsed.dashboardShift === "Night" ? "Night" : "Day",
-        supervisorMobileMode: Boolean(parsed.supervisorMobileMode),
-        supervisorMainTab: ["supervisorVisual", "supervisorData"].includes(parsed.supervisorMainTab) ? parsed.supervisorMainTab : "supervisorVisual",
-        supervisorTab: ["superShift", "superRun", "superDown"].includes(parsed.supervisorTab) ? parsed.supervisorTab : "superShift",
-        supervisorSelectedLineId: parsed.supervisorSelectedLineId || activeLineId,
-        supervisorSelectedDate: parsed.supervisorSelectedDate || todayISO(),
-        supervisorSelectedShift: parsed.supervisorSelectedShift === "Night" ? "Night" : "Day",
-        supervisorSession: normalizeSupervisorSession(parsed.supervisorSession, supervisors, lines),
-        supervisors,
-        activeLineId,
-        lines
-      };
-    }
-
-    // Legacy single-line migration.
-    const migrated = normalizeLine("line-1", parsed);
-    return {
-      activeView: "home",
-      appMode: "manager",
-      dashboardDate: todayISO(),
-      dashboardShift: "Day",
-      supervisorMobileMode: false,
-      supervisorMainTab: "supervisorVisual",
-      supervisorTab: "superShift",
-      supervisorSelectedLineId: migrated.id,
-      supervisorSelectedDate: todayISO(),
-      supervisorSelectedShift: "Day",
-      supervisorSession: null,
-      supervisors: defaultSupervisors({ [migrated.id]: migrated }),
-      activeLineId: migrated.id,
-      lines: { [migrated.id]: migrated }
-    };
-  } catch {
-    return {
-      activeView: "home",
-      appMode: "manager",
-      dashboardDate: todayISO(),
-      dashboardShift: "Day",
-      supervisorMobileMode: false,
-      supervisorMainTab: "supervisorVisual",
-      supervisorTab: "superShift",
-      supervisorSelectedLineId: defaultLine.id,
-      supervisorSelectedDate: todayISO(),
-      supervisorSelectedShift: "Day",
-      supervisorSession: null,
-      supervisors: defaultSupervisors({ [defaultLine.id]: defaultLine }),
-      activeLineId: defaultLine.id,
-      lines: { [defaultLine.id]: defaultLine }
-    };
-  }
+  return {
+    activeView: "home",
+    appMode: "manager",
+    dashboardDate: todayISO(),
+    dashboardShift: "Day",
+    supervisorMobileMode: false,
+    supervisorMainTab: "supervisorVisual",
+    supervisorTab: "superShift",
+    supervisorSelectedLineId: defaultLine.id,
+    supervisorSelectedDate: todayISO(),
+    supervisorSelectedShift: "Day",
+    supervisorSession: null,
+    supervisors: [],
+    activeLineId: defaultLine.id,
+    lines: { [defaultLine.id]: defaultLine }
+  };
 }
 
 function saveState() {
   if (state && state.id) {
     appState.lines[state.id] = state;
     appState.activeLineId = state.id;
+    if (UUID_RE.test(String(state.id))) {
+      if (lineModelSyncTimer) clearTimeout(lineModelSyncTimer);
+      lineModelSyncTimer = setTimeout(() => {
+        saveLineModelToBackend(state.id);
+      }, 250);
+    }
   }
-  const payload = JSON.stringify(appState);
-  localStorage.setItem(STORAGE_BACKUP_KEY, payload);
-  localStorage.setItem(STORAGE_KEY, payload);
 }
 
 function makeDefaultLine(id, name) {
@@ -658,9 +579,7 @@ async function ensureBackendLineId(localLineId, session) {
 }
 
 function persistManagerBackendSession() {
-  localStorage.setItem("production-line-manager-token", managerBackendSession.backendToken || "");
-  localStorage.setItem("production-line-manager-line-map", JSON.stringify(managerBackendSession.backendLineMap || {}));
-  localStorage.setItem("production-line-manager-stage-map", JSON.stringify(managerBackendSession.backendStageMap || {}));
+  // No browser persistence for hosted data/session state.
 }
 
 async function ensureManagerBackendSession() {
@@ -674,6 +593,135 @@ async function ensureManagerBackendSession() {
   managerBackendSession.backendToken = loginPayload.token;
   persistManagerBackendSession();
   return managerBackendSession;
+}
+
+function fromBackendStageType(stageType) {
+  if (stageType === "transfer") return { group: "prep", kind: "transfer" };
+  if (stageType === "prep") return { group: "prep", kind: undefined };
+  return { group: "main", kind: undefined };
+}
+
+function toBackendStageType(stage) {
+  if (stage?.kind === "transfer") return "transfer";
+  if (stage?.group === "prep") return "prep";
+  return "main";
+}
+
+function makeLineFromBackend(lineSummary, lineDetail, logs) {
+  const lineId = lineSummary.id;
+  const line = makeDefaultLine(lineId, lineSummary.name || "Production Line");
+  line.secretKey = lineSummary.secretKey || line.secretKey;
+  const backendStages = Array.isArray(lineDetail?.stages) ? lineDetail.stages : [];
+  line.stages = backendStages.length
+    ? backendStages.map((stage, index) => {
+        const mappedType = fromBackendStageType(stage.stageType);
+        return {
+          id: stage.id,
+          name: `${index + 1}. ${String(stage.stageName || "Stage").replace(/^\s*\d+\.\s*/, "").trim()}`,
+          crew: Math.max(0, num(stage.dayCrew)),
+          group: mappedType.group,
+          kind: mappedType.kind,
+          match: String(stage.stageName || "")
+            .toLowerCase()
+            .split(/[^a-z0-9]+/)
+            .filter(Boolean),
+          x: num(stage.x),
+          y: num(stage.y),
+          w: num(stage.w) || (mappedType.kind === "transfer" ? 7.5 : 9.5),
+          h: num(stage.h) || (mappedType.kind === "transfer" ? 10 : 15)
+        };
+      })
+    : clone(STAGES);
+
+  line.crewsByShift = { Day: {}, Night: {} };
+  line.stageSettings = {};
+  line.stages.forEach((stage) => {
+    const bStage = backendStages.find((item) => item.id === stage.id);
+    line.crewsByShift.Day[stage.id] = { crew: Math.max(0, num(bStage?.dayCrew ?? stage.crew)) };
+    line.crewsByShift.Night[stage.id] = { crew: Math.max(0, num(bStage?.nightCrew ?? stage.crew)) };
+    line.stageSettings[stage.id] = { maxThroughput: Math.max(0, num(bStage?.maxThroughputPerCrew ?? 2)) };
+  });
+
+  line.flowGuides = Array.isArray(lineDetail?.guides)
+    ? lineDetail.guides.map((guide) => ({
+        id: guide.id,
+        type: guide.guideType === "arrow" ? "arrow" : guide.guideType === "shape" ? "shape" : "line",
+        x: num(guide.x),
+        y: num(guide.y),
+        w: Math.max(2, num(guide.w)),
+        h: Math.max(1, num(guide.h)),
+        angle: num(guide.angle),
+        src: guide.src || ""
+      }))
+    : [];
+
+  line.shiftRows = Array.isArray(logs?.shiftRows) ? logs.shiftRows : [];
+  line.runRows = Array.isArray(logs?.runRows) ? logs.runRows : [];
+  line.downtimeRows = Array.isArray(logs?.downtimeRows) ? logs.downtimeRows : [];
+  line.auditRows = [];
+  line.supervisorLogs = [];
+  line.selectedStageId = line.stages[0]?.id || "";
+  return line;
+}
+
+async function refreshHostedState() {
+  try {
+    const managerSession = await ensureManagerBackendSession();
+    const linesPayload = await apiRequest("/api/lines", { token: managerSession.backendToken });
+    const lineSummaries = Array.isArray(linesPayload?.lines) ? linesPayload.lines : [];
+    const hostedLines = {};
+    managerSession.backendLineMap = {};
+
+    for (const lineSummary of lineSummaries) {
+      const lineId = lineSummary.id;
+      if (!lineId) continue;
+      const [lineDetail, logs] = await Promise.all([
+        apiRequest(`/api/lines/${lineId}`, { token: managerSession.backendToken }),
+        apiRequest(`/api/lines/${lineId}/logs`, { token: managerSession.backendToken })
+      ]);
+      const line = makeLineFromBackend(lineSummary, lineDetail, logs);
+      hostedLines[line.id] = line;
+      managerSession.backendLineMap[line.id] = line.id;
+      (line.stages || []).forEach((stage) => {
+        managerSession.backendStageMap[`${line.id}::${stage.id}`] = stage.id;
+      });
+    }
+
+    if (!Object.keys(hostedLines).length) {
+      const fallback = makeDefaultLine("line-1", "Production Line 1");
+      hostedLines[fallback.id] = fallback;
+    }
+
+    appState.lines = hostedLines;
+    const ids = Object.keys(hostedLines);
+    appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0];
+    state = appState.lines[appState.activeLineId];
+
+    const supervisorsPayload = await apiRequest("/api/supervisors", { token: managerSession.backendToken });
+    const supervisors = Array.isArray(supervisorsPayload?.supervisors) ? supervisorsPayload.supervisors : [];
+    appState.supervisors = supervisors.map((sup) => ({
+      id: sup.id,
+      name: sup.name,
+      username: sup.username,
+      password: "",
+      assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => hostedLines[lineId])
+    }));
+
+    if (appState.supervisorSession) {
+      const current = appState.supervisors.find((sup) => sup.username === appState.supervisorSession.username);
+      appState.supervisorSession = current
+        ? {
+            ...appState.supervisorSession,
+            assignedLineIds: current.assignedLineIds.slice()
+          }
+        : null;
+    }
+
+    saveState();
+    renderAll();
+  } catch (error) {
+    console.warn("Hosted state refresh failed:", error);
+  }
 }
 
 function stageNameCore(name) {
@@ -761,6 +809,60 @@ async function syncManagerDowntimeLog(payload) {
   } catch (error) {
     console.warn("Backend manager downtime sync failed:", error);
   }
+}
+
+async function saveLineModelToBackend(lineId) {
+  try {
+    const session = await ensureManagerBackendSession();
+    const line = appState.lines[lineId];
+    if (!line) return;
+    const stages = (line.stages || []).map((stage, index) => ({
+      stageOrder: index + 1,
+      stageName: stageBaseName(stage.name) || "Stage",
+      stageType: toBackendStageType(stage),
+      dayCrew: Math.max(0, num(line?.crewsByShift?.Day?.[stage.id]?.crew ?? stage.crew)),
+      nightCrew: Math.max(0, num(line?.crewsByShift?.Night?.[stage.id]?.crew ?? stage.crew)),
+      maxThroughputPerCrew: Math.max(0, num(line?.stageSettings?.[stage.id]?.maxThroughput)),
+      x: num(stage.x),
+      y: num(stage.y),
+      w: Math.max(2, num(stage.w)),
+      h: Math.max(1, num(stage.h))
+    }));
+    const guides = normalizeFlowGuides(line.flowGuides).map((guide) => ({
+      guideType: guide.type === "arrow" ? "arrow" : guide.type === "shape" ? "shape" : "line",
+      x: num(guide.x),
+      y: num(guide.y),
+      w: num(guide.w),
+      h: num(guide.h),
+      angle: num(guide.angle),
+      src: guide.type === "shape" ? guide.src || "" : ""
+    }));
+    await apiRequest(`/api/lines/${lineId}/model`, {
+      method: "PUT",
+      token: session.backendToken,
+      body: { stages, guides }
+    });
+  } catch (error) {
+    console.warn("Backend line model sync failed:", error);
+  }
+}
+
+async function createLineOnBackend(lineName, secretKey, lineModel) {
+  const session = await ensureManagerBackendSession();
+  const created = await apiRequest("/api/lines", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      name: lineName,
+      secretKey
+    }
+  });
+  const lineId = created?.line?.id;
+  if (!lineId) throw new Error("Backend line create failed");
+  appState.lines[lineId] = lineModel;
+  lineModel.id = lineId;
+  await saveLineModelToBackend(lineId);
+  return { lineId, created };
 }
 
 async function syncSupervisorShiftLog(session, payload) {
@@ -1295,7 +1397,8 @@ function bindHome() {
     }
   };
 
-  const openManageSupervisorsModal = () => {
+  const openManageSupervisorsModal = async () => {
+    await refreshHostedState();
     renderSupervisorManagerList();
     manageSupervisorsModal.classList.add("open");
     manageSupervisorsModal.setAttribute("aria-hidden", "false");
@@ -1306,7 +1409,8 @@ function bindHome() {
     manageSupervisorsModal.setAttribute("aria-hidden", "true");
   };
 
-  const openAddSupervisorModal = () => {
+  const openAddSupervisorModal = async () => {
+    await refreshHostedState();
     addSupervisorForm.reset();
     renderSupervisorLineChecklist(Object.keys(appState.lines));
     addSupervisorModal.classList.add("open");
@@ -1385,54 +1489,29 @@ function bindHome() {
     event.preventDefault();
     const username = String(document.getElementById("supervisorUser").value || "").trim().toLowerCase();
     const password = String(document.getElementById("supervisorPass").value || "");
-    const sup = supervisorByUsername(username);
-    let loggedInSession = null;
-
     try {
       const loginPayload = await apiRequest("/api/auth/login", {
         method: "POST",
         body: { username, password }
       });
-      if (loginPayload?.user?.role === "supervisor" && loginPayload?.token) {
-        const linesPayload = await apiRequest("/api/lines", { token: loginPayload.token });
-        const backendLines = Array.isArray(linesPayload?.lines) ? linesPayload.lines : [];
-        const backendLineMap = {};
-        const assignedLocalIds = [];
-        backendLines.forEach((line) => {
-          if (!line?.id || !line?.name) return;
-          const localId = findLocalLineIdByName(line.name);
-          if (!localId) return;
-          backendLineMap[localId] = line.id;
-          assignedLocalIds.push(localId);
-        });
-        const fallbackLocal = sup ? sup.assignedLineIds.filter((id) => appState.lines[id]) : [];
-        loggedInSession = {
-          username: sup?.username || username,
-          assignedLineIds: assignedLocalIds.length ? assignedLocalIds : fallbackLocal,
-          backendToken: loginPayload.token,
-          backendLineMap
-        };
-      }
-    } catch {
-      // Keep local supervisor login fallback for migration period.
-    }
-
-    if (!loggedInSession) {
-      if (!username || !sup || sup.password !== password) {
+      if (loginPayload?.user?.role !== "supervisor" || !loginPayload?.token) {
         alert("Invalid supervisor credentials.");
         return;
       }
-      loggedInSession = {
-        username: sup.username,
-        assignedLineIds: sup.assignedLineIds.filter((id) => appState.lines[id]),
-        backendToken: "",
-        backendLineMap: {}
+      const linesPayload = await apiRequest("/api/lines", { token: loginPayload.token });
+      const backendLines = Array.isArray(linesPayload?.lines) ? linesPayload.lines : [];
+      appState.supervisorSession = {
+        username: loginPayload.user.username,
+        assignedLineIds: backendLines.map((line) => line.id).filter((lineId) => appState.lines[lineId]),
+        backendToken: loginPayload.token,
+        backendLineMap: Object.fromEntries(backendLines.map((line) => [line.id, line.id]))
       };
+      saveState();
+      await refreshHostedState();
+      renderAll();
+    } catch {
+      alert("Invalid supervisor credentials.");
     }
-
-    appState.supervisorSession = loggedInSession;
-    saveState();
-    renderAll();
   });
 
   supervisorLogoutBtn.addEventListener("click", () => {
@@ -1514,7 +1593,7 @@ function bindHome() {
     if (event.target === addSupervisorModal) closeAddSupervisorModal();
   });
 
-  supervisorManagerList.addEventListener("click", (event) => {
+  supervisorManagerList.addEventListener("click", async (event) => {
     const saveBtn = event.target.closest("[data-supervisor-save]");
     if (saveBtn) {
       const supId = saveBtn.getAttribute("data-supervisor-save");
@@ -1529,6 +1608,18 @@ function bindHome() {
       removed.forEach((lineId) => addAudit(appState.lines[lineId], "UNASSIGN_SUPERVISOR", `${sup.name} removed from line`));
       if (appState.supervisorSession?.username === sup.username) {
         appState.supervisorSession.assignedLineIds = sup.assignedLineIds.slice();
+      }
+      try {
+        const session = await ensureManagerBackendSession();
+        await apiRequest(`/api/supervisors/${sup.id}/assignments`, {
+          method: "PATCH",
+          token: session.backendToken,
+          body: {
+            assignedLineIds: sup.assignedLineIds
+          }
+        });
+      } catch (error) {
+        console.warn("Supervisor assignment sync failed:", error);
       }
       saveState();
       renderHome();
@@ -1549,13 +1640,22 @@ function bindHome() {
       });
       appState.supervisors = (appState.supervisors || []).filter((item) => item.id !== supId);
       if (appState.supervisorSession?.username === sup.username) appState.supervisorSession = null;
+      try {
+        const session = await ensureManagerBackendSession();
+        await apiRequest(`/api/supervisors/${supId}`, {
+          method: "DELETE",
+          token: session.backendToken
+        });
+      } catch (error) {
+        console.warn("Supervisor delete sync failed:", error);
+      }
       saveState();
       renderHome();
       openManageSupervisorsModal();
     }
   });
 
-  addSupervisorForm.addEventListener("submit", (event) => {
+  addSupervisorForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const name = String(document.getElementById("newSupervisorName").value || "").trim();
     const username = String(document.getElementById("newSupervisorUsername").value || "").trim().toLowerCase();
@@ -1568,17 +1668,35 @@ function bindHome() {
       alert("Username already exists.");
       return;
     }
+    let createdId = `sup-${Date.now()}`;
+    try {
+      const session = await ensureManagerBackendSession();
+      const payload = await apiRequest("/api/supervisors", {
+        method: "POST",
+        token: session.backendToken,
+        body: {
+          name,
+          username,
+          password,
+          assignedLineIds
+        }
+      });
+      createdId = payload?.supervisor?.id || createdId;
+    } catch (error) {
+      console.warn("Supervisor create sync failed:", error);
+    }
     appState.supervisors = Array.isArray(appState.supervisors) ? appState.supervisors : [];
     appState.supervisors.push({
-      id: `sup-${Date.now()}`,
+      id: createdId,
       name,
       username,
-      password,
+      password: "",
       assignedLineIds
     });
     assignedLineIds.forEach((lineId) => addAudit(appState.lines[lineId], "CREATE_SUPERVISOR", `Supervisor ${name} created and assigned`));
     saveState();
     closeAddSupervisorModal();
+    await refreshHostedState();
     renderAll();
   });
 
@@ -1901,7 +2019,7 @@ function bindHome() {
     dragState = null;
   });
 
-  createBuilderLineBtn.addEventListener("click", () => {
+  createBuilderLineBtn.addEventListener("click", async () => {
     if (!builderDraft) {
       alert("Builder is not ready. Please close and reopen the builder.");
       return;
@@ -1909,21 +2027,22 @@ function bindHome() {
 
     try {
       const lineName = String(builderDraft.lineName || "").trim() || nextAutoLineName();
-      const id = `line-${Date.now()}`;
       const builtStages = makeStagesFromBuilder(builderDraft.stages || []);
-      const line = makeDefaultLine(id, lineName);
+      const line = makeDefaultLine(`line-${Date.now()}`, lineName);
       line.stages = builtStages.length ? builtStages : clone(STAGES);
       line.crewsByShift = makeCrewByShiftFromStages(line.stages);
       line.stageSettings = makeSettingsFromStages(line.stages);
       line.selectedStageId = line.stages[0]?.id || "s1";
       addAudit(line, "CREATE_LINE", `Line created with ${line.stages.length} stages`);
-      appState.lines[id] = line;
-      appState.activeLineId = id;
+      const { lineId, created } = await createLineOnBackend(lineName, line.secretKey, line);
+      line.secretKey = created?.line?.secretKey || line.secretKey;
+      appState.activeLineId = lineId;
       appState.activeView = "line";
       state = line;
       saveState();
       alert(`Line created.\nDelete key: ${line.secretKey}\nSave this key to delete the line later.`);
       closeBuilderModal();
+      await refreshHostedState();
       renderAll();
     } catch (error) {
       console.error(error);
@@ -1931,7 +2050,7 @@ function bindHome() {
     }
   });
 
-  cards.addEventListener("click", (event) => {
+  cards.addEventListener("click", async (event) => {
     const deleteBtn = event.target.closest("[data-delete-line]");
     if (deleteBtn) {
       const id = deleteBtn.getAttribute("data-delete-line");
@@ -1943,6 +2062,15 @@ function bindHome() {
         return;
       }
       addAudit(line, "DELETE_LINE", "Line deleted");
+      try {
+        const session = await ensureManagerBackendSession();
+        await apiRequest(`/api/lines/${id}`, {
+          method: "DELETE",
+          token: session.backendToken
+        });
+      } catch (error) {
+        console.warn("Line delete sync failed:", error);
+      }
       delete appState.lines[id];
       appState.supervisors = (appState.supervisors || []).map((sup) => ({
         ...sup,
@@ -1959,6 +2087,7 @@ function bindHome() {
       state = appState.lines[appState.activeLineId];
       appState.activeView = "home";
       saveState();
+      await refreshHostedState();
       renderAll();
       return;
     }
@@ -3525,3 +3654,4 @@ bindStageSettingsModal();
 bindForms();
 bindDataControls();
 renderAll();
+refreshHostedState();
