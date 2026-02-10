@@ -1,0 +1,523 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Kebab Line Visualiser</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Sora:wght@400;600;700&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="styles.css" />
+    <script>
+      window.PRODUCTION_LINE_API_BASE =
+        window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
+          ? "http://localhost:4000"
+          : "";
+    </script>
+  </head>
+  <body>
+    <div id="homeView" class="app-shell dashboard-page">
+      <div class="dashboard-shell">
+        <main class="dashboard-main">
+          <header class="dashboard-topbar">
+            <div class="home-title-block">
+              <h1 id="homeTitle">Production Line Dashboard</h1>
+              <p>Select a production line or build a new one</p>
+            </div>
+            <div class="topbar-right">
+              <div class="user-chip">
+                <span class="avatar-dot">M</span>
+                <div>
+                  <strong>Manager</strong>
+                  <span>production@plant.local</span>
+                </div>
+              </div>
+              <button id="supervisorLogout" class="ghost-btn home-btn hidden" type="button">Logout</button>
+              <button id="supervisorMobileMode" class="ghost-btn hidden" type="button">Mobile Mode</button>
+              <div class="shift-toggle" role="group" aria-label="App mode">
+                <button id="modeManager" type="button" class="shift-option">Manager App</button>
+                <button id="modeSupervisor" type="button" class="shift-option">Supervisor App</button>
+              </div>
+            </div>
+          </header>
+
+          <div id="managerHome" class="dashboard-grid">
+            <section class="dash-card analytics-card">
+              <h2>Multi-Line Dashboard</h2>
+              <div class="dashboard-toolbar">
+                <div class="dashboard-filter-group">
+                  <label>
+                    Date
+                    <input id="dashboardDate" type="date" />
+                  </label>
+                  <label>
+                    Shift
+                    <div id="dashboardShiftToggle" class="shift-toggle" role="group" aria-label="Dashboard shift selector">
+                      <button type="button" class="shift-option" data-dash-shift="Day">Day</button>
+                      <button type="button" class="shift-option" data-dash-shift="Night">Night</button>
+                    </div>
+                  </label>
+                </div>
+                <button id="exportDashboardCsv" class="ghost-btn" type="button">Export Dashboard CSV</button>
+              </div>
+              <div class="table-wrap dashboard-table-wrap">
+                <table id="dashboardTable"></table>
+              </div>
+            </section>
+
+            <section class="dash-card project-list-card">
+              <div class="dash-card-head">
+                <h2>Production Lines</h2>
+              </div>
+              <div id="lineCards" class="line-cards"></div>
+            </section>
+
+            <section class="dash-card manage-super-card">
+              <h2>Manage Supervisors</h2>
+              <div class="action-row">
+                <button id="manageSupervisorsBtn" type="button">Manage Supervisors</button>
+                <button id="addSupervisorBtn" class="ghost-btn" type="button">Add Supervisor</button>
+              </div>
+              <p class="muted">Assign lines, update access, and remove supervisor accounts.</p>
+            </section>
+
+            <section class="dash-card add-line-card">
+              <h2>Line Builder</h2>
+              <button id="openBuilder" type="button">+ Add Line</button>
+              <p class="muted">Use the popup drag-and-drop builder to define stages and layout.</p>
+            </section>
+          </div>
+
+          <div id="supervisorHome" class="hidden">
+            <section id="supervisorLoginSection" class="panel">
+              <h2>Supervisor Login</h2>
+              <form id="supervisorLoginForm" class="form-grid">
+                <input id="supervisorUser" placeholder="Username" required />
+                <input id="supervisorPass" type="password" placeholder="Password" required />
+                <button type="submit">Log In</button>
+              </form>
+              <p class="muted">Demo credentials: supervisor / supervisor</p>
+            </section>
+
+            <section id="supervisorAppSection" class="panel hidden">
+              <div class="action-row">
+                <h2 id="supervisorWelcome">Supervisor</h2>
+              </div>
+              <div class="tabs" role="tablist" aria-label="Supervisor app tabs">
+                <button class="tab-btn supervisor-main-tab-btn active" data-super-main-tab="supervisorVisual" type="button">Visualisation</button>
+                <button class="tab-btn supervisor-main-tab-btn" data-super-main-tab="supervisorData" type="button">Data Entry</button>
+              </div>
+
+            <section id="supervisorVisual" class="supervisor-main-panel active">
+              <div class="control-row">
+                <button id="svPrevDay" class="ghost-btn" type="button">Previous Day</button>
+                <label>
+                  Line
+                  <select id="supervisorLineSelect" required></select>
+                </label>
+                <label>
+                  Date
+                  <input id="svSelectedDate" type="date" />
+                </label>
+                <label>
+                  Shift
+                  <div id="svShiftToggle" class="shift-toggle" role="group" aria-label="Supervisor shift selector">
+                    <button type="button" class="shift-option" data-sv-shift="Day">Day</button>
+                    <button type="button" class="shift-option" data-sv-shift="Night">Night</button>
+                  </div>
+                </label>
+                <button id="svNextDay" class="ghost-btn" type="button">Next Day</button>
+              </div>
+              <div class="kpi-grid">
+                <article>
+                  <h3>Total Units</h3>
+                  <p id="svKpiUnits">0</p>
+                </article>
+                <article>
+                  <h3>Total Downtime</h3>
+                  <p id="svKpiDowntime">0 min</p>
+                </article>
+                <article>
+                  <h3>Line Utilisation</h3>
+                  <p id="svKpiUtilisation">0%</p>
+                </article>
+                <article>
+                  <h3>Net Run Rate</h3>
+                  <p id="svKpiRunRate">0 u/min</p>
+                </article>
+              </div>
+              <section class="line-map" id="supervisorLineMap" aria-label="Supervisor production line map"></section>
+            </section>
+
+            <section id="supervisorData" class="supervisor-main-panel">
+              <div class="data-subtabs" role="tablist" aria-label="Supervisor logs">
+                <button class="data-subtab-btn active" data-supervisor-tab="superShift" type="button">Log Shift</button>
+                <button class="data-subtab-btn" data-supervisor-tab="superRun" type="button">Log Production Run</button>
+                <button class="data-subtab-btn" data-supervisor-tab="superDown" type="button">Log Downtime</button>
+              </div>
+
+              <section id="superShift" class="data-section active">
+                <form id="supervisorShiftForm" class="form-grid">
+                  <input id="superShiftDate" type="date" required />
+                  <select id="superShiftShift" required>
+                    <option value="Day">Day</option>
+                    <option value="Night">Night</option>
+                  </select>
+                  <input id="superShiftCrew" type="number" min="0" step="1" placeholder="Crew On Shift" required />
+                  <input id="superShiftStart" placeholder="Start Time (HH:MM)" />
+                  <input id="superShiftBreak1" placeholder="Break 1 Start (HH:MM)" />
+                  <input id="superShiftBreak2" placeholder="Break 2 Start (HH:MM)" />
+                  <input id="superShiftBreak3" placeholder="Break 3 Start (HH:MM)" />
+                  <input id="superShiftFinish" placeholder="Finish Time (HH:MM)" />
+                  <button type="submit">Log Shift</button>
+                </form>
+              </section>
+
+              <section id="superRun" class="data-section">
+                <form id="supervisorRunForm" class="form-grid">
+                  <input id="superRunDate" type="date" required />
+                  <select id="superRunShift" required>
+                    <option value="Day">Day</option>
+                    <option value="Night">Night</option>
+                  </select>
+                  <input id="superRunProduct" placeholder="Product" required />
+                  <input id="superRunSetupStart" placeholder="Set Up Start Time (HH:MM)" />
+                  <input id="superRunProdStart" placeholder="Production Start Time (HH:MM)" />
+                  <input id="superRunFinish" placeholder="Finish Time (HH:MM)" />
+                  <input id="superRunUnits" type="number" min="0" step="1" placeholder="Units Produced" />
+                  <button type="submit">Log Production Run</button>
+                </form>
+              </section>
+
+              <section id="superDown" class="data-section">
+                <form id="supervisorDownForm" class="form-grid">
+                  <input id="superDownDate" type="date" required />
+                  <select id="superDownShift" required>
+                    <option value="Day">Day</option>
+                    <option value="Night">Night</option>
+                  </select>
+                  <input id="superDownStart" placeholder="Downtime Start (HH:MM)" />
+                  <input id="superDownFinish" placeholder="Downtime Finish (HH:MM)" />
+                  <select id="superDownEquipment" required></select>
+                  <input id="superDownReason" placeholder="Reason" />
+                  <button type="submit">Log Downtime</button>
+                </form>
+              </section>
+              <div id="supervisorEntryList" class="table-wrap"></div>
+              <div id="supervisorEntryCards" class="entry-cards hidden"></div>
+            </section>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <div id="manageSupervisorsModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="manageSupervisorsTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="manageSupervisorsTitle">Manage Supervisors</h2>
+            <p class="muted">Assign or remove line access and delete supervisors.</p>
+          </div>
+          <button id="closeManageSupervisorsModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <div id="supervisorManagerList" class="data-layout"></div>
+      </div>
+    </div>
+
+    <div id="addSupervisorModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="addSupervisorTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="addSupervisorTitle">Add Supervisor</h2>
+            <p class="muted">Create a supervisor account and assign production lines.</p>
+          </div>
+          <button id="closeAddSupervisorModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="addSupervisorForm" class="form-grid">
+          <input id="newSupervisorName" placeholder="Name" required />
+          <input id="newSupervisorUsername" placeholder="Username" required />
+          <input id="newSupervisorPassword" type="password" placeholder="Password" required />
+          <div id="newSupervisorLines" class="supervisor-line-grid"></div>
+          <button type="submit">Create Supervisor</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="lineWorkspace" class="app-shell hidden">
+      <header class="topbar">
+        <button id="goHome" class="ghost-btn home-btn" type="button" aria-label="Home">Home</button>
+        <div>
+          <h1 id="appTitle">Kebab Packing Line</h1>
+          <p>Shift-based production visualiser</p>
+        </div>
+        <div class="tabs" role="tablist" aria-label="Primary tabs">
+          <button class="tab-btn active" data-tab="visualiser" role="tab" aria-selected="true">Visualiser</button>
+          <button class="tab-btn" data-tab="data" role="tab" aria-selected="false">Data Input</button>
+          <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false">Line Settings</button>
+        </div>
+      </header>
+
+      <main>
+        <section id="visualiser" class="tab-panel active" role="tabpanel">
+          <div class="control-row">
+            <button id="prevShift" class="ghost-btn" type="button">Previous Day</button>
+            <label>
+              Date
+              <input id="selectedDate" type="date" />
+            </label>
+            <label>
+              Shift
+              <div id="selectedShiftToggle" class="shift-toggle" role="group" aria-label="Shift selector">
+                <button type="button" class="shift-option" data-shift="Day">Day</button>
+                <button type="button" class="shift-option" data-shift="Night">Night</button>
+              </div>
+            </label>
+            <button id="nextShift" class="ghost-btn" type="button">Next Day</button>
+          </div>
+
+          <div class="kpi-grid">
+            <article>
+              <h3>Total Units</h3>
+              <p id="kpiUnits">0</p>
+            </article>
+            <article>
+              <h3>Total Downtime</h3>
+              <p id="kpiDowntime">0 min</p>
+            </article>
+            <article>
+              <h3>Line Utilisation</h3>
+              <p id="kpiUtilisation">0%</p>
+            </article>
+            <article>
+              <h3>Net Run Rate</h3>
+              <p id="kpiRunRate">0 u/min</p>
+            </article>
+          </div>
+
+          <section class="line-map" id="lineMap" aria-label="Production line map"></section>
+          <div class="layout-tool-row">
+            <button id="toggleLayoutEdit" class="ghost-btn" type="button">Edit Layout</button>
+            <button id="addFlowLine" class="ghost-btn hidden" type="button">Add Line</button>
+            <button id="addFlowArrow" class="ghost-btn hidden" type="button">Add Arrow</button>
+            <button id="uploadFlowShapeBtn" class="ghost-btn hidden" type="button">Upload Shape</button>
+            <input id="uploadFlowShapeInput" type="file" accept="image/*" class="hidden" />
+          </div>
+        </section>
+
+        <section id="data" class="tab-panel" role="tabpanel">
+          <div class="data-layout">
+            <div class="data-subtabs" role="tablist" aria-label="Data sections">
+              <button class="data-subtab-btn active" data-data-tab="dataShift" type="button">Shift Tracking</button>
+              <button class="data-subtab-btn" data-data-tab="dataRun" type="button">Product Runs</button>
+              <button class="data-subtab-btn" data-data-tab="dataDown" type="button">Downtime</button>
+              <button class="data-subtab-btn" data-data-tab="dataControls" type="button">Controls</button>
+            </div>
+
+            <section id="dataShift" class="panel data-section active">
+              <h2>Shift Tracking</h2>
+              <form id="shiftForm" class="form-grid">
+                <input name="date" type="date" required />
+                <select name="shift" required>
+                  <option value="Day">Day</option>
+                  <option value="Night">Night</option>
+                </select>
+                <input name="crewOnShift" type="number" min="0" step="1" placeholder="Crew On Shift" required />
+                <input name="startTime" placeholder="Start Time" />
+                <input name="break1Start" placeholder="Break 1 Start" />
+                <input name="break2Start" placeholder="Break 2 Start" />
+                <input name="break3Start" placeholder="Break 3 Start" />
+                <input name="finishTime" placeholder="Finish Time" />
+                <button type="submit">Add Shift Row</button>
+              </form>
+              <div class="table-wrap"><table id="shiftTable"></table></div>
+            </section>
+
+            <section id="dataRun" class="panel data-section">
+              <h2>Product Run Tracking</h2>
+              <form id="runForm" class="form-grid">
+                <input name="date" type="date" required />
+                <select name="shift" required>
+                  <option value="Day">Day</option>
+                  <option value="Night">Night</option>
+                </select>
+                <input name="product" placeholder="Product" required />
+                <input name="setUpStartTime" placeholder="Set Up Start Time" />
+                <input name="productionStartTime" placeholder="Production Start Time" />
+                <input name="finishTime" placeholder="Finish Time" />
+                <input name="unitsProduced" type="number" step="1" placeholder="Units Produced" />
+                <button type="submit">Add Product Row</button>
+              </form>
+              <div class="table-wrap"><table id="runTable"></table></div>
+            </section>
+
+            <section id="dataDown" class="panel data-section">
+              <h2>Downtime Tracking</h2>
+              <form id="downtimeForm" class="form-grid">
+                <input name="date" type="date" required />
+                <select name="shift" required>
+                  <option value="Day">Day</option>
+                  <option value="Night">Night</option>
+                </select>
+                <input name="downtimeStart" placeholder="Downtime Start" />
+                <input name="downtimeFinish" placeholder="Downtime Finish" />
+                <select name="equipment" id="downtimeEquipment" required></select>
+                <input name="reason" placeholder="Reason" />
+                <button type="submit">Add Downtime Row</button>
+              </form>
+              <div class="table-wrap"><table id="downtimeTable"></table></div>
+            </section>
+
+            <section id="dataControls" class="panel data-section">
+              <h2>Data Controls</h2>
+              <div class="action-row">
+                <button id="loadSampleData" type="button">Load Sample Data</button>
+                <button id="exportData" type="button">Export JSON</button>
+                <button id="exportLineCsv" class="ghost-btn" type="button">Export CSV Report</button>
+                <label class="import-label">
+                  Import JSON
+                  <input id="importData" type="file" accept="application/json" />
+                </label>
+                <button id="clearData" class="danger" type="button">Clear All</button>
+              </div>
+              <div id="auditTrail" class="table-wrap"></div>
+            </section>
+          </div>
+        </section>
+
+        <section id="settings" class="tab-panel" role="tabpanel">
+          <div class="data-layout">
+            <section class="panel">
+              <h2>Stage Crew Settings</h2>
+              <div class="crew-toggle-wrap">
+                <span class="muted">Crew Shift</span>
+                <div class="shift-toggle" role="group" aria-label="Crew shift selector">
+                  <button type="button" class="shift-option" data-shift="Day">Day</button>
+                  <button type="button" class="shift-option" data-shift="Night">Night</button>
+                </div>
+              </div>
+              <p class="muted" id="crewShiftNote">Crew values for Day shift.</p>
+              <form id="crewForm" class="crew-grid"></form>
+            </section>
+
+            <section class="panel">
+              <h2>Stage Max Throughput</h2>
+              <p class="muted">Units/min per crew member. Total stage max = (per-crew max) x (crew count).</p>
+              <form id="throughputForm" class="crew-grid"></form>
+            </section>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <div id="trendModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="trendTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="trendTitle">Stage Performance Trend</h2>
+            <p class="muted" id="trendMeta">Click a stage to view performance over time.</p>
+          </div>
+          <div class="trend-controls">
+            <div class="shift-toggle" role="group" aria-label="Trend view mode">
+              <button id="trendDaily" type="button" class="shift-option">Daily</button>
+              <button id="trendMonthly" type="button" class="shift-option">Monthly</button>
+            </div>
+            <div class="month-nav">
+              <button id="trendPrevMonth" class="ghost-btn" type="button">Prev</button>
+              <span id="trendMonthLabel">-</span>
+              <button id="trendNextMonth" class="ghost-btn" type="button">Next</button>
+            </div>
+            <button id="closeTrendModal" class="ghost-btn" type="button">Close</button>
+          </div>
+        </div>
+        <div id="stageTrendChart" class="trend-chart" aria-live="polite"></div>
+      </div>
+    </div>
+
+    <div id="stageSettingsModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="stageSettingsTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="stageSettingsTitle">Edit Stage</h2>
+            <p class="muted">Update this stage for the current production line.</p>
+          </div>
+          <button id="closeStageSettingsModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="stageSettingsForm" class="form-grid">
+          <input type="hidden" id="stageSettingsId" />
+          <label>
+            Stage Name
+            <input id="stageSettingsName" required />
+          </label>
+          <label>
+            Type
+            <select id="stageSettingsType">
+              <option value="main">Main</option>
+              <option value="prep">Prep</option>
+              <option value="transfer">Transfer</option>
+            </select>
+          </label>
+          <label>
+            Day Crew
+            <input id="stageSettingsCrewDay" type="number" min="0" step="1" />
+          </label>
+          <label>
+            Night Crew
+            <input id="stageSettingsCrewNight" type="number" min="0" step="1" />
+          </label>
+          <label>
+            Max Throughput (u/min per crew)
+            <input id="stageSettingsMaxThroughput" type="number" min="0" step="1" />
+          </label>
+          <label>
+            Width (%)
+            <input id="stageSettingsWidth" type="number" min="2" step="0.5" />
+          </label>
+          <label>
+            Height (%)
+            <input id="stageSettingsHeight" type="number" min="1" step="0.5" />
+          </label>
+          <button id="saveStageSettings" type="submit">Save Stage</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="builderModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card builder-modal-card" role="dialog" aria-modal="true" aria-labelledby="builderTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="builderTitle">Production Line Builder</h2>
+            <p class="muted">Drag stages on the canvas, edit stage settings, then create the line.</p>
+          </div>
+          <div class="trend-controls">
+            <button id="addBuilderStage" type="button">Add Stage</button>
+            <button id="createBuilderLine" type="button">Create Line</button>
+            <button id="closeBuilderModal" class="ghost-btn" type="button">Close</button>
+          </div>
+        </div>
+
+        <div class="builder-grid">
+          <section class="panel">
+            <h3>Line Setup</h3>
+            <input id="builderLineName" placeholder="Line Name (e.g. Kebab Line A)" />
+            <div class="builder-row builder-row-head">
+              <span>#</span>
+              <span>Stage Name</span>
+              <span>Type</span>
+              <span>Crew</span>
+              <span>Per-Crew u/min</span>
+              <span>Action</span>
+            </div>
+            <div id="builderStages" class="builder-stages"></div>
+          </section>
+          <section class="panel">
+            <h3>Layout Canvas</h3>
+            <div id="builderCanvas" class="builder-canvas"></div>
+          </section>
+        </div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
