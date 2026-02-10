@@ -39,6 +39,7 @@ let state = appState.lines[appState.activeLineId];
 let visualiserDragMoved = false;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 let lineModelSyncTimer = null;
+let hostedRefreshErrorShown = false;
 let managerBackendSession = {
   backendToken: "",
   backendLineMap: {},
@@ -328,16 +329,26 @@ function loadState() {
   };
 }
 
-function saveState() {
+function queueLineModelSync(lineId) {
+  if (!lineId || !UUID_RE.test(String(lineId))) return;
+  if (lineModelSyncTimer) clearTimeout(lineModelSyncTimer);
+  lineModelSyncTimer = setTimeout(async () => {
+    try {
+      await saveLineModelToBackend(lineId);
+    } catch (error) {
+      console.warn("Backend line model sync failed:", error);
+      if (document.visibilityState === "visible") {
+        alert(`Could not save layout/settings changes to server.\n${error?.message || "Please retry."}`);
+      }
+    }
+  }, 300);
+}
+
+function saveState(options = {}) {
   if (state && state.id) {
     appState.lines[state.id] = state;
     appState.activeLineId = state.id;
-    if (UUID_RE.test(String(state.id))) {
-      if (lineModelSyncTimer) clearTimeout(lineModelSyncTimer);
-      lineModelSyncTimer = setTimeout(() => {
-        saveLineModelToBackend(state.id);
-      }, 250);
-    }
+    if (options.syncModel) queueLineModelSync(state.id);
   }
 }
 
@@ -671,21 +682,29 @@ async function refreshHostedState() {
     const lineSummaries = Array.isArray(linesPayload?.lines) ? linesPayload.lines : [];
     const hostedLines = {};
     managerSession.backendLineMap = {};
+    managerSession.backendStageMap = {};
 
-    for (const lineSummary of lineSummaries) {
-      const lineId = lineSummary.id;
-      if (!lineId) continue;
-      const [lineDetail, logs] = await Promise.all([
-        apiRequest(`/api/lines/${lineId}`, { token: managerSession.backendToken }),
-        apiRequest(`/api/lines/${lineId}/logs`, { token: managerSession.backendToken })
-      ]);
+    const lineBundles = await Promise.all(
+      lineSummaries
+        .filter((lineSummary) => Boolean(lineSummary?.id))
+        .map(async (lineSummary) => {
+          const lineId = lineSummary.id;
+          const [lineDetail, logs] = await Promise.all([
+            apiRequest(`/api/lines/${lineId}`, { token: managerSession.backendToken }),
+            apiRequest(`/api/lines/${lineId}/logs`, { token: managerSession.backendToken })
+          ]);
+          return { lineSummary, lineDetail, logs };
+        })
+    );
+
+    lineBundles.forEach(({ lineSummary, lineDetail, logs }) => {
       const line = makeLineFromBackend(lineSummary, lineDetail, logs);
       hostedLines[line.id] = line;
       managerSession.backendLineMap[line.id] = line.id;
       (line.stages || []).forEach((stage) => {
         managerSession.backendStageMap[`${line.id}::${stage.id}`] = stage.id;
       });
-    }
+    });
 
     if (!Object.keys(hostedLines).length) {
       const fallback = makeDefaultLine("line-1", "Production Line 1");
@@ -717,10 +736,17 @@ async function refreshHostedState() {
         : null;
     }
 
+    hostedRefreshErrorShown = false;
     saveState();
     renderAll();
+    return true;
   } catch (error) {
     console.warn("Hosted state refresh failed:", error);
+    if (!hostedRefreshErrorShown) {
+      hostedRefreshErrorShown = true;
+      alert(`Could not refresh data from server.\n${error?.message || "Please try again."}`);
+    }
+    return false;
   }
 }
 
@@ -752,99 +778,83 @@ async function ensureBackendStageId(localLineId, localStageId, session) {
 }
 
 async function syncManagerShiftLog(payload) {
-  try {
-    const session = await ensureManagerBackendSession();
-    const backendLineId = await ensureBackendLineId(payload.lineId, session);
-    if (!backendLineId) return;
-    await apiRequest("/api/logs/shifts", {
-      method: "POST",
-      token: session.backendToken,
-      body: {
-        ...payload,
-        lineId: backendLineId
-      }
-    });
-  } catch (error) {
-    console.warn("Backend manager shift sync failed:", error);
-  }
+  const session = await ensureManagerBackendSession();
+  const backendLineId = await ensureBackendLineId(payload.lineId, session);
+  if (!backendLineId) throw new Error("Line is not synced to server.");
+  await apiRequest("/api/logs/shifts", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      ...payload,
+      lineId: backendLineId
+    }
+  });
 }
 
 async function syncManagerRunLog(payload) {
-  try {
-    const session = await ensureManagerBackendSession();
-    const backendLineId = await ensureBackendLineId(payload.lineId, session);
-    if (!backendLineId) return;
-    await apiRequest("/api/logs/runs", {
-      method: "POST",
-      token: session.backendToken,
-      body: {
-        ...payload,
-        lineId: backendLineId
-      }
-    });
-  } catch (error) {
-    console.warn("Backend manager run sync failed:", error);
-  }
+  const session = await ensureManagerBackendSession();
+  const backendLineId = await ensureBackendLineId(payload.lineId, session);
+  if (!backendLineId) throw new Error("Line is not synced to server.");
+  await apiRequest("/api/logs/runs", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      ...payload,
+      lineId: backendLineId
+    }
+  });
 }
 
 async function syncManagerDowntimeLog(payload) {
-  try {
-    const session = await ensureManagerBackendSession();
-    const backendLineId = await ensureBackendLineId(payload.lineId, session);
-    if (!backendLineId) return;
-    const backendEquipmentId = await ensureBackendStageId(payload.lineId, payload.equipment, session);
-    await apiRequest("/api/logs/downtime", {
-      method: "POST",
-      token: session.backendToken,
-      body: {
-        lineId: backendLineId,
-        date: payload.date,
-        shift: payload.shift,
-        downtimeStart: payload.downtimeStart,
-        downtimeFinish: payload.downtimeFinish,
-        equipmentStageId: backendEquipmentId || null,
-        reason: payload.reason || ""
-      }
-    });
-  } catch (error) {
-    console.warn("Backend manager downtime sync failed:", error);
-  }
+  const session = await ensureManagerBackendSession();
+  const backendLineId = await ensureBackendLineId(payload.lineId, session);
+  if (!backendLineId) throw new Error("Line is not synced to server.");
+  const backendEquipmentId = await ensureBackendStageId(payload.lineId, payload.equipment, session);
+  await apiRequest("/api/logs/downtime", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      lineId: backendLineId,
+      date: payload.date,
+      shift: payload.shift,
+      downtimeStart: payload.downtimeStart,
+      downtimeFinish: payload.downtimeFinish,
+      equipmentStageId: backendEquipmentId || null,
+      reason: payload.reason || ""
+    }
+  });
 }
 
 async function saveLineModelToBackend(lineId) {
-  try {
-    const session = await ensureManagerBackendSession();
-    const line = appState.lines[lineId];
-    if (!line) return;
-    const stages = (line.stages || []).map((stage, index) => ({
-      stageOrder: index + 1,
-      stageName: stageBaseName(stage.name) || "Stage",
-      stageType: toBackendStageType(stage),
-      dayCrew: Math.max(0, num(line?.crewsByShift?.Day?.[stage.id]?.crew ?? stage.crew)),
-      nightCrew: Math.max(0, num(line?.crewsByShift?.Night?.[stage.id]?.crew ?? stage.crew)),
-      maxThroughputPerCrew: Math.max(0, num(line?.stageSettings?.[stage.id]?.maxThroughput)),
-      x: num(stage.x),
-      y: num(stage.y),
-      w: Math.max(2, num(stage.w)),
-      h: Math.max(1, num(stage.h))
-    }));
-    const guides = normalizeFlowGuides(line.flowGuides).map((guide) => ({
-      guideType: guide.type === "arrow" ? "arrow" : guide.type === "shape" ? "shape" : "line",
-      x: num(guide.x),
-      y: num(guide.y),
-      w: num(guide.w),
-      h: num(guide.h),
-      angle: num(guide.angle),
-      src: guide.type === "shape" ? guide.src || "" : ""
-    }));
-    await apiRequest(`/api/lines/${lineId}/model`, {
-      method: "PUT",
-      token: session.backendToken,
-      body: { stages, guides }
-    });
-  } catch (error) {
-    console.warn("Backend line model sync failed:", error);
-  }
+  const session = await ensureManagerBackendSession();
+  const line = appState.lines[lineId];
+  if (!line) return;
+  const stages = (line.stages || []).map((stage, index) => ({
+    stageOrder: index + 1,
+    stageName: stageBaseName(stage.name) || "Stage",
+    stageType: toBackendStageType(stage),
+    dayCrew: Math.max(0, num(line?.crewsByShift?.Day?.[stage.id]?.crew ?? stage.crew)),
+    nightCrew: Math.max(0, num(line?.crewsByShift?.Night?.[stage.id]?.crew ?? stage.crew)),
+    maxThroughputPerCrew: Math.max(0, num(line?.stageSettings?.[stage.id]?.maxThroughput)),
+    x: num(stage.x),
+    y: num(stage.y),
+    w: Math.max(2, num(stage.w)),
+    h: Math.max(1, num(stage.h))
+  }));
+  const guides = normalizeFlowGuides(line.flowGuides).map((guide) => ({
+    guideType: guide.type === "arrow" ? "arrow" : guide.type === "shape" ? "shape" : "line",
+    x: num(guide.x),
+    y: num(guide.y),
+    w: num(guide.w),
+    h: num(guide.h),
+    angle: num(guide.angle),
+    src: guide.type === "shape" ? guide.src || "" : ""
+  }));
+  await apiRequest(`/api/lines/${lineId}/model`, {
+    method: "PUT",
+    token: session.backendToken,
+    body: { stages, guides }
+  });
 }
 
 async function createLineOnBackend(lineName, secretKey, lineModel) {
@@ -866,60 +876,48 @@ async function createLineOnBackend(lineName, secretKey, lineModel) {
 }
 
 async function syncSupervisorShiftLog(session, payload) {
-  try {
-    const backendLineId = await ensureBackendLineId(payload.lineId, session);
-    if (!backendLineId) return;
-    await apiRequest("/api/logs/shifts", {
-      method: "POST",
-      token: session.backendToken,
-      body: {
-        ...payload,
-        lineId: backendLineId
-      }
-    });
-  } catch (error) {
-    console.warn("Backend shift sync failed:", error);
-  }
+  const backendLineId = await ensureBackendLineId(payload.lineId, session);
+  if (!backendLineId) throw new Error("Line is not synced to server.");
+  await apiRequest("/api/logs/shifts", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      ...payload,
+      lineId: backendLineId
+    }
+  });
 }
 
 async function syncSupervisorRunLog(session, payload) {
-  try {
-    const backendLineId = await ensureBackendLineId(payload.lineId, session);
-    if (!backendLineId) return;
-    await apiRequest("/api/logs/runs", {
-      method: "POST",
-      token: session.backendToken,
-      body: {
-        ...payload,
-        lineId: backendLineId
-      }
-    });
-  } catch (error) {
-    console.warn("Backend run sync failed:", error);
-  }
+  const backendLineId = await ensureBackendLineId(payload.lineId, session);
+  if (!backendLineId) throw new Error("Line is not synced to server.");
+  await apiRequest("/api/logs/runs", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      ...payload,
+      lineId: backendLineId
+    }
+  });
 }
 
 async function syncSupervisorDowntimeLog(session, payload) {
-  try {
-    const backendLineId = await ensureBackendLineId(payload.lineId, session);
-    if (!backendLineId) return;
-    const backendEquipmentId = payload.equipment;
-    await apiRequest("/api/logs/downtime", {
-      method: "POST",
-      token: session.backendToken,
-      body: {
-        lineId: backendLineId,
-        date: payload.date,
-        shift: payload.shift,
-        downtimeStart: payload.downtimeStart,
-        downtimeFinish: payload.downtimeFinish,
-        equipmentStageId: UUID_RE.test(String(backendEquipmentId || "")) ? backendEquipmentId : null,
-        reason: payload.reason || ""
-      }
-    });
-  } catch (error) {
-    console.warn("Backend downtime sync failed:", error);
-  }
+  const backendLineId = await ensureBackendLineId(payload.lineId, session);
+  if (!backendLineId) throw new Error("Line is not synced to server.");
+  const backendEquipmentId = payload.equipment;
+  await apiRequest("/api/logs/downtime", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      lineId: backendLineId,
+      date: payload.date,
+      shift: payload.shift,
+      downtimeStart: payload.downtimeStart,
+      downtimeFinish: payload.downtimeFinish,
+      equipmentStageId: UUID_RE.test(String(backendEquipmentId || "")) ? backendEquipmentId : null,
+      reason: payload.reason || ""
+    }
+  });
 }
 
 function requiredCrewForLineShift(line, shift) {
@@ -1509,8 +1507,13 @@ function bindHome() {
       saveState();
       await refreshHostedState();
       renderAll();
-    } catch {
-      alert("Invalid supervisor credentials.");
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (message.toLowerCase().includes("invalid")) {
+        alert("Invalid supervisor credentials.");
+      } else {
+        alert(`Could not connect to login service.\n${message || "Please try again."}`);
+      }
     }
   });
 
@@ -1601,29 +1604,33 @@ function bindHome() {
       const select = supervisorManagerList.querySelector(`[data-supervisor-lines="${supId}"]`);
       if (!sup || !select) return;
       const prevAssigned = Array.isArray(sup.assignedLineIds) ? sup.assignedLineIds.slice() : [];
-      sup.assignedLineIds = Array.from(select.selectedOptions).map((opt) => opt.value).filter((id) => appState.lines[id]);
-      const added = sup.assignedLineIds.filter((id) => !prevAssigned.includes(id));
-      const removed = prevAssigned.filter((id) => !sup.assignedLineIds.includes(id));
-      added.forEach((lineId) => addAudit(appState.lines[lineId], "ASSIGN_SUPERVISOR", `${sup.name} assigned to line`));
-      removed.forEach((lineId) => addAudit(appState.lines[lineId], "UNASSIGN_SUPERVISOR", `${sup.name} removed from line`));
-      if (appState.supervisorSession?.username === sup.username) {
-        appState.supervisorSession.assignedLineIds = sup.assignedLineIds.slice();
-      }
+      const nextAssigned = Array.from(select.selectedOptions)
+        .map((opt) => opt.value)
+        .filter((id) => appState.lines[id]);
       try {
         const session = await ensureManagerBackendSession();
         await apiRequest(`/api/supervisors/${sup.id}/assignments`, {
           method: "PATCH",
           token: session.backendToken,
           body: {
-            assignedLineIds: sup.assignedLineIds
+            assignedLineIds: nextAssigned
           }
         });
+        sup.assignedLineIds = nextAssigned;
+        const added = sup.assignedLineIds.filter((id) => !prevAssigned.includes(id));
+        const removed = prevAssigned.filter((id) => !sup.assignedLineIds.includes(id));
+        added.forEach((lineId) => addAudit(appState.lines[lineId], "ASSIGN_SUPERVISOR", `${sup.name} assigned to line`));
+        removed.forEach((lineId) => addAudit(appState.lines[lineId], "UNASSIGN_SUPERVISOR", `${sup.name} removed from line`));
+        if (appState.supervisorSession?.username === sup.username) {
+          appState.supervisorSession.assignedLineIds = sup.assignedLineIds.slice();
+        }
+        saveState();
+        renderHome();
+        openManageSupervisorsModal();
       } catch (error) {
         console.warn("Supervisor assignment sync failed:", error);
+        alert(`Could not save supervisor assignments.\n${error?.message || "Please try again."}`);
       }
-      saveState();
-      renderHome();
-      openManageSupervisorsModal();
       return;
     }
 
@@ -1633,25 +1640,26 @@ function bindHome() {
       const sup = (appState.supervisors || []).find((item) => item.id === supId);
       if (!sup) return;
       if (!window.confirm(`Delete supervisor "${sup.name}"?`)) return;
-      Object.values(appState.lines || {}).forEach((line) => {
-        if ((sup.assignedLineIds || []).includes(line.id)) {
-          addAudit(line, "DELETE_SUPERVISOR", `Supervisor ${sup.name} deleted`);
-        }
-      });
-      appState.supervisors = (appState.supervisors || []).filter((item) => item.id !== supId);
-      if (appState.supervisorSession?.username === sup.username) appState.supervisorSession = null;
       try {
         const session = await ensureManagerBackendSession();
         await apiRequest(`/api/supervisors/${supId}`, {
           method: "DELETE",
           token: session.backendToken
         });
+        Object.values(appState.lines || {}).forEach((line) => {
+          if ((sup.assignedLineIds || []).includes(line.id)) {
+            addAudit(line, "DELETE_SUPERVISOR", `Supervisor ${sup.name} deleted`);
+          }
+        });
+        appState.supervisors = (appState.supervisors || []).filter((item) => item.id !== supId);
+        if (appState.supervisorSession?.username === sup.username) appState.supervisorSession = null;
+        saveState();
+        renderHome();
+        openManageSupervisorsModal();
       } catch (error) {
         console.warn("Supervisor delete sync failed:", error);
+        alert(`Could not delete supervisor.\n${error?.message || "Please try again."}`);
       }
-      saveState();
-      renderHome();
-      openManageSupervisorsModal();
     }
   });
 
@@ -1668,7 +1676,6 @@ function bindHome() {
       alert("Username already exists.");
       return;
     }
-    let createdId = `sup-${Date.now()}`;
     try {
       const session = await ensureManagerBackendSession();
       const payload = await apiRequest("/api/supervisors", {
@@ -1681,23 +1688,25 @@ function bindHome() {
           assignedLineIds
         }
       });
-      createdId = payload?.supervisor?.id || createdId;
+      const createdId = payload?.supervisor?.id;
+      if (!createdId) throw new Error("Supervisor was not created on server.");
+      appState.supervisors = Array.isArray(appState.supervisors) ? appState.supervisors : [];
+      appState.supervisors.push({
+        id: createdId,
+        name,
+        username,
+        password: "",
+        assignedLineIds
+      });
+      assignedLineIds.forEach((lineId) => addAudit(appState.lines[lineId], "CREATE_SUPERVISOR", `Supervisor ${name} created and assigned`));
+      saveState();
+      closeAddSupervisorModal();
+      await refreshHostedState();
+      renderAll();
     } catch (error) {
       console.warn("Supervisor create sync failed:", error);
+      alert(`Could not create supervisor.\n${error?.message || "Please try again."}`);
     }
-    appState.supervisors = Array.isArray(appState.supervisors) ? appState.supervisors : [];
-    appState.supervisors.push({
-      id: createdId,
-      name,
-      username,
-      password: "",
-      assignedLineIds
-    });
-    assignedLineIds.forEach((lineId) => addAudit(appState.lines[lineId], "CREATE_SUPERVISOR", `Supervisor ${name} created and assigned`));
-    saveState();
-    closeAddSupervisorModal();
-    await refreshHostedState();
-    renderAll();
   });
 
   supervisorShiftForm.addEventListener("submit", async (event) => {
@@ -1733,35 +1742,39 @@ function bindHome() {
       alert("Crew on shift cannot be negative.");
       return;
     }
-    const line = appState.lines[lineId];
-    line.shiftRows.push({
-      date,
-      shift,
-      crewOnShift,
-      startTime,
-      break1Start,
-      break2Start,
-      break3Start,
-      finishTime,
-      submittedBy: session.username,
-      submittedAt: new Date().toISOString()
-    });
-    addAudit(line, "SUPERVISOR_SHIFT_LOG", `${session.username} logged ${shift} shift for ${date} (crew ${crewOnShift})`);
-    await syncSupervisorShiftLog(session, {
-      lineId,
-      date,
-      shift,
-      crewOnShift,
-      startTime,
-      break1Start,
-      break2Start,
-      break3Start,
-      finishTime
-    });
-    event.currentTarget.reset();
-    document.getElementById("superShiftDate").value = date;
-    saveState();
-    renderAll();
+    try {
+      await syncSupervisorShiftLog(session, {
+        lineId,
+        date,
+        shift,
+        crewOnShift,
+        startTime,
+        break1Start,
+        break2Start,
+        break3Start,
+        finishTime
+      });
+      const line = appState.lines[lineId];
+      line.shiftRows.push({
+        date,
+        shift,
+        crewOnShift,
+        startTime,
+        break1Start,
+        break2Start,
+        break3Start,
+        finishTime,
+        submittedBy: session.username,
+        submittedAt: new Date().toISOString()
+      });
+      addAudit(line, "SUPERVISOR_SHIFT_LOG", `${session.username} logged ${shift} shift for ${date} (crew ${crewOnShift})`);
+      event.currentTarget.reset();
+      document.getElementById("superShiftDate").value = date;
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not save shift log.\n${error?.message || "Please try again."}`);
+    }
   });
 
   supervisorRunForm.addEventListener("submit", async (event) => {
@@ -1794,33 +1807,37 @@ function bindHome() {
       return;
     }
     if (!product) return;
-    const line = appState.lines[lineId];
-    line.runRows.push({
-      date,
-      shift,
-      product,
-      setUpStartTime,
-      productionStartTime,
-      finishTime,
-      unitsProduced,
-      submittedBy: session.username,
-      submittedAt: new Date().toISOString()
-    });
-    addAudit(line, "SUPERVISOR_RUN_LOG", `${session.username} logged run ${product} (${unitsProduced} units)`);
-    await syncSupervisorRunLog(session, {
-      lineId,
-      date,
-      shift,
-      product,
-      setUpStartTime,
-      productionStartTime,
-      finishTime,
-      unitsProduced
-    });
-    event.currentTarget.reset();
-    document.getElementById("superRunDate").value = date;
-    saveState();
-    renderAll();
+    try {
+      await syncSupervisorRunLog(session, {
+        lineId,
+        date,
+        shift,
+        product,
+        setUpStartTime,
+        productionStartTime,
+        finishTime,
+        unitsProduced
+      });
+      const line = appState.lines[lineId];
+      line.runRows.push({
+        date,
+        shift,
+        product,
+        setUpStartTime,
+        productionStartTime,
+        finishTime,
+        unitsProduced,
+        submittedBy: session.username,
+        submittedAt: new Date().toISOString()
+      });
+      addAudit(line, "SUPERVISOR_RUN_LOG", `${session.username} logged run ${product} (${unitsProduced} units)`);
+      event.currentTarget.reset();
+      document.getElementById("superRunDate").value = date;
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not save production run.\n${error?.message || "Please try again."}`);
+    }
   });
 
   supervisorDownForm.addEventListener("submit", async (event) => {
@@ -1850,32 +1867,36 @@ function bindHome() {
       alert("Select equipment stage.");
       return;
     }
-    const line = appState.lines[lineId];
-    line.downtimeRows.push({
-      date,
-      shift,
-      downtimeStart: startTime,
-      downtimeFinish: finishTime,
-      equipment,
-      reason,
-      submittedBy: session.username,
-      submittedAt: new Date().toISOString()
-    });
-    addAudit(line, "SUPERVISOR_DOWNTIME_LOG", `${session.username} logged downtime on ${stageNameById(equipment)}`);
-    await syncSupervisorDowntimeLog(session, {
-      lineId,
-      date,
-      shift,
-      downtimeStart: startTime,
-      downtimeFinish: finishTime,
-      equipment,
-      reason
-    });
-    event.currentTarget.reset();
-    document.getElementById("superDownDate").value = date;
-    supervisorDownEquipment.innerHTML = supervisorEquipmentOptions(selectedSupervisorLine());
-    saveState();
-    renderAll();
+    try {
+      await syncSupervisorDowntimeLog(session, {
+        lineId,
+        date,
+        shift,
+        downtimeStart: startTime,
+        downtimeFinish: finishTime,
+        equipment,
+        reason
+      });
+      const line = appState.lines[lineId];
+      line.downtimeRows.push({
+        date,
+        shift,
+        downtimeStart: startTime,
+        downtimeFinish: finishTime,
+        equipment,
+        reason,
+        submittedBy: session.username,
+        submittedAt: new Date().toISOString()
+      });
+      addAudit(line, "SUPERVISOR_DOWNTIME_LOG", `${session.username} logged downtime on ${stageNameById(equipment)}`);
+      event.currentTarget.reset();
+      document.getElementById("superDownDate").value = date;
+      supervisorDownEquipment.innerHTML = supervisorEquipmentOptions(selectedSupervisorLine());
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not save downtime log.\n${error?.message || "Please try again."}`);
+    }
   });
 
   openBuilderBtn.addEventListener("click", openBuilderModal);
@@ -2061,34 +2082,37 @@ function bindHome() {
         alert("Invalid key/password. Line was not deleted.");
         return;
       }
-      addAudit(line, "DELETE_LINE", "Line deleted");
       try {
         const session = await ensureManagerBackendSession();
-        await apiRequest(`/api/lines/${id}`, {
+        const backendLineId = UUID_RE.test(String(id)) ? id : await ensureBackendLineId(id, session);
+        if (!backendLineId) throw new Error("Line is not synced to server.");
+        await apiRequest(`/api/lines/${backendLineId}`, {
           method: "DELETE",
           token: session.backendToken
         });
+        addAudit(line, "DELETE_LINE", "Line deleted");
+        delete appState.lines[id];
+        appState.supervisors = (appState.supervisors || []).map((sup) => ({
+          ...sup,
+          assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => lineId !== id)
+        }));
+        if (appState.supervisorSession) {
+          appState.supervisorSession.assignedLineIds = (appState.supervisorSession.assignedLineIds || []).filter((lineId) => lineId !== id);
+        }
+        if (!Object.keys(appState.lines).length) {
+          const fallback = makeDefaultLine("line-1", "Production Line");
+          appState.lines[fallback.id] = fallback;
+        }
+        appState.activeLineId = Object.keys(appState.lines)[0];
+        state = appState.lines[appState.activeLineId];
+        appState.activeView = "home";
+        saveState();
+        await refreshHostedState();
+        renderAll();
       } catch (error) {
         console.warn("Line delete sync failed:", error);
+        alert(`Could not delete line.\n${error?.message || "Please try again."}`);
       }
-      delete appState.lines[id];
-      appState.supervisors = (appState.supervisors || []).map((sup) => ({
-        ...sup,
-        assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => lineId !== id)
-      }));
-      if (appState.supervisorSession) {
-        appState.supervisorSession.assignedLineIds = (appState.supervisorSession.assignedLineIds || []).filter((lineId) => lineId !== id);
-      }
-      if (!Object.keys(appState.lines).length) {
-        const fallback = makeDefaultLine("line-1", "Production Line");
-        appState.lines[fallback.id] = fallback;
-      }
-      appState.activeLineId = Object.keys(appState.lines)[0];
-      state = appState.lines[appState.activeLineId];
-      appState.activeView = "home";
-      saveState();
-      await refreshHostedState();
-      renderAll();
       return;
     }
 
@@ -2185,7 +2209,7 @@ function bindVisualiserControls() {
     state.flowGuides = Array.isArray(state.flowGuides) ? state.flowGuides : [];
     state.flowGuides.push(createGuide("line"));
     addAudit(state, "LAYOUT_ADD_LINE", "Flow line guide added");
-    saveState();
+    saveState({ syncModel: true });
     renderVisualiser();
   });
 
@@ -2194,7 +2218,7 @@ function bindVisualiserControls() {
     state.flowGuides = Array.isArray(state.flowGuides) ? state.flowGuides : [];
     state.flowGuides.push(createGuide("arrow"));
     addAudit(state, "LAYOUT_ADD_ARROW", "Flow arrow guide added");
-    saveState();
+    saveState({ syncModel: true });
     renderVisualiser();
   });
 
@@ -2232,7 +2256,7 @@ function bindVisualiserControls() {
         src: dataUrl
       });
       addAudit(state, "LAYOUT_ADD_SHAPE", "Custom background shape uploaded");
-      saveState();
+      saveState({ syncModel: true });
       renderVisualiser();
     } catch {
       alert("Could not load shape.");
@@ -2248,7 +2272,7 @@ function bindVisualiserControls() {
       const guideId = deleteGuide.getAttribute("data-guide-delete");
       state.flowGuides = (state.flowGuides || []).filter((guide) => guide.id !== guideId);
       addAudit(state, "LAYOUT_DELETE_GUIDE", "Flow guide deleted");
-      saveState();
+      saveState({ syncModel: true });
       renderVisualiser();
       event.preventDefault();
       return;
@@ -2373,7 +2397,7 @@ function bindVisualiserControls() {
     if (layoutDragState) {
       addAudit(state, "LAYOUT_EDIT", `Layout ${layoutDragState.target} ${layoutDragState.mode}`);
       layoutDragState = null;
-      saveState();
+      saveState({ syncModel: true });
     }
   });
 }
@@ -2455,7 +2479,7 @@ function bindStageSettingsModal() {
     state.stageSettings[stage.id].maxThroughput = maxThroughput;
 
     addAudit(state, "EDIT_STAGE_SETTINGS", `Stage updated: ${stageDisplayName(stage, getStages().findIndex((s) => s.id === stage.id))}`);
-    saveState();
+    saveState({ syncModel: true });
     closeStageSettingsModal();
     renderAll();
   });
@@ -2551,22 +2575,26 @@ function bindForms() {
       alert("Crew on shift cannot be negative.");
       return;
     }
-    state.shiftRows.push(data);
-    addAudit(state, "MANAGER_SHIFT_LOG", `Manager logged ${data.shift} shift for ${data.date} (crew ${data.crewOnShift})`);
-    await syncManagerShiftLog({
-      lineId: state.id,
-      date: data.date,
-      shift: data.shift,
-      crewOnShift: data.crewOnShift,
-      startTime: data.startTime,
-      break1Start: data.break1Start || "",
-      break2Start: data.break2Start || "",
-      break3Start: data.break3Start || "",
-      finishTime: data.finishTime
-    });
-    event.currentTarget.reset();
-    saveState();
-    renderAll();
+    try {
+      await syncManagerShiftLog({
+        lineId: state.id,
+        date: data.date,
+        shift: data.shift,
+        crewOnShift: data.crewOnShift,
+        startTime: data.startTime,
+        break1Start: data.break1Start || "",
+        break2Start: data.break2Start || "",
+        break3Start: data.break3Start || "",
+        finishTime: data.finishTime
+      });
+      state.shiftRows.push(data);
+      addAudit(state, "MANAGER_SHIFT_LOG", `Manager logged ${data.shift} shift for ${data.date} (crew ${data.crewOnShift})`);
+      event.currentTarget.reset();
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not save shift log.\n${error?.message || "Please try again."}`);
+    }
   });
 
   document.getElementById("runForm").addEventListener("submit", async (event) => {
@@ -2589,21 +2617,25 @@ function bindForms() {
       return;
     }
     data.unitsProduced = num(data.unitsProduced);
-    state.runRows.push(data);
-    addAudit(state, "MANAGER_RUN_LOG", `Manager logged run ${data.product} (${data.unitsProduced} units)`);
-    await syncManagerRunLog({
-      lineId: state.id,
-      date: data.date,
-      shift: data.shift,
-      product: data.product,
-      setUpStartTime: data.setUpStartTime || "",
-      productionStartTime: data.productionStartTime,
-      finishTime: data.finishTime,
-      unitsProduced: data.unitsProduced
-    });
-    event.currentTarget.reset();
-    saveState();
-    renderAll();
+    try {
+      await syncManagerRunLog({
+        lineId: state.id,
+        date: data.date,
+        shift: data.shift,
+        product: data.product,
+        setUpStartTime: data.setUpStartTime || "",
+        productionStartTime: data.productionStartTime,
+        finishTime: data.finishTime,
+        unitsProduced: data.unitsProduced
+      });
+      state.runRows.push(data);
+      addAudit(state, "MANAGER_RUN_LOG", `Manager logged run ${data.product} (${data.unitsProduced} units)`);
+      event.currentTarget.reset();
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not save production run.\n${error?.message || "Please try again."}`);
+    }
   });
 
   document.getElementById("downtimeForm").addEventListener("submit", async (event) => {
@@ -2621,21 +2653,25 @@ function bindForms() {
       alert("Equipment stage is required.");
       return;
     }
-    state.downtimeRows.push(data);
-    addAudit(state, "MANAGER_DOWNTIME_LOG", `Manager logged downtime on ${stageNameById(data.equipment)}`);
-    await syncManagerDowntimeLog({
-      lineId: state.id,
-      date: data.date,
-      shift: data.shift,
-      downtimeStart: data.downtimeStart,
-      downtimeFinish: data.downtimeFinish,
-      equipment: data.equipment,
-      reason: data.reason || ""
-    });
-    event.currentTarget.reset();
-    equipmentSelect.innerHTML = stageOptionListHTML();
-    saveState();
-    renderAll();
+    try {
+      await syncManagerDowntimeLog({
+        lineId: state.id,
+        date: data.date,
+        shift: data.shift,
+        downtimeStart: data.downtimeStart,
+        downtimeFinish: data.downtimeFinish,
+        equipment: data.equipment,
+        reason: data.reason || ""
+      });
+      state.downtimeRows.push(data);
+      addAudit(state, "MANAGER_DOWNTIME_LOG", `Manager logged downtime on ${stageNameById(data.equipment)}`);
+      event.currentTarget.reset();
+      equipmentSelect.innerHTML = stageOptionListHTML();
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not save downtime log.\n${error?.message || "Please try again."}`);
+    }
   });
 }
 
@@ -2734,17 +2770,30 @@ function bindDataControls() {
     event.target.value = "";
   });
 
-  document.getElementById("clearData").addEventListener("click", () => {
+  document.getElementById("clearData").addEventListener("click", async () => {
     const entered = window.prompt(`Enter secret key to clear all data for "${state.name}" (or admin):`) || "";
     if (entered !== "admin" && entered !== state.secretKey) {
       alert("Invalid key/password. Data was not cleared.");
       return;
     }
     if (!window.confirm(`Clear all tracking data for "${state.name}" only?`)) return;
-    clearLineTrackingData(state);
-    addAudit(state, "CLEAR_DATA", "All shift/run/downtime rows cleared for this line");
-    saveState();
-    renderAll();
+    try {
+      const session = await ensureManagerBackendSession();
+      const backendLineId = UUID_RE.test(String(state.id)) ? state.id : await ensureBackendLineId(state.id, session);
+      if (!backendLineId) throw new Error("Line is not synced to server.");
+      await apiRequest(`/api/lines/${backendLineId}/clear-data`, {
+        method: "POST",
+        token: session.backendToken,
+        body: { secretKey: entered }
+      });
+      clearLineTrackingData(state);
+      addAudit(state, "CLEAR_DATA", "All shift/run/downtime rows cleared for this line");
+      saveState();
+      await refreshHostedState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not clear data.\n${error?.message || "Please try again."}`);
+    }
   });
 }
 
@@ -2772,7 +2821,7 @@ function renderCrewInputs() {
       if (!state.crewsByShift[state.selectedShift]) state.crewsByShift[state.selectedShift] = defaultStageCrew();
       if (!state.crewsByShift[state.selectedShift][stage.id]) state.crewsByShift[state.selectedShift][stage.id] = {};
       state.crewsByShift[state.selectedShift][stage.id].crew = num(input.value);
-      saveState();
+      saveState({ syncModel: true });
       renderVisualiser();
       renderStageTrend();
     });
@@ -2802,7 +2851,7 @@ function renderThroughputInputs() {
     input.addEventListener("change", () => {
       if (!state.stageSettings[stage.id]) state.stageSettings[stage.id] = {};
       state.stageSettings[stage.id].maxThroughput = num(input.value);
-      saveState();
+      saveState({ syncModel: true });
       renderVisualiser();
       renderStageTrend();
     });

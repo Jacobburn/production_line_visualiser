@@ -105,6 +105,12 @@ const downtimeLogSchema = z.object({
   reason: z.string().max(250).optional().or(z.literal('')).or(z.null())
 });
 
+const clearLineDataSchema = z.object({
+  secretKey: z.string().min(1).max(128)
+});
+
+const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+
 async function hasLineAccess(user, lineId) {
   if (user.role === 'manager') return true;
   const result = await dbQuery(
@@ -124,12 +130,12 @@ async function writeAudit({ lineId = null, actorUserId = null, actorName = null,
   );
 }
 
-app.get('/api/health', async (_req, res) => {
+app.get('/api/health', asyncRoute(async (_req, res) => {
   await dbQuery('SELECT 1');
   res.json({ ok: true, env: config.nodeEnv, timestamp: new Date().toISOString() });
-});
+}));
 
-app.post('/api/auth/login', async (req, res) => {
+app.post('/api/auth/login', asyncRoute(async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ error: 'Invalid login payload' });
@@ -151,13 +157,13 @@ app.post('/api/auth/login', async (req, res) => {
       role: user.role
     }
   });
-});
+}));
 
-app.get('/api/me', authMiddleware, async (req, res) => {
+app.get('/api/me', authMiddleware, asyncRoute(async (req, res) => {
   res.json({ user: req.user });
-});
+}));
 
-app.get('/api/lines', authMiddleware, async (req, res) => {
+app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
   const baseFields = `
     l.id,
     l.name,
@@ -181,9 +187,9 @@ app.get('/api/lines', authMiddleware, async (req, res) => {
 
   const result = await dbQuery(query, req.user.role === 'manager' ? [] : [req.user.id]);
   res.json({ lines: result.rows });
-});
+}));
 
-app.post('/api/lines', authMiddleware, requireRole('manager'), async (req, res) => {
+app.post('/api/lines', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const parsed = lineSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid line payload' });
 
@@ -211,9 +217,9 @@ app.post('/api/lines', authMiddleware, requireRole('manager'), async (req, res) 
     }
     throw error;
   }
-});
+}));
 
-app.get('/api/supervisors', authMiddleware, requireRole('manager'), async (_req, res) => {
+app.get('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(async (_req, res) => {
   const result = await dbQuery(
     `SELECT
        u.id,
@@ -231,9 +237,9 @@ app.get('/api/supervisors', authMiddleware, requireRole('manager'), async (_req,
      ORDER BY u.created_at DESC`
   );
   res.json({ supervisors: result.rows });
-});
+}));
 
-app.post('/api/supervisors', authMiddleware, requireRole('manager'), async (req, res) => {
+app.post('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const parsed = supervisorCreateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid supervisor payload' });
   const username = parsed.data.username.trim().toLowerCase();
@@ -279,9 +285,9 @@ app.post('/api/supervisors', authMiddleware, requireRole('manager'), async (req,
   } finally {
     client.release();
   }
-});
+}));
 
-app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireRole('manager'), async (req, res) => {
+app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const supervisorId = req.params.supervisorId;
   if (!z.string().uuid().safeParse(supervisorId).success) return res.status(400).json({ error: 'Invalid supervisor id' });
   const parsed = supervisorAssignmentsSchema.safeParse(req.body);
@@ -317,9 +323,9 @@ app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireR
   } finally {
     client.release();
   }
-});
+}));
 
-app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manager'), async (req, res) => {
+app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const supervisorId = req.params.supervisorId;
   if (!z.string().uuid().safeParse(supervisorId).success) return res.status(400).json({ error: 'Invalid supervisor id' });
 
@@ -349,9 +355,9 @@ app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manage
   } finally {
     client.release();
   }
-});
+}));
 
-app.get('/api/lines/:lineId', authMiddleware, async (req, res) => {
+app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
@@ -384,9 +390,9 @@ app.get('/api/lines/:lineId', authMiddleware, async (req, res) => {
   ]);
 
   return res.json({ line: lineResult.rows[0], stages: stages.rows, guides: guides.rows });
-});
+}));
 
-app.get('/api/lines/:lineId/logs', authMiddleware, async (req, res) => {
+app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) => {
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
@@ -444,9 +450,9 @@ app.get('/api/lines/:lineId/logs', authMiddleware, async (req, res) => {
     runRows: runRows.rows,
     downtimeRows: downtimeRows.rows
   });
-});
+}));
 
-app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), async (req, res) => {
+app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   const parsed = lineModelSchema.safeParse(req.body || {});
@@ -498,9 +504,9 @@ app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyn
   } finally {
     client.release();
   }
-});
+}));
 
-app.delete('/api/lines/:lineId', authMiddleware, requireRole('manager'), async (req, res) => {
+app.delete('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   const result = await dbQuery(
@@ -513,9 +519,53 @@ app.delete('/api/lines/:lineId', authMiddleware, requireRole('manager'), async (
   if (!result.rowCount) return res.status(404).json({ error: 'Line not found' });
   await dbQuery(`DELETE FROM supervisor_line_assignments WHERE line_id = $1`, [lineId]);
   return res.json({ ok: true });
-});
+}));
 
-app.post('/api/logs/shifts', authMiddleware, async (req, res) => {
+app.post('/api/lines/:lineId/clear-data', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  const lineId = req.params.lineId;
+  if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
+  const parsed = clearLineDataSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid clear data payload' });
+
+  const lineRes = await dbQuery(
+    `SELECT id, name, secret_key AS "secretKey"
+     FROM production_lines
+     WHERE id = $1 AND is_active = TRUE`,
+    [lineId]
+  );
+  if (!lineRes.rowCount) return res.status(404).json({ error: 'Line not found' });
+  const line = lineRes.rows[0];
+  if (parsed.data.secretKey !== 'admin' && parsed.data.secretKey !== line.secretKey) {
+    return res.status(403).json({ error: 'Invalid key/password. Data was not cleared.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM shift_logs WHERE line_id = $1`, [lineId]);
+    await client.query(`DELETE FROM run_logs WHERE line_id = $1`, [lineId]);
+    await client.query(`DELETE FROM downtime_logs WHERE line_id = $1`, [lineId]);
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  await writeAudit({
+    lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'CLEAR_DATA',
+    details: `All logs cleared for line ${line.name}`
+  });
+
+  return res.json({ ok: true });
+}));
+
+app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = shiftLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid shift log payload' });
   if (!(await hasLineAccess(req.user, parsed.data.lineId))) return res.status(403).json({ error: 'Forbidden' });
@@ -548,9 +598,9 @@ app.post('/api/logs/shifts', authMiddleware, async (req, res) => {
   });
 
   return res.status(201).json({ shiftLog: result.rows[0] });
-});
+}));
 
-app.post('/api/logs/runs', authMiddleware, async (req, res) => {
+app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = runLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid run log payload' });
   if (!(await hasLineAccess(req.user, parsed.data.lineId))) return res.status(403).json({ error: 'Forbidden' });
@@ -582,9 +632,9 @@ app.post('/api/logs/runs', authMiddleware, async (req, res) => {
   });
 
   return res.status(201).json({ runLog: result.rows[0] });
-});
+}));
 
-app.post('/api/logs/downtime', authMiddleware, async (req, res) => {
+app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = downtimeLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log payload' });
   if (!(await hasLineAccess(req.user, parsed.data.lineId))) return res.status(403).json({ error: 'Forbidden' });
@@ -615,7 +665,7 @@ app.post('/api/logs/downtime', authMiddleware, async (req, res) => {
   });
 
   return res.status(201).json({ downtimeLog: result.rows[0] });
-});
+}));
 
 app.use((error, _req, res, _next) => {
   console.error(error);
