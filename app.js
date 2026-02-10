@@ -4128,6 +4128,17 @@ function setActiveDataSubtab() {
   });
 }
 
+const startupLoadingStart = Date.now();
+function hideStartupLoading() {
+  const loader = document.getElementById("startupLoading");
+  if (!loader || loader.classList.contains("hidden")) return;
+  const elapsed = Date.now() - startupLoadingStart;
+  const remaining = Math.max(0, 3000 - elapsed);
+  window.setTimeout(() => {
+    loader.classList.add("hidden");
+  }, remaining);
+}
+
 bindTabs();
 bindHome();
 bindDataSubtabs();
@@ -4142,6 +4153,7 @@ if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToke
 } else if (appState.appMode === "manager" || appState.activeView === "line") {
   refreshHostedState();
 }
+hideStartupLoading();
 
 window.addEventListener("hashchange", () => {
   restoreRouteFromHash();
