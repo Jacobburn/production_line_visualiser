@@ -17,7 +17,8 @@ const app = express();
 app.use(cors({ origin: config.frontendOrigin === '*' ? true : config.frontendOrigin }));
 app.use(express.json({ limit: '1mb' }));
 
-const shiftValues = ['Day', 'Night'];
+const shiftValues = ['Day', 'Night', 'Full Day'];
+const supervisorShiftValues = ['Day', 'Night'];
 const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const optionalTime = z.string().regex(timeRegex).optional().or(z.literal('')).or(z.null());
 
@@ -69,11 +70,13 @@ const supervisorCreateSchema = z.object({
   name: z.string().min(1).max(120),
   username: z.string().min(3).max(60),
   password: z.string().min(6).max(120),
-  assignedLineIds: z.array(z.string().uuid()).optional().default([])
+  assignedLineIds: z.array(z.string().uuid()).optional().default([]),
+  assignedLineShifts: z.record(z.array(z.enum(supervisorShiftValues))).optional().default({})
 });
 
 const supervisorAssignmentsSchema = z.object({
-  assignedLineIds: z.array(z.string().uuid())
+  assignedLineIds: z.array(z.string().uuid()).optional().default([]),
+  assignedLineShifts: z.record(z.array(z.enum(supervisorShiftValues))).optional().default({})
 });
 
 const supervisorUpdateSchema = z.object({
@@ -88,10 +91,7 @@ const shiftLogSchema = z.object({
   shift: z.enum(shiftValues),
   crewOnShift: z.number().int().min(0),
   startTime: z.string().regex(timeRegex),
-  finishTime: z.string().regex(timeRegex),
-  break1Start: optionalTime,
-  break2Start: optionalTime,
-  break3Start: optionalTime
+  finishTime: z.string().regex(timeRegex)
 });
 
 const runLogSchema = z.object({
@@ -115,19 +115,155 @@ const downtimeLogSchema = z.object({
   reason: z.string().max(250).optional().or(z.literal('')).or(z.null())
 });
 
+const hasAtLeastOneField = (obj) => Object.values(obj).some((value) => value !== undefined);
+
+const shiftLogUpdateSchema = z.object({
+  crewOnShift: z.number().int().min(0).optional(),
+  startTime: optionalTime.optional(),
+  finishTime: optionalTime.optional()
+}).refine(hasAtLeastOneField, { message: 'At least one field is required' });
+
+const shiftBreakStartSchema = z.object({
+  breakStart: z.string().regex(timeRegex)
+});
+
+const shiftBreakEndSchema = z.object({
+  breakFinish: z.string().regex(timeRegex)
+});
+
+const runLogUpdateSchema = z.object({
+  product: z.string().min(1).max(120).optional(),
+  setUpStartTime: optionalTime.optional(),
+  productionStartTime: optionalTime.optional(),
+  finishTime: optionalTime.optional(),
+  unitsProduced: z.number().nonnegative().optional()
+}).refine(hasAtLeastOneField, { message: 'At least one field is required' });
+
+const downtimeLogUpdateSchema = z.object({
+  downtimeStart: optionalTime.optional(),
+  downtimeFinish: optionalTime.optional(),
+  equipmentStageId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
+  reason: z.string().max(250).optional().or(z.literal('')).or(z.null())
+}).refine(hasAtLeastOneField, { message: 'At least one field is required' });
+
 const clearLineDataSchema = z.object({
   secretKey: z.string().min(1).max(128)
 });
 
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 
+function normalizeAssignedLineShifts(rawMap, fallbackLineIds = []) {
+  const next = {};
+  if (rawMap && typeof rawMap === 'object' && !Array.isArray(rawMap)) {
+    Object.entries(rawMap).forEach(([lineId, shifts]) => {
+      if (!z.string().uuid().safeParse(lineId).success || !Array.isArray(shifts)) return;
+      const unique = Array.from(new Set(shifts.filter((shift) => supervisorShiftValues.includes(shift))));
+      if (unique.length) next[lineId] = unique;
+    });
+  }
+  if (!Object.keys(next).length && Array.isArray(fallbackLineIds)) {
+    fallbackLineIds.forEach((lineId) => {
+      if (!z.string().uuid().safeParse(lineId).success) return;
+      next[lineId] = supervisorShiftValues.slice();
+    });
+  }
+  return next;
+}
+
+function flattenAssignedLineShifts(lineShifts) {
+  return Object.entries(lineShifts || {}).flatMap(([lineId, shifts]) =>
+    (Array.isArray(shifts) ? shifts : [])
+      .filter((shift) => supervisorShiftValues.includes(shift))
+      .map((shift) => ({ lineId, shift }))
+  );
+}
+
+async function fetchSupervisorsWithAssignments() {
+  const [supervisorsResult, assignmentsResult] = await Promise.all([
+    dbQuery(
+      `SELECT
+         u.id,
+         u.name,
+         u.username,
+         u.is_active AS "isActive"
+       FROM users u
+       WHERE u.role = 'supervisor'
+       ORDER BY u.created_at DESC`
+    ),
+    dbQuery(
+      `SELECT
+         supervisor_user_id AS "supervisorUserId",
+         line_id::TEXT AS "lineId",
+         shift
+       FROM supervisor_line_shift_assignments
+       ORDER BY assigned_at ASC`
+    )
+  ]);
+
+  const bySupervisor = new Map();
+  assignmentsResult.rows.forEach((row) => {
+    if (!supervisorShiftValues.includes(row.shift)) return;
+    const current = bySupervisor.get(row.supervisorUserId) || {};
+    if (!current[row.lineId]) current[row.lineId] = [];
+    if (!current[row.lineId].includes(row.shift)) current[row.lineId].push(row.shift);
+    bySupervisor.set(row.supervisorUserId, current);
+  });
+
+  return supervisorsResult.rows.map((sup) => {
+    const assignedLineShifts = bySupervisor.get(sup.id) || {};
+    return {
+      ...sup,
+      assignedLineIds: Object.keys(assignedLineShifts),
+      assignedLineShifts
+    };
+  });
+}
+
+async function fetchSupervisorAssignments(supervisorUserId) {
+  const result = await dbQuery(
+    `SELECT
+       line_id::TEXT AS "lineId",
+       shift
+     FROM supervisor_line_shift_assignments
+     WHERE supervisor_user_id = $1
+     ORDER BY assigned_at ASC`,
+    [supervisorUserId]
+  );
+  const assignedLineShifts = {};
+  result.rows.forEach((row) => {
+    if (!supervisorShiftValues.includes(row.shift)) return;
+    if (!assignedLineShifts[row.lineId]) assignedLineShifts[row.lineId] = [];
+    if (!assignedLineShifts[row.lineId].includes(row.shift)) assignedLineShifts[row.lineId].push(row.shift);
+  });
+  return {
+    assignedLineIds: Object.keys(assignedLineShifts),
+    assignedLineShifts
+  };
+}
+
 async function hasLineAccess(user, lineId) {
   if (user.role === 'manager') return true;
   const result = await dbQuery(
     `SELECT 1
-     FROM supervisor_line_assignments
-     WHERE supervisor_user_id = $1 AND line_id = $2`,
+     FROM supervisor_line_shift_assignments
+     WHERE supervisor_user_id = $1 AND line_id = $2
+     LIMIT 1`,
     [user.id, lineId]
+  );
+  return result.rowCount > 0;
+}
+
+async function hasLineShiftAccess(user, lineId, shift) {
+  if (user.role === 'manager') return true;
+  if (!shiftValues.includes(shift)) return false;
+  const result = await dbQuery(
+    `SELECT 1
+     FROM supervisor_line_shift_assignments
+     WHERE supervisor_user_id = $1
+       AND line_id = $2
+       AND shift = $3
+     LIMIT 1`,
+    [user.id, lineId, shift]
   );
   return result.rowCount > 0;
 }
@@ -191,8 +327,12 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
     ? `SELECT ${baseFields} FROM production_lines l WHERE l.is_active = TRUE ORDER BY l.created_at DESC`
     : `SELECT ${baseFields}
        FROM production_lines l
-       INNER JOIN supervisor_line_assignments a ON a.line_id = l.id
-       WHERE a.supervisor_user_id = $1 AND l.is_active = TRUE
+       INNER JOIN (
+         SELECT DISTINCT line_id
+         FROM supervisor_line_shift_assignments
+         WHERE supervisor_user_id = $1
+       ) a ON a.line_id = l.id
+       WHERE l.is_active = TRUE
        ORDER BY l.created_at DESC`;
 
   const result = await dbQuery(query, req.user.role === 'manager' ? [] : [req.user.id]);
@@ -227,8 +367,12 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
            SELECT COUNT(*)::INT FROM shift_logs sl WHERE sl.line_id = l.id
          ) AS "shiftCount"
        FROM production_lines l
-       INNER JOIN supervisor_line_assignments a ON a.line_id = l.id
-       WHERE a.supervisor_user_id = $1 AND l.is_active = TRUE
+       INNER JOIN (
+         SELECT DISTINCT line_id
+         FROM supervisor_line_shift_assignments
+         WHERE supervisor_user_id = $1
+       ) a ON a.line_id = l.id
+       WHERE l.is_active = TRUE
        ORDER BY l.created_at DESC`;
 
   const linesResult = await dbQuery(linesQuery, req.user.role === 'manager' ? [] : [req.user.id]);
@@ -237,28 +381,14 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   if (!lineIds.length) {
     const payload = { lines: [], supervisors: [] };
     if (req.user.role === 'manager') {
-      const supervisorsResult = await dbQuery(
-        `SELECT
-           u.id,
-           u.name,
-           u.username,
-           u.is_active AS "isActive",
-           COALESCE(
-             ARRAY_REMOVE(ARRAY_AGG(a.line_id::TEXT), NULL),
-             ARRAY[]::TEXT[]
-           ) AS "assignedLineIds"
-         FROM users u
-         LEFT JOIN supervisor_line_assignments a ON a.supervisor_user_id = u.id
-         WHERE u.role = 'supervisor'
-         GROUP BY u.id
-         ORDER BY u.created_at DESC`
-      );
-      payload.supervisors = supervisorsResult.rows;
+      payload.supervisors = await fetchSupervisorsWithAssignments();
+    } else if (req.user.role === 'supervisor') {
+      payload.supervisorAssignments = await fetchSupervisorAssignments(req.user.id);
     }
     return res.json(payload);
   }
 
-  const [stagesResult, guidesResult, shiftLogsResult, runLogsResult, downtimeLogsResult] = await Promise.all([
+  const [stagesResult, guidesResult, shiftLogsResult, breakLogsResult, runLogsResult, downtimeLogsResult] = await Promise.all([
     dbQuery(
       `SELECT
          line_id AS "lineId",
@@ -289,13 +419,11 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT
          line_id AS "lineId",
+         id,
          date::TEXT AS date,
          shift,
          crew_on_shift AS "crewOnShift",
          to_char(start_time, 'HH24:MI') AS "startTime",
-         COALESCE(to_char(break1_start, 'HH24:MI'), '') AS "break1Start",
-         COALESCE(to_char(break2_start, 'HH24:MI'), '') AS "break2Start",
-         COALESCE(to_char(break3_start, 'HH24:MI'), '') AS "break3Start",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
@@ -308,6 +436,24 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT
          line_id AS "lineId",
+         id,
+         shift_log_id AS "shiftLogId",
+         date::TEXT AS date,
+         shift,
+         to_char(break_start, 'HH24:MI') AS "breakStart",
+         COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+         COALESCE(u.name, u.username, '') AS "submittedBy",
+         submitted_at AS "submittedAt"
+       FROM shift_break_logs
+       LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
+       WHERE line_id = ANY($1::UUID[])
+       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      [lineIds]
+    ),
+    dbQuery(
+      `SELECT
+         line_id AS "lineId",
+         id,
          date::TEXT AS date,
          shift,
          product,
@@ -326,6 +472,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT
          line_id AS "lineId",
+         id,
          date::TEXT AS date,
          shift,
          to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
@@ -381,23 +528,39 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   shiftLogsResult.rows.forEach((row) => {
     const list = shiftByLine.get(row.lineId) || [];
     list.push({
+      id: row.id,
       date: row.date,
       shift: row.shift,
       crewOnShift: row.crewOnShift,
       startTime: row.startTime,
-      break1Start: row.break1Start,
-      break2Start: row.break2Start,
-      break3Start: row.break3Start,
       finishTime: row.finishTime,
+      submittedBy: row.submittedBy,
       submittedAt: row.submittedAt
     });
     shiftByLine.set(row.lineId, list);
+  });
+
+  const breakByLine = new Map();
+  breakLogsResult.rows.forEach((row) => {
+    const list = breakByLine.get(row.lineId) || [];
+    list.push({
+      id: row.id,
+      shiftLogId: row.shiftLogId,
+      date: row.date,
+      shift: row.shift,
+      breakStart: row.breakStart,
+      breakFinish: row.breakFinish,
+      submittedBy: row.submittedBy,
+      submittedAt: row.submittedAt
+    });
+    breakByLine.set(row.lineId, list);
   });
 
   const runByLine = new Map();
   runLogsResult.rows.forEach((row) => {
     const list = runByLine.get(row.lineId) || [];
     list.push({
+      id: row.id,
       date: row.date,
       shift: row.shift,
       product: row.product,
@@ -405,6 +568,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       productionStartTime: row.productionStartTime,
       finishTime: row.finishTime,
       unitsProduced: row.unitsProduced,
+      submittedBy: row.submittedBy,
       submittedAt: row.submittedAt
     });
     runByLine.set(row.lineId, list);
@@ -414,12 +578,14 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   downtimeLogsResult.rows.forEach((row) => {
     const list = downtimeByLine.get(row.lineId) || [];
     list.push({
+      id: row.id,
       date: row.date,
       shift: row.shift,
       downtimeStart: row.downtimeStart,
       downtimeFinish: row.downtimeFinish,
       equipment: row.equipment,
       reason: row.reason,
+      submittedBy: row.submittedBy,
       submittedAt: row.submittedAt
     });
     downtimeByLine.set(row.lineId, list);
@@ -430,29 +596,16 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     stages: stagesByLine.get(line.id) || [],
     guides: guidesByLine.get(line.id) || [],
     shiftRows: shiftByLine.get(line.id) || [],
+    breakRows: breakByLine.get(line.id) || [],
     runRows: runByLine.get(line.id) || [],
     downtimeRows: downtimeByLine.get(line.id) || []
   }));
 
   const payload = { lines, supervisors: [] };
   if (req.user.role === 'manager') {
-    const supervisorsResult = await dbQuery(
-      `SELECT
-         u.id,
-         u.name,
-         u.username,
-         u.is_active AS "isActive",
-         COALESCE(
-           ARRAY_REMOVE(ARRAY_AGG(a.line_id::TEXT), NULL),
-           ARRAY[]::TEXT[]
-         ) AS "assignedLineIds"
-       FROM users u
-       LEFT JOIN supervisor_line_assignments a ON a.supervisor_user_id = u.id
-       WHERE u.role = 'supervisor'
-       GROUP BY u.id
-       ORDER BY u.created_at DESC`
-    );
-    payload.supervisors = supervisorsResult.rows;
+    payload.supervisors = await fetchSupervisorsWithAssignments();
+  } else if (req.user.role === 'supervisor') {
+    payload.supervisorAssignments = await fetchSupervisorAssignments(req.user.id);
   }
 
   return res.json(payload);
@@ -489,23 +642,7 @@ app.post('/api/lines', authMiddleware, requireRole('manager'), asyncRoute(async 
 }));
 
 app.get('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(async (_req, res) => {
-  const result = await dbQuery(
-    `SELECT
-       u.id,
-       u.name,
-       u.username,
-       u.is_active AS "isActive",
-       COALESCE(
-         ARRAY_REMOVE(ARRAY_AGG(a.line_id::TEXT), NULL),
-         ARRAY[]::TEXT[]
-       ) AS "assignedLineIds"
-     FROM users u
-     LEFT JOIN supervisor_line_assignments a ON a.supervisor_user_id = u.id
-     WHERE u.role = 'supervisor'
-     GROUP BY u.id
-     ORDER BY u.created_at DESC`
-  );
-  res.json({ supervisors: result.rows });
+  res.json({ supervisors: await fetchSupervisorsWithAssignments() });
 }));
 
 app.post('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
@@ -514,7 +651,9 @@ app.post('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(
   const username = parsed.data.username.trim().toLowerCase();
   const name = parsed.data.name.trim();
   const passwordHash = await hashPassword(parsed.data.password);
-  const assignedLineIds = parsed.data.assignedLineIds || [];
+  const assignedLineShifts = normalizeAssignedLineShifts(parsed.data.assignedLineShifts, parsed.data.assignedLineIds || []);
+  const assignedLineIds = Object.keys(assignedLineShifts);
+  const assignedPairs = flattenAssignedLineShifts(assignedLineShifts);
 
   const client = await pool.connect();
   try {
@@ -528,21 +667,23 @@ app.post('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(
     );
     const supervisor = insertUser.rows[0];
 
-    if (assignedLineIds.length) {
-      await client.query(
-        `INSERT INTO supervisor_line_assignments(supervisor_user_id, line_id, assigned_by_user_id)
-         SELECT $1, line_id::UUID, $2
-         FROM UNNEST($3::TEXT[]) AS t(line_id)
-         ON CONFLICT (supervisor_user_id, line_id) DO NOTHING`,
-        [supervisor.id, req.user.id, assignedLineIds]
-      );
+    if (assignedPairs.length) {
+      for (const pair of assignedPairs) {
+        await client.query(
+          `INSERT INTO supervisor_line_shift_assignments(supervisor_user_id, line_id, shift, assigned_by_user_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (supervisor_user_id, line_id, shift) DO NOTHING`,
+          [supervisor.id, pair.lineId, pair.shift, req.user.id]
+        );
+      }
     }
 
     await client.query('COMMIT');
     return res.status(201).json({
       supervisor: {
         ...supervisor,
-        assignedLineIds
+        assignedLineIds,
+        assignedLineShifts
       }
     });
   } catch (error) {
@@ -561,6 +702,8 @@ app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireR
   if (!z.string().uuid().safeParse(supervisorId).success) return res.status(400).json({ error: 'Invalid supervisor id' });
   const parsed = supervisorAssignmentsSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid assignments payload' });
+  const assignedLineShifts = normalizeAssignedLineShifts(parsed.data.assignedLineShifts, parsed.data.assignedLineIds || []);
+  const assignedPairs = flattenAssignedLineShifts(assignedLineShifts);
 
   const userCheck = await dbQuery(
     `SELECT id FROM users WHERE id = $1 AND role = 'supervisor'`,
@@ -572,20 +715,21 @@ app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireR
   try {
     await client.query('BEGIN');
     await client.query(
-      `DELETE FROM supervisor_line_assignments WHERE supervisor_user_id = $1`,
+      `DELETE FROM supervisor_line_shift_assignments WHERE supervisor_user_id = $1`,
       [supervisorId]
     );
-    if (parsed.data.assignedLineIds.length) {
-      await client.query(
-        `INSERT INTO supervisor_line_assignments(supervisor_user_id, line_id, assigned_by_user_id)
-         SELECT $1, line_id::UUID, $2
-         FROM UNNEST($3::TEXT[]) AS t(line_id)
-         ON CONFLICT (supervisor_user_id, line_id) DO NOTHING`,
-        [supervisorId, req.user.id, parsed.data.assignedLineIds]
-      );
+    if (assignedPairs.length) {
+      for (const pair of assignedPairs) {
+        await client.query(
+          `INSERT INTO supervisor_line_shift_assignments(supervisor_user_id, line_id, shift, assigned_by_user_id)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (supervisor_user_id, line_id, shift) DO NOTHING`,
+          [supervisorId, pair.lineId, pair.shift, req.user.id]
+        );
+      }
     }
     await client.query('COMMIT');
-    return res.json({ ok: true });
+    return res.json({ ok: true, assignedLineIds: Object.keys(assignedLineShifts), assignedLineShifts });
   } catch (error) {
     await client.query('ROLLBACK');
     throw error;
@@ -648,7 +792,7 @@ app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manage
   try {
     await client.query('BEGIN');
     await client.query(
-      `DELETE FROM supervisor_line_assignments WHERE supervisor_user_id = $1`,
+      `DELETE FROM supervisor_line_shift_assignments WHERE supervisor_user_id = $1`,
       [supervisorId]
     );
     const updateUser = await client.query(
@@ -712,16 +856,14 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
 
-  const [shiftRows, runRows, downtimeRows] = await Promise.all([
+  const [shiftRows, breakRows, runRows, downtimeRows] = await Promise.all([
     dbQuery(
       `SELECT
+         id,
          date::TEXT AS date,
          shift,
          crew_on_shift AS "crewOnShift",
          to_char(start_time, 'HH24:MI') AS "startTime",
-         COALESCE(to_char(break1_start, 'HH24:MI'), '') AS "break1Start",
-         COALESCE(to_char(break2_start, 'HH24:MI'), '') AS "break2Start",
-         COALESCE(to_char(break3_start, 'HH24:MI'), '') AS "break3Start",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
@@ -733,6 +875,23 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
     ),
     dbQuery(
       `SELECT
+         id,
+         shift_log_id AS "shiftLogId",
+         date::TEXT AS date,
+         shift,
+         to_char(break_start, 'HH24:MI') AS "breakStart",
+         COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+         COALESCE(u.name, u.username, '') AS "submittedBy",
+         submitted_at AS "submittedAt"
+       FROM shift_break_logs
+       LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
+       WHERE line_id = $1
+       ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      [lineId]
+    ),
+    dbQuery(
+      `SELECT
+         id,
          date::TEXT AS date,
          shift,
          product,
@@ -750,6 +909,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
     ),
     dbQuery(
       `SELECT
+         id,
          date::TEXT AS date,
          shift,
          to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
@@ -768,6 +928,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
 
   return res.json({
     shiftRows: shiftRows.rows,
+    breakRows: breakRows.rows,
     runRows: runRows.rows,
     downtimeRows: downtimeRows.rows
   });
@@ -872,7 +1033,7 @@ app.delete('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRo
     [lineId]
   );
   if (!result.rowCount) return res.status(404).json({ error: 'Line not found' });
-  await dbQuery(`DELETE FROM supervisor_line_assignments WHERE line_id = $1`, [lineId]);
+  await dbQuery(`DELETE FROM supervisor_line_shift_assignments WHERE line_id = $1`, [lineId]);
   return res.json({ ok: true });
 }));
 
@@ -897,6 +1058,7 @@ app.post('/api/lines/:lineId/clear-data', authMiddleware, requireRole('manager')
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    await client.query(`DELETE FROM shift_break_logs WHERE line_id = $1`, [lineId]);
     await client.query(`DELETE FROM shift_logs WHERE line_id = $1`, [lineId]);
     await client.query(`DELETE FROM run_logs WHERE line_id = $1`, [lineId]);
     await client.query(`DELETE FROM downtime_logs WHERE line_id = $1`, [lineId]);
@@ -923,11 +1085,11 @@ app.post('/api/lines/:lineId/clear-data', authMiddleware, requireRole('manager')
 app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = shiftLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid shift log payload' });
-  if (!(await hasLineAccess(req.user, parsed.data.lineId))) return res.status(403).json({ error: 'Forbidden' });
+  if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
-    `INSERT INTO shift_logs(line_id, date, shift, crew_on_shift, start_time, break1_start, break2_start, break3_start, finish_time, submitted_by_user_id)
-     VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::time, NULLIF($7, '')::time, NULLIF($8, '')::time, $9, $10)
+    `INSERT INTO shift_logs(line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)
      RETURNING id, line_id AS "lineId", date, shift, crew_on_shift AS "crewOnShift", start_time AS "startTime", finish_time AS "finishTime", submitted_at AS "submittedAt"`,
     [
       parsed.data.lineId,
@@ -935,9 +1097,6 @@ app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.shift,
       parsed.data.crewOnShift,
       parsed.data.startTime,
-      parsed.data.break1Start || '',
-      parsed.data.break2Start || '',
-      parsed.data.break3Start || '',
       parsed.data.finishTime,
       req.user.id
     ]
@@ -955,10 +1114,139 @@ app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
   return res.status(201).json({ shiftLog: result.rows[0] });
 }));
 
+app.post('/api/logs/shifts/:logId/breaks', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
+  const parsed = shiftBreakStartSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid break start payload' });
+
+  const shiftResult = await dbQuery(
+    `SELECT
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       (start_time = finish_time) AS "isOpen",
+       submitted_by_user_id AS "submittedByUserId"
+     FROM shift_logs
+     WHERE id = $1`,
+    [logId]
+  );
+  if (!shiftResult.rowCount) return res.status(404).json({ error: 'Shift log not found' });
+  const shiftLog = shiftResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, shiftLog.lineId, shiftLog.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && shiftLog.submittedByUserId && shiftLog.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot update another user\'s shift log' });
+  }
+  if (!shiftLog.isOpen) return res.status(400).json({ error: 'Shift is already complete' });
+
+  const openBreakResult = await dbQuery(
+    `SELECT id
+     FROM shift_break_logs
+     WHERE shift_log_id = $1
+       AND break_finish IS NULL
+     LIMIT 1`,
+    [logId]
+  );
+  if (openBreakResult.rowCount) return res.status(400).json({ error: 'An open break already exists for this shift' });
+
+  const result = await dbQuery(
+    `INSERT INTO shift_break_logs(shift_log_id, line_id, date, shift, break_start, submitted_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING
+       id,
+       shift_log_id AS "shiftLogId",
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       to_char(break_start, 'HH24:MI') AS "breakStart",
+       COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+       submitted_at AS "submittedAt"`,
+    [logId, shiftLog.lineId, shiftLog.date, shiftLog.shift, parsed.data.breakStart, req.user.id]
+  );
+
+  await writeAudit({
+    lineId: shiftLog.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'START_SHIFT_BREAK',
+    details: `${shiftLog.shift} ${shiftLog.date} break started ${parsed.data.breakStart}`
+  });
+
+  return res.status(201).json({ breakLog: result.rows[0] });
+}));
+
+app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  const breakId = req.params.breakId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
+  if (!z.string().uuid().safeParse(breakId).success) return res.status(400).json({ error: 'Invalid break log id' });
+  const parsed = shiftBreakEndSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid break finish payload' });
+
+  const breakResult = await dbQuery(
+    `SELECT
+       b.id,
+       b.shift_log_id AS "shiftLogId",
+       b.line_id AS "lineId",
+       b.date::TEXT AS date,
+       b.shift,
+       b.break_finish AS "breakFinishRaw",
+       b.submitted_by_user_id AS "submittedByUserId",
+       (s.start_time = s.finish_time) AS "shiftOpen"
+     FROM shift_break_logs b
+     INNER JOIN shift_logs s ON s.id = b.shift_log_id
+     WHERE b.id = $1
+       AND b.shift_log_id = $2`,
+    [breakId, logId]
+  );
+  if (!breakResult.rowCount) return res.status(404).json({ error: 'Break log not found' });
+  const breakLog = breakResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, breakLog.lineId, breakLog.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && breakLog.submittedByUserId && breakLog.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot update another user\'s break log' });
+  }
+  if (!breakLog.shiftOpen) return res.status(400).json({ error: 'Shift is already complete' });
+  if (breakLog.breakFinishRaw) return res.status(400).json({ error: 'Break has already been ended' });
+
+  const result = await dbQuery(
+    `UPDATE shift_break_logs
+     SET
+       break_finish = $2,
+       submitted_by_user_id = $3,
+       submitted_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       shift_log_id AS "shiftLogId",
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       to_char(break_start, 'HH24:MI') AS "breakStart",
+       COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+       submitted_at AS "submittedAt"`,
+    [breakId, parsed.data.breakFinish, req.user.id]
+  );
+
+  await writeAudit({
+    lineId: breakLog.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'END_SHIFT_BREAK',
+    details: `${breakLog.shift} ${breakLog.date} break ended ${parsed.data.breakFinish}`
+  });
+
+  return res.json({ breakLog: result.rows[0] });
+}));
+
 app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = runLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid run log payload' });
-  if (!(await hasLineAccess(req.user, parsed.data.lineId))) return res.status(403).json({ error: 'Forbidden' });
+  if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
     `INSERT INTO run_logs(line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id)
@@ -992,7 +1280,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
 app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = downtimeLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log payload' });
-  if (!(await hasLineAccess(req.user, parsed.data.lineId))) return res.status(403).json({ error: 'Forbidden' });
+  if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
     `INSERT INTO downtime_logs(line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id)
@@ -1020,6 +1308,195 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   });
 
   return res.status(201).json({ downtimeLog: result.rows[0] });
+}));
+
+app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
+  const parsed = shiftLogUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid shift log update payload' });
+
+  const existingResult = await dbQuery(
+    `SELECT id, line_id AS "lineId", shift, submitted_by_user_id AS "submittedByUserId"
+     FROM shift_logs
+     WHERE id = $1`,
+    [logId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Shift log not found' });
+  const existing = existingResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot edit logs submitted by another user' });
+  }
+
+  const data = parsed.data;
+  const result = await dbQuery(
+    `UPDATE shift_logs
+     SET
+       crew_on_shift = COALESCE($2, crew_on_shift),
+       start_time = COALESCE(NULLIF($3, '')::time, start_time),
+       finish_time = COALESCE(NULLIF($4, '')::time, finish_time),
+       submitted_by_user_id = $5,
+       submitted_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       crew_on_shift AS "crewOnShift",
+       to_char(start_time, 'HH24:MI') AS "startTime",
+       to_char(finish_time, 'HH24:MI') AS "finishTime",
+       submitted_at AS "submittedAt"`,
+    [
+      logId,
+      data.crewOnShift,
+      data.startTime ?? null,
+      data.finishTime ?? null,
+      req.user.id
+    ]
+  );
+
+  await writeAudit({
+    lineId: existing.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'UPDATE_SHIFT_LOG',
+    details: `Shift log ${logId} updated`
+  });
+
+  return res.json({ shiftLog: result.rows[0] });
+}));
+
+app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid run log id' });
+  const parsed = runLogUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid run log update payload' });
+
+  const existingResult = await dbQuery(
+    `SELECT id, line_id AS "lineId", shift, submitted_by_user_id AS "submittedByUserId"
+     FROM run_logs
+     WHERE id = $1`,
+    [logId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Run log not found' });
+  const existing = existingResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot edit logs submitted by another user' });
+  }
+
+  const data = parsed.data;
+  const result = await dbQuery(
+    `UPDATE run_logs
+     SET
+       product = COALESCE(NULLIF($2, ''), product),
+       setup_start_time = CASE WHEN $3::text IS NULL THEN setup_start_time ELSE NULLIF($3, '')::time END,
+       production_start_time = COALESCE(NULLIF($4, '')::time, production_start_time),
+       finish_time = COALESCE(NULLIF($5, '')::time, finish_time),
+       units_produced = COALESCE($6, units_produced),
+       submitted_by_user_id = $7,
+       submitted_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       product,
+       COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+       to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+       to_char(finish_time, 'HH24:MI') AS "finishTime",
+       units_produced AS "unitsProduced",
+       submitted_at AS "submittedAt"`,
+    [
+      logId,
+      data.product ?? null,
+      data.setUpStartTime ?? null,
+      data.productionStartTime ?? null,
+      data.finishTime ?? null,
+      data.unitsProduced,
+      req.user.id
+    ]
+  );
+
+  await writeAudit({
+    lineId: existing.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'UPDATE_RUN_LOG',
+    details: `Run log ${logId} updated`
+  });
+
+  return res.json({ runLog: result.rows[0] });
+}));
+
+app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid downtime log id' });
+  const parsed = downtimeLogUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log update payload' });
+
+  const existingResult = await dbQuery(
+    `SELECT id, line_id AS "lineId", shift, submitted_by_user_id AS "submittedByUserId"
+     FROM downtime_logs
+     WHERE id = $1`,
+    [logId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Downtime log not found' });
+  const existing = existingResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot edit logs submitted by another user' });
+  }
+
+  const data = parsed.data;
+  const result = await dbQuery(
+    `UPDATE downtime_logs
+     SET
+       downtime_start = COALESCE(NULLIF($2, '')::time, downtime_start),
+       downtime_finish = COALESCE(NULLIF($3, '')::time, downtime_finish),
+       equipment_stage_id = CASE WHEN $4::text IS NULL THEN equipment_stage_id ELSE NULLIF($4, '')::uuid END,
+       reason = CASE WHEN $5::text IS NULL THEN reason ELSE NULLIF($5, '') END,
+       submitted_by_user_id = $6,
+       submitted_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+       to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+       COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+       COALESCE(reason, '') AS reason,
+       submitted_at AS "submittedAt"`,
+    [
+      logId,
+      data.downtimeStart ?? null,
+      data.downtimeFinish ?? null,
+      data.equipmentStageId ?? null,
+      data.reason ?? null,
+      req.user.id
+    ]
+  );
+
+  await writeAudit({
+    lineId: existing.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'UPDATE_DOWNTIME_LOG',
+    details: `Downtime log ${logId} updated`
+  });
+
+  return res.json({ downtimeLog: result.rows[0] });
 }));
 
 app.use((error, _req, res, _next) => {

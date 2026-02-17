@@ -50,12 +50,14 @@ async function run() {
   const demoLine = demoLineRes.rows[0];
 
   for (const lineId of [baseLine.id, demoLine.id]) {
-    await dbQuery(
-      `INSERT INTO supervisor_line_assignments(supervisor_user_id, line_id, assigned_by_user_id)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (supervisor_user_id, line_id) DO NOTHING`,
-      [supervisor.id, lineId, manager.id]
-    );
+    for (const shift of ['Day', 'Night']) {
+      await dbQuery(
+        `INSERT INTO supervisor_line_shift_assignments(supervisor_user_id, line_id, shift, assigned_by_user_id)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (supervisor_user_id, line_id, shift) DO NOTHING`,
+        [supervisor.id, lineId, shift, manager.id]
+      );
+    }
   }
 
   const stageSeed = [
@@ -103,6 +105,7 @@ async function run() {
   }
   const stageIdsByOrder = new Map(stageRows.map((row) => [Number(row.stage_order), row.id]));
 
+  await dbQuery(`DELETE FROM shift_break_logs WHERE line_id = $1`, [demoLine.id]);
   await dbQuery(`DELETE FROM shift_logs WHERE line_id = $1`, [demoLine.id]);
   await dbQuery(`DELETE FROM run_logs WHERE line_id = $1`, [demoLine.id]);
   await dbQuery(`DELETE FROM downtime_logs WHERE line_id = $1`, [demoLine.id]);
@@ -123,18 +126,42 @@ async function run() {
     const dayCrew = isWeekend ? 16 : 18;
     const nightCrew = isWeekend ? 14 : 16;
 
-    await dbQuery(
+    const dayShiftInsert = await dbQuery(
       `INSERT INTO shift_logs(
-         line_id, date, shift, crew_on_shift, start_time, break1_start, break2_start, break3_start, finish_time, submitted_by_user_id
-       ) VALUES ($1,$2,'Day',$3,'06:00','09:00','12:00','14:00','14:00',$4)`,
+         line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id
+       ) VALUES ($1,$2,'Day',$3,'06:00','14:00',$4)
+       RETURNING id`,
       [demoLine.id, date, dayCrew, supervisor.id]
+    );
+    const dayShiftLogId = dayShiftInsert.rows[0].id;
+
+    const nightShiftInsert = await dbQuery(
+      `INSERT INTO shift_logs(
+         line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id
+       ) VALUES ($1,$2,'Night',$3,'14:00','22:00',$4)
+       RETURNING id`,
+      [demoLine.id, date, nightCrew, supervisor.id]
+    );
+    const nightShiftLogId = nightShiftInsert.rows[0].id;
+
+    await dbQuery(
+      `INSERT INTO shift_break_logs(
+         shift_log_id, line_id, date, shift, break_start, break_finish, submitted_by_user_id
+       ) VALUES
+       ($1,$2,$3,'Day','09:00','09:15',$4),
+       ($1,$2,$3,'Day','12:00','12:30',$4),
+       ($1,$2,$3,'Day','13:40','13:55',$4)`,
+      [dayShiftLogId, demoLine.id, date, supervisor.id]
     );
 
     await dbQuery(
-      `INSERT INTO shift_logs(
-         line_id, date, shift, crew_on_shift, start_time, break1_start, break2_start, break3_start, finish_time, submitted_by_user_id
-       ) VALUES ($1,$2,'Night',$3,'14:00','17:00','20:00','22:00','22:00',$4)`,
-      [demoLine.id, date, nightCrew, supervisor.id]
+      `INSERT INTO shift_break_logs(
+         shift_log_id, line_id, date, shift, break_start, break_finish, submitted_by_user_id
+       ) VALUES
+       ($1,$2,$3,'Night','17:00','17:15',$4),
+       ($1,$2,$3,'Night','20:00','20:30',$4),
+       ($1,$2,$3,'Night','21:40','21:55',$4)`,
+      [nightShiftLogId, demoLine.id, date, supervisor.id]
     );
 
     const dayP1 = dayProducts[i % dayProducts.length];

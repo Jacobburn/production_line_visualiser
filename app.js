@@ -23,15 +23,23 @@ const STAGES = [
   { id: "s14", name: "14. Pack", crew: 2, group: "main", match: ["pack"], x: 90, y: 14, w: 5.5, h: 15 }
 ];
 
-const SHIFT_COLUMNS = ["Date", "Shift", "Crew On Shift", "Start Time", "Break 1 Start", "Break 2 Start", "Break 3 Start", "Finish Time", "Total Shift Time"];
-const RUN_COLUMNS = ["Date", "Shift", "Product", "Set Up Start Time", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate"];
-const DOWN_COLUMNS = ["Date", "Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason"];
+const SHIFT_COLUMNS = ["Date", "Shift", "Crew On Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Action"];
+const RUN_COLUMNS = ["Date", "Shift", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Action"];
+const DOWN_COLUMNS = ["Date", "Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Action"];
 const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
 const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "Utilisation (%)", "Net Run Rate (u/min)", "Bottleneck", "Staffing"];
+const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
+const SUPERVISOR_SHIFT_OPTIONS = ["Day", "Night"];
+const DOWNTIME_REASON_PRESETS = {
+  "Donor Meat": ["Stock Out", "Late Delivery", "Quality Hold", "Temperature Hold"],
+  People: ["Understaffed", "Training", "Handover Delay", "Absence"],
+  Materials: ["Film Shortage", "Label Shortage", "Tray Shortage", "Marinade Shortage"],
+  Other: ["Cleaning", "QA Hold", "Power", "Unplanned Stop"]
+};
 const DEFAULT_SUPERVISORS = [
-  { id: "sup-1", name: "Supervisor", username: "supervisor", password: "supervisor", mode: "all" },
-  { id: "sup-2", name: "Day Lead", username: "daylead", password: "day123", mode: "even" },
-  { id: "sup-3", name: "Night Lead", username: "nightlead", password: "night123", mode: "odd" }
+  { id: "sup-1", name: "Supervisor", username: "supervisor", password: "supervisor", mode: "all", shifts: ["Day", "Night"] },
+  { id: "sup-2", name: "Day Lead", username: "daylead", password: "day123", mode: "even", shifts: ["Day"] },
+  { id: "sup-3", name: "Night Lead", username: "nightlead", password: "night123", mode: "odd", shifts: ["Night"] }
 ];
 
 let appState = loadState();
@@ -154,14 +162,49 @@ function supervisorModeAssignments(mode, lines) {
   return ids;
 }
 
+function normalizeSupervisorShifts(shifts, { fallbackToAll = true } = {}) {
+  if (!Array.isArray(shifts)) return fallbackToAll ? SUPERVISOR_SHIFT_OPTIONS.slice() : [];
+  const unique = Array.from(
+    new Set(
+      shifts.map((shift) => (shift === "Night" ? "Night" : shift === "Day" ? "Day" : shift === "Full Day" ? "Full Day" : ""))
+    )
+  )
+    .filter(Boolean);
+  return unique;
+}
+
+function normalizeSupervisorLineShifts(assignedLineShifts, lines, legacyLineIds = []) {
+  const normalized = {};
+  if (assignedLineShifts && typeof assignedLineShifts === "object" && !Array.isArray(assignedLineShifts)) {
+    Object.entries(assignedLineShifts).forEach(([lineId, shifts]) => {
+      if (!lines[lineId]) return;
+      const nextShifts = normalizeSupervisorShifts(shifts, { fallbackToAll: false });
+      if (nextShifts.length) normalized[lineId] = nextShifts;
+    });
+  }
+  if (!Object.keys(normalized).length && Array.isArray(legacyLineIds)) {
+    legacyLineIds.forEach((lineId) => {
+      if (lines[lineId]) normalized[lineId] = SUPERVISOR_SHIFT_OPTIONS.slice();
+    });
+  }
+  return normalized;
+}
+
 function defaultSupervisors(lines) {
-  return DEFAULT_SUPERVISORS.map((sup) => ({
-    id: sup.id,
-    name: sup.name,
-    username: sup.username.toLowerCase(),
-    password: sup.password,
-    assignedLineIds: supervisorModeAssignments(sup.mode, lines)
-  }));
+  return DEFAULT_SUPERVISORS.map((sup) => {
+    const lineIds = supervisorModeAssignments(sup.mode, lines);
+    const lineShifts = Object.fromEntries(
+      lineIds.map((lineId) => [lineId, normalizeSupervisorShifts(sup.shifts, { fallbackToAll: true })])
+    );
+    return {
+      id: sup.id,
+      name: sup.name,
+      username: sup.username.toLowerCase(),
+      password: sup.password,
+      assignedLineIds: lineIds,
+      assignedLineShifts: lineShifts
+    };
+  });
 }
 
 function normalizeSupervisors(supervisors, lines) {
@@ -172,13 +215,14 @@ function normalizeSupervisors(supervisors, lines) {
       const username = String(sup?.username || "").trim().toLowerCase();
       if (!username || seen.has(username)) return null;
       seen.add(username);
-      const assigned = Array.isArray(sup?.assignedLineIds) ? sup.assignedLineIds.filter((id) => lines[id]) : [];
+      const assignedLineShifts = normalizeSupervisorLineShifts(sup?.assignedLineShifts, lines, sup?.assignedLineIds || []);
       return {
         id: sup?.id || `sup-${Date.now()}-${index}`,
         name: String(sup?.name || username).trim() || username,
         username,
         password: String(sup?.password || ""),
-        assignedLineIds: assigned
+        assignedLineIds: Object.keys(assignedLineShifts),
+        assignedLineShifts
       };
     })
     .filter(Boolean);
@@ -192,11 +236,11 @@ function supervisorByUsername(username) {
 function normalizeSupervisorSession(session, supervisors, lines) {
   if (!session || typeof session.username !== "string") return null;
   const sup = (supervisors || []).find((item) => item.username === String(session.username).toLowerCase());
-  const assignedFromSession = Array.isArray(session.assignedLineIds) ? session.assignedLineIds.filter((id) => lines[id]) : [];
-  const assigned = sup
-    ? (Array.isArray(sup.assignedLineIds) ? sup.assignedLineIds.filter((id) => lines[id]) : [])
-    : assignedFromSession;
-  if (!sup && !assigned.length && !session.backendToken) return null;
+  const assignedLineShifts = sup
+    ? normalizeSupervisorLineShifts(sup.assignedLineShifts, lines, sup.assignedLineIds || [])
+    : normalizeSupervisorLineShifts(session.assignedLineShifts, lines, session.assignedLineIds || []);
+  const assignedLineIds = Object.keys(assignedLineShifts);
+  if (!sup && !assignedLineIds.length && !session.backendToken) return null;
   const backendLineMap = {};
   if (session.backendLineMap && typeof session.backendLineMap === "object") {
     Object.entries(session.backendLineMap).forEach(([localId, backendId]) => {
@@ -205,7 +249,8 @@ function normalizeSupervisorSession(session, supervisors, lines) {
   }
   return {
     username: sup?.username || String(session.username || "").trim().toLowerCase(),
-    assignedLineIds: assigned,
+    assignedLineIds,
+    assignedLineShifts,
     backendToken: typeof session.backendToken === "string" && session.backendToken ? session.backendToken : "",
     backendLineMap
   };
@@ -221,13 +266,20 @@ function selectedSupervisorLine() {
   return id && appState.lines[id] ? appState.lines[id] : null;
 }
 
-function supervisorEquipmentOptions(line) {
-  if (!line) return `<option value="">Equipment Stage</option>`;
-  const stages = line.stages?.length ? line.stages : STAGES;
-  return [
-    `<option value="">Equipment Stage</option>`,
-    ...stages.map((stage, index) => `<option value="${stage.id}">${stageDisplayName(stage, index)}</option>`)
-  ].join("");
+function supervisorCanAccessShift(session, lineId, shift) {
+  if (!shift || !lineId) return false;
+  const lineShiftMap = normalizeSupervisorLineShifts(session?.assignedLineShifts, appState.lines || {}, session?.assignedLineIds || []);
+  const allowed = expandedSupervisorShiftAccess(lineShiftMap[lineId]);
+  return allowed.includes(shift);
+}
+
+function expandedSupervisorShiftAccess(shifts) {
+  const base = normalizeSupervisorShifts(shifts, { fallbackToAll: false });
+  const next = Array.from(new Set(base));
+  if (next.includes("Day") && next.includes("Night") && !next.includes("Full Day")) {
+    next.push("Full Day");
+  }
+  return next;
 }
 
 function stageMaxThroughputForLine(line, stageId) {
@@ -235,6 +287,15 @@ function stageMaxThroughputForLine(line, stageId) {
 }
 
 function stageCrewForShiftForLine(line, stageId, shift) {
+  if (isFullDayShift(shift)) {
+    const dayCrew = num(line?.crewsByShift?.Day?.[stageId]?.crew);
+    const nightCrew = num(line?.crewsByShift?.Night?.[stageId]?.crew);
+    const stage = (line?.stages || []).find((s) => s.id === stageId);
+    const crew = Math.max(dayCrew, nightCrew);
+    if (crew > 0) return crew;
+    if (stage?.kind === "transfer") return 1;
+    return 0;
+  }
   const crew = num(line?.crewsByShift?.[shift]?.[stageId]?.crew);
   const stage = (line?.stages || []).find((s) => s.id === stageId);
   if (crew > 0) return crew;
@@ -249,28 +310,48 @@ function stageTotalMaxThroughputForLine(line, stageId, shift) {
 function derivedDataForLine(line) {
   const downtimeRows = (line?.downtimeRows || []).map(computeDowntimeRow);
   const shiftRows = (line?.shiftRows || []).map(computeShiftRow);
+  const breakRows = (line?.breakRows || []).map(computeBreakRow);
   const downtimeByShift = new Map();
   downtimeRows.forEach((row) => {
     const key = `${row.date}__${row.shift}`;
     downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + num(row.downtimeMins));
   });
   const runRows = (line?.runRows || []).map((row) => computeRunRow(row, downtimeByShift));
-  return { shiftRows, runRows, downtimeRows };
+  return { shiftRows, breakRows, runRows, downtimeRows };
 }
 
 function computeLineMetrics(line, date, shift) {
   const stages = line?.stages?.length ? line.stages : STAGES;
   const data = derivedDataForLine(line || {});
-  const selectedRunRows = data.runRows.filter((row) => row.date === date && row.shift === shift);
-  const selectedDownRows = data.downtimeRows.filter((row) => row.date === date && row.shift === shift);
-  const selectedShiftRows = data.shiftRows.filter((row) => row.date === date && row.shift === shift);
-  const latestShiftRow = selectedShiftRows.length ? selectedShiftRows[selectedShiftRows.length - 1] : null;
-  const shiftMins = num(latestShiftRow?.totalShiftTime);
-  const hasCrewLog = Boolean(latestShiftRow) && latestShiftRow?.crewOnShift !== "" && latestShiftRow?.crewOnShift !== undefined;
-  const crewOnShift = hasCrewLog ? Math.max(0, num(latestShiftRow?.crewOnShift)) : 0;
-  const requiredCrew = requiredCrewForLineShift(line, shift);
+  const selectedRunRows = selectedShiftRowsByDate(data.runRows, date, shift);
+  const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, date, shift);
+  const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift);
+  const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
+
+  let requiredCrew = requiredCrewForLineShift(line, shift);
+  let crewOnShift = 0;
+  let hasCrewLog = false;
+  if (isFullDayShift(shift)) {
+    const latestByShift = {};
+    selectedShiftRows.forEach((row) => {
+      const key = row.shift || "Day";
+      if (!latestByShift[key]) latestByShift[key] = row;
+      const prevAt = Date.parse(latestByShift[key]?.submittedAt || "") || 0;
+      const nextAt = Date.parse(row?.submittedAt || "") || 0;
+      if (nextAt >= prevAt) latestByShift[key] = row;
+    });
+    const dayRow = latestByShift.Day || null;
+    const nightRow = latestByShift.Night || null;
+    requiredCrew = requiredCrewForLineShift(line, "Day") + requiredCrewForLineShift(line, "Night");
+    crewOnShift = Math.max(0, num(dayRow?.crewOnShift)) + Math.max(0, num(nightRow?.crewOnShift));
+    hasCrewLog = Boolean(dayRow || nightRow);
+  } else {
+    const latestShiftRow = selectedShiftRows.length ? selectedShiftRows[selectedShiftRows.length - 1] : null;
+    hasCrewLog = Boolean(latestShiftRow) && latestShiftRow?.crewOnShift !== "" && latestShiftRow?.crewOnShift !== undefined;
+    crewOnShift = hasCrewLog ? Math.max(0, num(latestShiftRow?.crewOnShift)) : 0;
+  }
   const understaffedBy = hasCrewLog ? Math.max(0, requiredCrew - crewOnShift) : 0;
-  const staffingCallout = !latestShiftRow ? "No shift data" : understaffedBy > 0 ? `Understaffed by ${understaffedBy}` : "Fully staffed";
+  const staffingCallout = !hasCrewLog ? "No shift data" : understaffedBy > 0 ? `Understaffed by ${understaffedBy}` : "Fully staffed";
   const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced), 0);
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime), 0);
@@ -394,6 +475,7 @@ function makeDefaultLine(id, name) {
     stageSettings: defaultStageSettings(stages),
     stages,
     shiftRows: [],
+    breakRows: [],
     runRows: [],
     downtimeRows: [],
     supervisorLogs: [],
@@ -404,7 +486,7 @@ function makeDefaultLine(id, name) {
 function normalizeLine(id, line) {
   const base = makeDefaultLine(id, line?.name || "Production Line");
   const stages = Array.isArray(line?.stages) && line.stages.length ? line.stages : clone(STAGES);
-  return {
+  const normalized = {
     ...base,
     ...line,
     id,
@@ -416,11 +498,14 @@ function normalizeLine(id, line) {
     stageSettings: normalizeStageSettings(line || {}, stages),
     stages,
     shiftRows: line?.shiftRows || [],
+    breakRows: line?.breakRows || [],
     runRows: line?.runRows || [],
     downtimeRows: line?.downtimeRows || [],
     supervisorLogs: Array.isArray(line?.supervisorLogs) ? line.supervisorLogs : [],
     auditRows: Array.isArray(line?.auditRows) ? line.auditRows : []
   };
+  ensureManagerLogRowIds(normalized);
+  return normalized;
 }
 
 function getStages() {
@@ -540,8 +625,66 @@ function optionalStrictTimeValid(value) {
   return strictTimeValid(value);
 }
 
+function nowTimeHHMM() {
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, "0");
+  const mm = String(now.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+function isFullDayShift(shift) {
+  return String(shift || "") === "Full Day";
+}
+
+function shiftKeysForSelection(shift) {
+  if (isFullDayShift(shift)) return ["Day", "Night", "Full Day"];
+  return [shift];
+}
+
+function rowMatchesDateShift(row, date, shift) {
+  if (!row || row.date !== date) return false;
+  return shiftKeysForSelection(shift).includes(row.shift);
+}
+
+function fallbackShiftValue(shift) {
+  return shift === "Night" ? "Night" : "Day";
+}
+
+function isWithinShiftWindow(targetMins, startMins, finishMins) {
+  if (!Number.isFinite(targetMins) || !Number.isFinite(startMins) || !Number.isFinite(finishMins)) return false;
+  if (startMins === finishMins) return true;
+  if (finishMins > startMins) return targetMins >= startMins && targetMins <= finishMins;
+  return targetMins >= startMins || targetMins <= finishMins;
+}
+
+function inferShiftForLog(line, date, timeValue, fallbackShift = "Day") {
+  const fallback = fallbackShiftValue(fallbackShift);
+  const shiftRows = (line?.shiftRows || [])
+    .filter((row) => row.date === date && SHIFT_OPTIONS.includes(row.shift))
+    .slice()
+    .sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+  const targetMins = parseTimeToMinutes(timeValue);
+
+  if (Number.isFinite(targetMins)) {
+    const matched = shiftRows.find((row) => {
+      const startMins = parseTimeToMinutes(row.startTime);
+      const finishMins = parseTimeToMinutes(row.finishTime);
+      return isWithinShiftWindow(targetMins, startMins, finishMins);
+    });
+    if (matched?.shift) return matched.shift;
+  }
+
+  if (shiftRows.some((row) => row.shift === fallback)) return fallback;
+  if (shiftRows[0]?.shift) return shiftRows[0].shift;
+  return fallback;
+}
+
+function selectedShiftRowsByDate(rows, date, shift) {
+  return (rows || []).filter((row) => rowMatchesDateShift(row, date, shift));
+}
+
 function rowIsValidDateShift(date, shift) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(date || "")) && (shift === "Day" || shift === "Night");
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(date || "")) && SHIFT_OPTIONS.includes(String(shift || ""));
 }
 
 async function apiRequest(path, { method = "GET", token = "", body } = {}) {
@@ -691,8 +834,19 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
     : [];
 
   line.shiftRows = Array.isArray(logs?.shiftRows) ? logs.shiftRows : [];
+  line.breakRows = Array.isArray(logs?.breakRows) ? logs.breakRows : [];
   line.runRows = Array.isArray(logs?.runRows) ? logs.runRows : [];
-  line.downtimeRows = Array.isArray(logs?.downtimeRows) ? logs.downtimeRows : [];
+  line.downtimeRows = Array.isArray(logs?.downtimeRows)
+    ? logs.downtimeRows.map((row) => {
+        const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
+        return {
+          ...row,
+          reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
+          reasonDetail: row?.reasonDetail || parsedReason.reasonDetail,
+          reasonNote: row?.reasonNote || parsedReason.reasonNote
+        };
+      })
+    : [];
   line.auditRows = [];
   line.supervisorLogs = [];
   line.selectedStageId = line.stages[0]?.id || "";
@@ -713,6 +867,7 @@ async function refreshHostedState(preferredSession = null) {
       const lineDetail = { stages: bundle?.stages || [], guides: bundle?.guides || [] };
       const logs = {
         shiftRows: bundle?.shiftRows || [],
+        breakRows: bundle?.breakRows || [],
         runRows: bundle?.runRows || [],
         downtimeRows: bundle?.downtimeRows || []
       };
@@ -725,38 +880,59 @@ async function refreshHostedState(preferredSession = null) {
       });
     });
 
-    if (!Object.keys(hostedLines).length) {
+    if (!Object.keys(hostedLines).length && activeSession.role !== "supervisor") {
       const fallback = makeDefaultLine("line-1", "Production Line 1");
       hostedLines[fallback.id] = fallback;
     }
 
     appState.lines = hostedLines;
     const ids = Object.keys(hostedLines);
-    appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0];
-    state = appState.lines[appState.activeLineId];
+    appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0] || "";
+    state = appState.lines[appState.activeLineId] || null;
 
     const supervisors = Array.isArray(snapshot?.supervisors) ? snapshot.supervisors : [];
-    if (supervisors.length) {
-      appState.supervisors = supervisors.map((sup) => ({
+    const hasSnapshotSupervisorAssignments = Object.prototype.hasOwnProperty.call(snapshot || {}, "supervisorAssignments");
+    const snapshotSupervisorLineShifts = hasSnapshotSupervisorAssignments
+      ? normalizeSupervisorLineShifts(snapshot?.supervisorAssignments?.assignedLineShifts, hostedLines, snapshot?.supervisorAssignments?.assignedLineIds || [])
+      : {};
+    appState.supervisors = supervisors.map((sup) => {
+      const assignedLineShifts = normalizeSupervisorLineShifts(sup.assignedLineShifts, hostedLines, sup.assignedLineIds || []);
+      return {
         id: sup.id,
         name: sup.name,
         username: sup.username,
         password: "",
-        assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => hostedLines[lineId])
-      }));
-    }
+        assignedLineShifts,
+        assignedLineIds: Object.keys(assignedLineShifts)
+      };
+    });
 
     if (appState.supervisorSession) {
       const current = appState.supervisors.find((sup) => sup.username === appState.supervisorSession.username);
       if (current) {
         appState.supervisorSession = {
           ...appState.supervisorSession,
-          assignedLineIds: current.assignedLineIds.slice()
+          assignedLineIds: current.assignedLineIds.slice(),
+          assignedLineShifts: clone(current.assignedLineShifts || {})
         };
-      } else if (preferredSession?.backendToken || appState.supervisorSession?.backendToken) {
+      } else if (hasSnapshotSupervisorAssignments) {
         appState.supervisorSession = {
           ...appState.supervisorSession,
-          assignedLineIds: Object.keys(hostedLines),
+          assignedLineIds: Object.keys(snapshotSupervisorLineShifts),
+          assignedLineShifts: clone(snapshotSupervisorLineShifts),
+          backendLineMap: { ...activeSession.backendLineMap },
+          backendToken: activeSession.backendToken
+        };
+      } else if (preferredSession?.backendToken || appState.supervisorSession?.backendToken) {
+        const retainedLineShifts = normalizeSupervisorLineShifts(
+          appState.supervisorSession.assignedLineShifts,
+          hostedLines,
+          appState.supervisorSession.assignedLineIds || []
+        );
+        appState.supervisorSession = {
+          ...appState.supervisorSession,
+          assignedLineIds: Object.keys(retainedLineShifts),
+          assignedLineShifts: retainedLineShifts,
           backendLineMap: { ...activeSession.backendLineMap },
           backendToken: activeSession.backendToken
         };
@@ -810,7 +986,7 @@ async function syncManagerShiftLog(payload) {
   const session = await ensureManagerBackendSession();
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
-  await apiRequest("/api/logs/shifts", {
+  const response = await apiRequest("/api/logs/shifts", {
     method: "POST",
     token: session.backendToken,
     body: {
@@ -818,13 +994,14 @@ async function syncManagerShiftLog(payload) {
       lineId: backendLineId
     }
   });
+  return response?.shiftLog || null;
 }
 
 async function syncManagerRunLog(payload) {
   const session = await ensureManagerBackendSession();
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
-  await apiRequest("/api/logs/runs", {
+  const response = await apiRequest("/api/logs/runs", {
     method: "POST",
     token: session.backendToken,
     body: {
@@ -832,6 +1009,7 @@ async function syncManagerRunLog(payload) {
       lineId: backendLineId
     }
   });
+  return response?.runLog || null;
 }
 
 async function syncManagerDowntimeLog(payload) {
@@ -839,7 +1017,7 @@ async function syncManagerDowntimeLog(payload) {
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
   const backendEquipmentId = await ensureBackendStageId(payload.lineId, payload.equipment, session);
-  await apiRequest("/api/logs/downtime", {
+  const response = await apiRequest("/api/logs/downtime", {
     method: "POST",
     token: session.backendToken,
     body: {
@@ -852,6 +1030,45 @@ async function syncManagerDowntimeLog(payload) {
       reason: payload.reason || ""
     }
   });
+  return response?.downtimeLog || null;
+}
+
+async function patchManagerShiftLog(logId, payload) {
+  const session = await ensureManagerBackendSession();
+  const response = await apiRequest(`/api/logs/shifts/${logId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: payload
+  });
+  return response?.shiftLog || null;
+}
+
+async function patchManagerRunLog(logId, payload) {
+  const session = await ensureManagerBackendSession();
+  const response = await apiRequest(`/api/logs/runs/${logId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: payload
+  });
+  return response?.runLog || null;
+}
+
+async function patchManagerDowntimeLog(logId, payload) {
+  const session = await ensureManagerBackendSession();
+  const backendEquipmentId = payload.equipment
+    ? await ensureBackendStageId(payload.lineId || state.id, payload.equipment, session)
+    : null;
+  const response = await apiRequest(`/api/logs/downtime/${logId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: {
+      downtimeStart: payload.downtimeStart,
+      downtimeFinish: payload.downtimeFinish,
+      equipmentStageId: backendEquipmentId || null,
+      reason: payload.reason || ""
+    }
+  });
+  return response?.downtimeLog || null;
 }
 
 async function saveLineModelToBackend(lineId) {
@@ -907,7 +1124,7 @@ async function createLineOnBackend(lineName, secretKey, lineModel) {
 async function syncSupervisorShiftLog(session, payload) {
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
-  await apiRequest("/api/logs/shifts", {
+  const response = await apiRequest("/api/logs/shifts", {
     method: "POST",
     token: session.backendToken,
     body: {
@@ -915,12 +1132,40 @@ async function syncSupervisorShiftLog(session, payload) {
       lineId: backendLineId
     }
   });
+  return response?.shiftLog || null;
+}
+
+async function patchSupervisorShiftLog(session, logId, payload) {
+  const response = await apiRequest(`/api/logs/shifts/${logId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: payload
+  });
+  return response?.shiftLog || null;
+}
+
+async function startSupervisorShiftBreak(session, shiftLogId, breakStart) {
+  const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks`, {
+    method: "POST",
+    token: session.backendToken,
+    body: { breakStart }
+  });
+  return response?.breakLog || null;
+}
+
+async function endSupervisorShiftBreak(session, shiftLogId, breakId, breakFinish) {
+  const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: { breakFinish }
+  });
+  return response?.breakLog || null;
 }
 
 async function syncSupervisorRunLog(session, payload) {
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
-  await apiRequest("/api/logs/runs", {
+  const response = await apiRequest("/api/logs/runs", {
     method: "POST",
     token: session.backendToken,
     body: {
@@ -928,13 +1173,25 @@ async function syncSupervisorRunLog(session, payload) {
       lineId: backendLineId
     }
   });
+  return response?.runLog || null;
+}
+
+async function patchSupervisorRunLog(session, logId, payload) {
+  const response = await apiRequest(`/api/logs/runs/${logId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: payload
+  });
+  return response?.runLog || null;
 }
 
 async function syncSupervisorDowntimeLog(session, payload) {
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
-  const backendEquipmentId = payload.equipment;
-  await apiRequest("/api/logs/downtime", {
+  const backendEquipmentId = payload.equipment
+    ? await ensureBackendStageId(payload.lineId, payload.equipment, session)
+    : null;
+  const response = await apiRequest("/api/logs/downtime", {
     method: "POST",
     token: session.backendToken,
     body: {
@@ -943,10 +1200,28 @@ async function syncSupervisorDowntimeLog(session, payload) {
       shift: payload.shift,
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: UUID_RE.test(String(backendEquipmentId || "")) ? backendEquipmentId : null,
+      equipmentStageId: backendEquipmentId || null,
       reason: payload.reason || ""
     }
   });
+  return response?.downtimeLog || null;
+}
+
+async function patchSupervisorDowntimeLog(session, logId, payload) {
+  const backendEquipmentId = payload.equipment
+    ? await ensureBackendStageId(payload.lineId, payload.equipment, session)
+    : null;
+  const response = await apiRequest(`/api/logs/downtime/${logId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: {
+      downtimeStart: payload.downtimeStart,
+      downtimeFinish: payload.downtimeFinish,
+      equipmentStageId: backendEquipmentId || null,
+      reason: payload.reason || ""
+    }
+  });
+  return response?.downtimeLog || null;
 }
 
 function requiredCrewForLineShift(line, shift) {
@@ -956,6 +1231,29 @@ function requiredCrewForLineShift(line, shift) {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function makeLocalLogId(prefix = "log") {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return `${prefix}-${crypto.randomUUID()}`;
+  }
+  return `${prefix}-${Date.now()}-${Math.floor(Math.random() * 1000000)}`;
+}
+
+function ensureManagerLogRowIds(line) {
+  if (!line) return;
+  const ensureRows = (rows, prefix) => {
+    if (!Array.isArray(rows)) return [];
+    rows.forEach((row) => {
+      if (row && typeof row === "object" && !String(row.id || "").trim()) {
+        row.id = makeLocalLogId(prefix);
+      }
+    });
+    return rows;
+  };
+  line.shiftRows = ensureRows(line.shiftRows, "shift");
+  line.runRows = ensureRows(line.runRows, "run");
+  line.downtimeRows = ensureRows(line.downtimeRows, "down");
 }
 
 function currentActor() {
@@ -996,6 +1294,15 @@ function stageDisplayName(stage, index) {
 }
 
 function stageCrewForShift(stageId, shift) {
+  if (isFullDayShift(shift)) {
+    const dayCrew = num(state.crewsByShift?.Day?.[stageId]?.crew);
+    const nightCrew = num(state.crewsByShift?.Night?.[stageId]?.crew);
+    const stage = getStages().find((s) => s.id === stageId);
+    const crew = Math.max(dayCrew, nightCrew);
+    if (crew > 0) return crew;
+    if (stage?.kind === "transfer") return 1;
+    return 0;
+  }
   const crew = num(state.crewsByShift?.[shift]?.[stageId]?.crew);
   const stage = getStages().find((s) => s.id === stageId);
   if (crew > 0) return crew;
@@ -1014,11 +1321,60 @@ function stageNameById(id) {
   return stageDisplayName(stages[idx], idx);
 }
 
-function stageOptionListHTML() {
-  return [
-    `<option value="">Equipment Stage</option>`,
-    ...getStages().map((stage, index) => `<option value="${stage.id}">${stageDisplayName(stage, index)}</option>`)
+function downtimeDetailOptions(line, category) {
+  if (category === "Equipment") {
+    const stages = line?.stages?.length ? line.stages : getStages();
+    return stages.map((stage, index) => ({ value: stage.id, label: stageDisplayName(stage, index) }));
+  }
+  const list = DOWNTIME_REASON_PRESETS[category] || [];
+  return list.map((value) => ({ value, label: value }));
+}
+
+function setDowntimeDetailOptions(selectNode, line, category, selectedValue = "") {
+  if (!selectNode) return;
+  const options = downtimeDetailOptions(line, category);
+  const placeholder = category === "Equipment" ? "Select Stage" : "Select Reason";
+  selectNode.innerHTML = [
+    `<option value="">${placeholder}</option>`,
+    ...options.map((option) => `<option value="${option.value}">${option.label}</option>`)
   ].join("");
+  if (selectedValue && options.some((option) => option.value === selectedValue)) {
+    selectNode.value = selectedValue;
+  }
+}
+
+function downtimeDetailLabel(line, category, detail) {
+  if (category === "Equipment") return stageNameByIdForLine(line || state, detail) || "Equipment";
+  return String(detail || "").trim();
+}
+
+function buildDowntimeReasonText(line, category, detail, note) {
+  const group = String(category || "").trim();
+  const detailLabel = downtimeDetailLabel(line, group, detail);
+  const detailText = String(detailLabel || "").trim();
+  const noteText = String(note || "").trim();
+  if (!group) return noteText;
+  if (!detailText && !noteText) return group;
+  if (!noteText) return `${group} > ${detailText}`;
+  if (!detailText) return `${group} > ${noteText}`;
+  return `${group} > ${detailText} > ${noteText}`;
+}
+
+function parseDowntimeReasonParts(reasonText, equipment = "") {
+  const raw = String(reasonText || "").trim();
+  const parts = raw
+    .split(">")
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const category = parts[0] || "";
+  const detailFromReason = parts[1] || "";
+  const note = parts.slice(2).join(" > ");
+  const detail = category === "Equipment" ? (equipment || detailFromReason) : detailFromReason;
+  return {
+    reasonCategory: category,
+    reasonDetail: detail,
+    reasonNote: note
+  };
 }
 
 function shiftKey(date, shift) {
@@ -1044,6 +1400,7 @@ function formatMonthLabel(month) {
 
 function sampleDataSet() {
   const shiftRows = [];
+  const breakRows = [];
   const runRows = [];
   const downtimeRows = [];
   const start = new Date(2025, 10, 1);
@@ -1069,9 +1426,6 @@ function sampleDataSet() {
         shift: "Day",
         crewOnShift: Math.max(0, dayRequired - (i % 12 === 0 ? 2 : i % 7 === 0 ? 1 : 0)),
         startTime: "06:00",
-        break1Start: "09:00",
-        break2Start: "12:00",
-        break3Start: "14:00",
         finishTime: "14:00"
       },
       {
@@ -1079,11 +1433,17 @@ function sampleDataSet() {
         shift: "Night",
         crewOnShift: Math.max(0, nightRequired - (i % 10 === 0 ? 1 : 0)),
         startTime: "14:00",
-        break1Start: "17:00",
-        break2Start: "20:00",
-        break3Start: "22:00",
         finishTime: "22:00"
       }
+    );
+
+    breakRows.push(
+      { date, shift: "Day", breakStart: "09:00", breakFinish: "09:15" },
+      { date, shift: "Day", breakStart: "12:00", breakFinish: "12:30" },
+      { date, shift: "Day", breakStart: "13:40", breakFinish: "13:55" },
+      { date, shift: "Night", breakStart: "17:00", breakFinish: "17:15" },
+      { date, shift: "Night", breakStart: "20:00", breakFinish: "20:30" },
+      { date, shift: "Night", breakStart: "21:40", breakFinish: "21:55" }
     );
 
     runRows.push(
@@ -1091,7 +1451,6 @@ function sampleDataSet() {
         date,
         shift: "Day",
         product: "Teriyaki",
-        setUpStartTime: "05:40",
         productionStartTime: "06:10",
         finishTime: "10:35",
         unitsProduced: Math.round(2850 * dayTrend)
@@ -1100,7 +1459,6 @@ function sampleDataSet() {
         date,
         shift: "Day",
         product: "Honey Soy",
-        setUpStartTime: "10:40",
         productionStartTime: "10:55",
         finishTime: "15:25",
         unitsProduced: Math.round(2600 * dayTrend)
@@ -1109,7 +1467,6 @@ function sampleDataSet() {
         date,
         shift: "Night",
         product: "Peri Peri",
-        setUpStartTime: "13:55",
         productionStartTime: "14:15",
         finishTime: "18:55",
         unitsProduced: Math.round(2500 * nightTrend)
@@ -1118,7 +1475,6 @@ function sampleDataSet() {
         date,
         shift: "Night",
         product: "Lemon Herb",
-        setUpStartTime: "21:10",
         productionStartTime: "21:30",
         finishTime: "00:25",
         unitsProduced: Math.round(2200 * nightTrend)
@@ -1127,11 +1483,66 @@ function sampleDataSet() {
 
     const deq = equipAt(dayEquipment, i);
     const neq = equipAt(nightEquipment, i);
+    const dayReasonCategory = i % 4 === 0 ? "People" : "Equipment";
+    const dayReasonDetail = dayReasonCategory === "Equipment" ? deq : DOWNTIME_REASON_PRESETS.People[i % DOWNTIME_REASON_PRESETS.People.length];
+    const dayReason = buildDowntimeReasonText(state, dayReasonCategory, dayReasonDetail, dayReasonCategory === "Equipment" ? "Planned maintenance" : "");
+    const dayReasonCategory2 = i % 5 === 0 ? "Materials" : "Equipment";
+    const dayReasonDetail2 =
+      dayReasonCategory2 === "Equipment" ? equipAt(dayEquipment, i, 2) : DOWNTIME_REASON_PRESETS.Materials[i % DOWNTIME_REASON_PRESETS.Materials.length];
+    const dayReason2 = buildDowntimeReasonText(state, dayReasonCategory2, dayReasonDetail2, dayReasonCategory2 === "Equipment" ? "Minor stoppage" : "");
+    const nightReasonCategory = i % 3 === 0 ? "Donor Meat" : "Equipment";
+    const nightReasonDetail =
+      nightReasonCategory === "Equipment" ? neq : DOWNTIME_REASON_PRESETS["Donor Meat"][i % DOWNTIME_REASON_PRESETS["Donor Meat"].length];
+    const nightReason = buildDowntimeReasonText(state, nightReasonCategory, nightReasonDetail, nightReasonCategory === "Equipment" ? "Sensor reset" : "");
+    const nightReasonCategory2 = i % 6 === 0 ? "Other" : "Equipment";
+    const nightReasonDetail2 =
+      nightReasonCategory2 === "Equipment" ? equipAt(nightEquipment, i, 3) : DOWNTIME_REASON_PRESETS.Other[i % DOWNTIME_REASON_PRESETS.Other.length];
+    const nightReason2 = buildDowntimeReasonText(state, nightReasonCategory2, nightReasonDetail2, nightReasonCategory2 === "Equipment" ? "Label adjustment" : "");
     downtimeRows.push(
-      { date, shift: "Day", downtimeStart: "08:10", downtimeFinish: `08:${String(22 + (i % 8)).padStart(2, "0")}`, equipment: deq, reason: "Planned maintenance" },
-      { date, shift: "Day", downtimeStart: "11:20", downtimeFinish: `11:${String(30 + (i % 10)).padStart(2, "0")}`, equipment: equipAt(dayEquipment, i, 2), reason: "Minor stoppage" },
-      { date, shift: "Night", downtimeStart: "16:30", downtimeFinish: `16:${String(42 + (i % 9)).padStart(2, "0")}`, equipment: neq, reason: "Sensor reset" },
-      { date, shift: "Night", downtimeStart: "20:05", downtimeFinish: `20:${String(18 + (i % 11)).padStart(2, "0")}`, equipment: equipAt(nightEquipment, i, 3), reason: "Label adjustment" }
+      {
+        date,
+        shift: "Day",
+        downtimeStart: "08:10",
+        downtimeFinish: `08:${String(22 + (i % 8)).padStart(2, "0")}`,
+        equipment: dayReasonCategory === "Equipment" ? deq : "",
+        reasonCategory: dayReasonCategory,
+        reasonDetail: dayReasonDetail,
+        reasonNote: dayReasonCategory === "Equipment" ? "Planned maintenance" : "",
+        reason: dayReason
+      },
+      {
+        date,
+        shift: "Day",
+        downtimeStart: "11:20",
+        downtimeFinish: `11:${String(30 + (i % 10)).padStart(2, "0")}`,
+        equipment: dayReasonCategory2 === "Equipment" ? equipAt(dayEquipment, i, 2) : "",
+        reasonCategory: dayReasonCategory2,
+        reasonDetail: dayReasonDetail2,
+        reasonNote: dayReasonCategory2 === "Equipment" ? "Minor stoppage" : "",
+        reason: dayReason2
+      },
+      {
+        date,
+        shift: "Night",
+        downtimeStart: "16:30",
+        downtimeFinish: `16:${String(42 + (i % 9)).padStart(2, "0")}`,
+        equipment: nightReasonCategory === "Equipment" ? neq : "",
+        reasonCategory: nightReasonCategory,
+        reasonDetail: nightReasonDetail,
+        reasonNote: nightReasonCategory === "Equipment" ? "Sensor reset" : "",
+        reason: nightReason
+      },
+      {
+        date,
+        shift: "Night",
+        downtimeStart: "20:05",
+        downtimeFinish: `20:${String(18 + (i % 11)).padStart(2, "0")}`,
+        equipment: nightReasonCategory2 === "Equipment" ? equipAt(nightEquipment, i, 3) : "",
+        reasonCategory: nightReasonCategory2,
+        reasonDetail: nightReasonDetail2,
+        reasonNote: nightReasonCategory2 === "Equipment" ? "Label adjustment" : "",
+        reason: nightReason2
+      }
     );
   }
 
@@ -1141,6 +1552,7 @@ function sampleDataSet() {
     trendGranularity: "daily",
     trendMonth: "2026-02",
     shiftRows,
+    breakRows,
     runRows,
     downtimeRows
   };
@@ -1187,6 +1599,12 @@ function computeShiftRow(row) {
   return { ...row, crewOnShift: Math.max(0, num(row.crewOnShift)), totalShiftTime: calc > 0 ? calc : fallback };
 }
 
+function computeBreakRow(row) {
+  const fallback = num(row.breakMins);
+  const calc = diffMinutes(row.breakStart, row.breakFinish);
+  return { ...row, breakMins: calc > 0 ? calc : fallback };
+}
+
 function computeRunRow(row, downtimeByShift) {
   const grossFallback = num(row.grossProductionTime);
   const grossCalc = diffMinutes(row.productionStartTime, row.finishTime);
@@ -1217,17 +1635,19 @@ function computeRunRow(row, downtimeByShift) {
 function derivedData() {
   const downtimeRows = state.downtimeRows.map(computeDowntimeRow);
   const shiftRows = state.shiftRows.map(computeShiftRow);
+  const breakRows = (state.breakRows || []).map(computeBreakRow);
   const downtimeByShift = new Map();
   downtimeRows.forEach((row) => {
     const key = `${row.date}__${row.shift}`;
     downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + num(row.downtimeMins));
   });
   const runRows = state.runRows.map((row) => computeRunRow(row, downtimeByShift));
-  return { shiftRows, runRows, downtimeRows };
+  return { shiftRows, breakRows, runRows, downtimeRows };
 }
 
 function clearLineTrackingData(line) {
   line.shiftRows = [];
+  line.breakRows = [];
   line.runRows = [];
   line.downtimeRows = [];
 }
@@ -1277,14 +1697,28 @@ function bindHome() {
   const supervisorLogoutBtn = document.getElementById("supervisorLogout");
   const supervisorMobileModeBtn = document.getElementById("supervisorMobileMode");
   const supervisorLineSelect = document.getElementById("supervisorLineSelect");
-  const svDateInput = document.getElementById("svSelectedDate");
+  const svDateInputs = Array.from(document.querySelectorAll("[data-sv-date]"));
   const svShiftButtons = Array.from(document.querySelectorAll("[data-sv-shift]"));
-  const svPrevBtn = document.getElementById("svPrevDay");
-  const svNextBtn = document.getElementById("svNextDay");
+  const svPrevBtns = Array.from(document.querySelectorAll("[data-sv-prev]"));
+  const svNextBtns = Array.from(document.querySelectorAll("[data-sv-next]"));
   const supervisorShiftForm = document.getElementById("supervisorShiftForm");
   const supervisorRunForm = document.getElementById("supervisorRunForm");
   const supervisorDownForm = document.getElementById("supervisorDownForm");
-  const supervisorDownEquipment = document.getElementById("superDownEquipment");
+  const superShiftLogIdInput = document.getElementById("superShiftLogId");
+  const superShiftOpenBreakIdInput = document.getElementById("superShiftOpenBreakId");
+  const superShiftBreakTimeInput = document.getElementById("superShiftBreakTime");
+  const superRunLogIdInput = document.getElementById("superRunLogId");
+  const superDownLogIdInput = document.getElementById("superDownLogId");
+  const superShiftSaveProgressBtn = document.getElementById("superShiftSaveProgress");
+  const superShiftBreakStartBtn = document.getElementById("superShiftBreakStart");
+  const superShiftBreakEndBtn = document.getElementById("superShiftBreakEnd");
+  const superShiftCompleteBtn = document.getElementById("superShiftComplete");
+  const superRunSaveProgressBtn = document.getElementById("superRunSaveProgress");
+  const superRunOpenList = document.getElementById("superRunOpenList");
+  const superDownSaveProgressBtn = document.getElementById("superDownSaveProgress");
+  const superDownCompleteBtn = document.getElementById("superDownComplete");
+  const supervisorDownReasonCategory = document.getElementById("superDownReasonCategory");
+  const supervisorDownReasonDetail = document.getElementById("superDownReasonDetail");
   const manageSupervisorsBtn = document.getElementById("manageSupervisorsBtn");
   const addSupervisorBtn = document.getElementById("addSupervisorBtn");
   const manageSupervisorsModal = document.getElementById("manageSupervisorsModal");
@@ -1388,19 +1822,57 @@ function bindHome() {
     dragState = null;
   };
 
-  const renderSupervisorLineChecklist = (selectedIds = []) => {
+  const renderSupervisorLineChecklist = (selectedLineShifts = {}) => {
     const lineIds = Object.keys(appState.lines);
+    if (!newSupervisorLines) return;
+    if (!lineIds.length) {
+      newSupervisorLines.innerHTML = `<p class="muted">No production lines available.</p>`;
+      return;
+    }
+    const normalizedSelection = normalizeSupervisorLineShifts(selectedLineShifts, appState.lines, Array.isArray(selectedLineShifts) ? selectedLineShifts : []);
     newSupervisorLines.innerHTML = lineIds
-      .map((id) => {
+      .map((id, index) => {
         const line = appState.lines[id];
+        const allowed = normalizeSupervisorShifts(normalizedSelection[id], { fallbackToAll: false });
+        const dayId = `newSupervisor-${index}-day`;
+        const nightId = `newSupervisor-${index}-night`;
         return `
-          <label class="supervisor-line-item">
-            <input type="checkbox" value="${id}" ${selectedIds.includes(id) ? "checked" : ""} />
-            <span>${line.name}</span>
-          </label>
+          <div class="supervisor-access-row">
+            <span class="supervisor-access-line">${line.name}</span>
+            <div class="supervisor-access-shifts">
+              <label class="supervisor-shift-pill" for="${dayId}">
+                <input
+                  id="${dayId}"
+                  type="checkbox"
+                  data-new-supervisor-line-shift
+                  data-line-id="${id}"
+                  value="Day"
+                  ${allowed.includes("Day") ? "checked" : ""}
+                />
+                <span>Day</span>
+              </label>
+              <label class="supervisor-shift-pill" for="${nightId}">
+                <input
+                  id="${nightId}"
+                  type="checkbox"
+                  data-new-supervisor-line-shift
+                  data-line-id="${id}"
+                  value="Night"
+                  ${allowed.includes("Night") ? "checked" : ""}
+                />
+                <span>Night</span>
+              </label>
+            </div>
+          </div>
         `;
       })
       .join("");
+  };
+
+  const refreshSupervisorDowntimeDetailOptions = (line = selectedSupervisorLine()) => {
+    const category = String(supervisorDownReasonCategory?.value || "");
+    if (!supervisorDownReasonDetail) return;
+    setDowntimeDetailOptions(supervisorDownReasonDetail, line, category, supervisorDownReasonDetail.value || "");
   };
 
   const renderSupervisorManagerList = () => {
@@ -1408,25 +1880,58 @@ function bindHome() {
     const linesById = appState.lines;
     supervisorManagerList.innerHTML = (appState.supervisors || [])
       .map((sup) => {
-        const options = lineIds
+        const accessMap = normalizeSupervisorLineShifts(sup.assignedLineShifts, appState.lines, sup.assignedLineIds || []);
+        const accessRows = lineIds
           .map(
-            (id) =>
-              `<option value="${id}" ${sup.assignedLineIds.includes(id) ? "selected" : ""}>${linesById[id].name}</option>`
+            (lineId, index) => {
+              const allowed = normalizeSupervisorShifts(accessMap[lineId], { fallbackToAll: false });
+              return `
+                <div class="supervisor-access-row">
+                  <span class="supervisor-access-line">${linesById[lineId].name}</span>
+                  <div class="supervisor-access-shifts">
+                    <label class="supervisor-shift-pill" for="sup-${sup.id}-${index}-day">
+                      <input
+                        id="sup-${sup.id}-${index}-day"
+                        type="checkbox"
+                        data-supervisor-line-shift="${sup.id}"
+                        data-line-id="${lineId}"
+                        value="Day"
+                        ${allowed.includes("Day") ? "checked" : ""}
+                      />
+                      <span>Day</span>
+                    </label>
+                    <label class="supervisor-shift-pill" for="sup-${sup.id}-${index}-night">
+                      <input
+                        id="sup-${sup.id}-${index}-night"
+                        type="checkbox"
+                        data-supervisor-line-shift="${sup.id}"
+                        data-line-id="${lineId}"
+                        value="Night"
+                        ${allowed.includes("Night") ? "checked" : ""}
+                      />
+                      <span>Night</span>
+                    </label>
+                  </div>
+                </div>
+              `;
+            }
           )
           .join("");
         return `
           <section class="panel supervisor-manager-row" data-supervisor-id="${sup.id}">
-            <div class="action-row">
+            <div class="action-row supervisor-manager-header">
               <h3>${sup.name}</h3>
               <span class="muted">@${sup.username}</span>
             </div>
-            <label>
-              Assigned Lines
-              <select multiple size="${Math.min(8, Math.max(3, lineIds.length))}" data-supervisor-lines="${sup.id}">
-                ${options}
-              </select>
-            </label>
-            <div class="action-row">
+            <div class="supervisor-assignment-wrap">
+              <section class="supervisor-assignment-group">
+                <h4 class="supervisor-assignment-title">Line and Shift Access</h4>
+                <div class="supervisor-access-grid">
+                  ${accessRows || `<p class="muted">No production lines available.</p>`}
+                </div>
+              </section>
+            </div>
+            <div class="action-row supervisor-manager-actions">
               <button type="button" data-supervisor-save="${sup.id}">Save Assignments</button>
               <button type="button" class="ghost-btn" data-supervisor-edit="${sup.id}">Edit</button>
               <button type="button" class="danger" data-supervisor-delete="${sup.id}">Delete Supervisor</button>
@@ -1455,7 +1960,7 @@ function bindHome() {
   const openAddSupervisorModal = async () => {
     await refreshHostedState();
     addSupervisorForm.reset();
-    renderSupervisorLineChecklist(Object.keys(appState.lines));
+    renderSupervisorLineChecklist(Object.fromEntries(Object.keys(appState.lines).map((lineId) => [lineId, SUPERVISOR_SHIFT_OPTIONS.slice()])));
     addSupervisorModal.classList.add("open");
     addSupervisorModal.setAttribute("aria-hidden", "false");
   };
@@ -1542,7 +2047,7 @@ function bindHome() {
     btn.addEventListener("click", () => {
       const shift = btn.dataset.dashShift;
       if (!shift) return;
-      appState.dashboardShift = shift === "Night" ? "Night" : "Day";
+      appState.dashboardShift = SHIFT_OPTIONS.includes(shift) ? shift : "Day";
       saveState();
       renderHome();
     });
@@ -1582,6 +2087,7 @@ function bindHome() {
       appState.supervisorSession = {
         username: loginPayload.user.username,
         assignedLineIds: [],
+        assignedLineShifts: {},
         backendToken: loginPayload.token,
         backendLineMap: {},
         backendStageMap: {},
@@ -1612,6 +2118,45 @@ function bindHome() {
     renderHome();
   });
 
+  document.querySelectorAll("[data-now-target]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const target = btn.getAttribute("data-now-target");
+      if (!target) return;
+      const input = document.getElementById(target);
+      if (!input) return;
+      input.value = nowTimeHHMM();
+    });
+  });
+
+  ["superShiftDate", "superShiftShift"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", () => {
+      if (superShiftLogIdInput) superShiftLogIdInput.value = "";
+      if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+    });
+  });
+  ["superRunDate", "superRunProduct"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", () => {
+      if (superRunLogIdInput) superRunLogIdInput.value = "";
+    });
+    el.addEventListener("change", () => {
+      if (superRunLogIdInput) superRunLogIdInput.value = "";
+    });
+  });
+  ["superDownDate", "superDownStart", "superDownReasonCategory", "superDownReasonDetail"].forEach((id) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("input", () => {
+      if (superDownLogIdInput) superDownLogIdInput.value = "";
+    });
+    el.addEventListener("change", () => {
+      if (superDownLogIdInput) superDownLogIdInput.value = "";
+    });
+  });
+
   document.querySelectorAll("[data-supervisor-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       appState.supervisorTab = btn.dataset.supervisorTab || "superShift";
@@ -1622,41 +2167,61 @@ function bindHome() {
 
   supervisorLineSelect.addEventListener("change", () => {
     appState.supervisorSelectedLineId = supervisorLineSelect.value || "";
-    supervisorDownEquipment.innerHTML = supervisorEquipmentOptions(selectedSupervisorLine());
+    const session = normalizeSupervisorSession(appState.supervisorSession, appState.supervisors, appState.lines);
+    const lineShiftMap = normalizeSupervisorLineShifts(session?.assignedLineShifts, appState.lines, session?.assignedLineIds || []);
+    const allowedShifts = expandedSupervisorShiftAccess(lineShiftMap[appState.supervisorSelectedLineId]);
+    if (!allowedShifts.includes(appState.supervisorSelectedShift)) {
+      appState.supervisorSelectedShift = allowedShifts[0] || "Day";
+    }
+    refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
     saveState();
     renderHome();
   });
 
-  svDateInput.addEventListener("change", () => {
-    appState.supervisorSelectedDate = svDateInput.value || todayISO();
-    saveState();
-    renderHome();
-  });
-
-  svShiftButtons.forEach((btn) => {
-    btn.addEventListener("click", () => {
-      const shift = btn.dataset.svShift;
-      if (!shift) return;
-      appState.supervisorSelectedShift = shift === "Night" ? "Night" : "Day";
+  svDateInputs.forEach((svDateInput) => {
+    svDateInput.addEventListener("change", () => {
+      appState.supervisorSelectedDate = svDateInput.value || todayISO();
       saveState();
       renderHome();
     });
   });
 
-  svPrevBtn.addEventListener("click", () => {
-    const dt = parseDateLocal(appState.supervisorSelectedDate || todayISO());
-    dt.setDate(dt.getDate() - 1);
-    appState.supervisorSelectedDate = formatDateLocal(dt);
-    saveState();
-    renderHome();
+  svShiftButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (btn.disabled) return;
+      const shift = btn.dataset.svShift;
+      if (!shift) return;
+      appState.supervisorSelectedShift = SHIFT_OPTIONS.includes(shift) ? shift : "Day";
+      saveState();
+      renderHome();
+    });
   });
 
-  svNextBtn.addEventListener("click", () => {
-    const dt = parseDateLocal(appState.supervisorSelectedDate || todayISO());
-    dt.setDate(dt.getDate() + 1);
-    appState.supervisorSelectedDate = formatDateLocal(dt);
-    saveState();
-    renderHome();
+  if (supervisorDownReasonCategory) {
+    supervisorDownReasonCategory.addEventListener("change", () => {
+      refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
+      if (superDownLogIdInput) superDownLogIdInput.value = "";
+    });
+  }
+
+  svPrevBtns.forEach((svPrevBtn) => {
+    svPrevBtn.addEventListener("click", () => {
+      const dt = parseDateLocal(appState.supervisorSelectedDate || todayISO());
+      dt.setDate(dt.getDate() - 1);
+      appState.supervisorSelectedDate = formatDateLocal(dt);
+      saveState();
+      renderHome();
+    });
+  });
+
+  svNextBtns.forEach((svNextBtn) => {
+    svNextBtn.addEventListener("click", () => {
+      const dt = parseDateLocal(appState.supervisorSelectedDate || todayISO());
+      dt.setDate(dt.getDate() + 1);
+      appState.supervisorSelectedDate = formatDateLocal(dt);
+      saveState();
+      renderHome();
+    });
   });
 
   document.querySelectorAll("[data-super-main-tab]").forEach((btn) => {
@@ -1697,21 +2262,29 @@ function bindHome() {
     if (saveBtn) {
       const supId = saveBtn.getAttribute("data-supervisor-save");
       const sup = (appState.supervisors || []).find((item) => item.id === supId);
-      const select = supervisorManagerList.querySelector(`[data-supervisor-lines="${supId}"]`);
-      if (!sup || !select) return;
-      const prevAssigned = Array.isArray(sup.assignedLineIds) ? sup.assignedLineIds.slice() : [];
-      const nextAssigned = Array.from(select.selectedOptions)
-        .map((opt) => opt.value)
-        .filter((id) => appState.lines[id]);
+      if (!sup) return;
+      const prevLineShiftMap = normalizeSupervisorLineShifts(sup.assignedLineShifts, appState.lines, sup.assignedLineIds || []);
+      const prevAssigned = Object.keys(prevLineShiftMap);
+      const nextLineShiftMap = {};
+      Array.from(supervisorManagerList.querySelectorAll(`[data-supervisor-line-shift="${supId}"]`)).forEach((input) => {
+        const lineId = input.dataset.lineId || "";
+        const shift = input.value;
+        if (!input.checked || !appState.lines[lineId]) return;
+        if (!nextLineShiftMap[lineId]) nextLineShiftMap[lineId] = [];
+        if ((shift === "Day" || shift === "Night") && !nextLineShiftMap[lineId].includes(shift)) nextLineShiftMap[lineId].push(shift);
+      });
+      const nextAssigned = Object.keys(nextLineShiftMap);
       try {
         const session = await ensureManagerBackendSession();
         await apiRequest(`/api/supervisors/${sup.id}/assignments`, {
           method: "PATCH",
           token: session.backendToken,
           body: {
-            assignedLineIds: nextAssigned
+            assignedLineIds: nextAssigned,
+            assignedLineShifts: nextLineShiftMap
           }
         });
+        sup.assignedLineShifts = nextLineShiftMap;
         sup.assignedLineIds = nextAssigned;
         const added = sup.assignedLineIds.filter((id) => !prevAssigned.includes(id));
         const removed = prevAssigned.filter((id) => !sup.assignedLineIds.includes(id));
@@ -1719,7 +2292,29 @@ function bindHome() {
         removed.forEach((lineId) => addAudit(appState.lines[lineId], "UNASSIGN_SUPERVISOR", `${sup.name} removed from line`));
         if (appState.supervisorSession?.username === sup.username) {
           appState.supervisorSession.assignedLineIds = sup.assignedLineIds.slice();
+          appState.supervisorSession.assignedLineShifts = clone(sup.assignedLineShifts || {});
+          if (!appState.supervisorSession.assignedLineIds.includes(appState.supervisorSelectedLineId)) {
+            appState.supervisorSelectedLineId = appState.supervisorSession.assignedLineIds[0] || "";
+          }
+          if (!supervisorCanAccessShift(appState.supervisorSession, appState.supervisorSelectedLineId, appState.supervisorSelectedShift)) {
+            const fallbackShifts = normalizeSupervisorShifts(appState.supervisorSession.assignedLineShifts?.[appState.supervisorSelectedLineId], { fallbackToAll: false });
+            appState.supervisorSelectedShift = fallbackShifts[0] || "Day";
+          }
         }
+        const allShiftLineIds = Array.from(new Set([...Object.keys(prevLineShiftMap), ...Object.keys(nextLineShiftMap)]))
+          .filter((lineId) => appState.lines[lineId]);
+        allShiftLineIds.forEach((lineId) => {
+          const prevShifts = normalizeSupervisorShifts(prevLineShiftMap[lineId], { fallbackToAll: false });
+          const nextShifts = normalizeSupervisorShifts(nextLineShiftMap[lineId], { fallbackToAll: false });
+          SUPERVISOR_SHIFT_OPTIONS.forEach((shift) => {
+            if (!prevShifts.includes(shift) && nextShifts.includes(shift)) {
+              addAudit(appState.lines[lineId], "ASSIGN_SUPERVISOR_SHIFT", `${sup.name} granted ${shift} shift access`);
+            }
+            if (prevShifts.includes(shift) && !nextShifts.includes(shift)) {
+              addAudit(appState.lines[lineId], "UNASSIGN_SUPERVISOR_SHIFT", `${sup.name} removed from ${shift} shift access`);
+            }
+          });
+        });
         saveState();
         renderHome();
         openManageSupervisorsModal();
@@ -1807,9 +2402,17 @@ function bindHome() {
     const name = String(document.getElementById("newSupervisorName").value || "").trim();
     const username = String(document.getElementById("newSupervisorUsername").value || "").trim().toLowerCase();
     const password = String(document.getElementById("newSupervisorPassword").value || "").trim();
-    const assignedLineIds = Array.from(newSupervisorLines.querySelectorAll("input[type=\"checkbox\"]:checked"))
-      .map((input) => input.value)
-      .filter((id) => appState.lines[id]);
+    const assignedLineShifts = {};
+    Array.from(newSupervisorLines.querySelectorAll("[data-new-supervisor-line-shift]")).forEach((input) => {
+      const lineId = input.dataset.lineId || "";
+      const shift = input.value;
+      if (!input.checked || !appState.lines[lineId]) return;
+      if (!assignedLineShifts[lineId]) assignedLineShifts[lineId] = [];
+      if ((shift === "Day" || shift === "Night") && !assignedLineShifts[lineId].includes(shift)) {
+        assignedLineShifts[lineId].push(shift);
+      }
+    });
+    const assignedLineIds = Object.keys(assignedLineShifts);
     if (!name || !username || !password) return;
     if (supervisorByUsername(username)) {
       alert("Username already exists.");
@@ -1824,7 +2427,8 @@ function bindHome() {
           name,
           username,
           password,
-          assignedLineIds
+          assignedLineIds,
+          assignedLineShifts
         }
       });
       const createdId = payload?.supervisor?.id;
@@ -1835,7 +2439,8 @@ function bindHome() {
         name,
         username,
         password: "",
-        assignedLineIds
+        assignedLineIds,
+        assignedLineShifts
       });
       assignedLineIds.forEach((lineId) => addAudit(appState.lines[lineId], "CREATE_SUPERVISOR", `Supervisor ${name} created and assigned`));
       saveState();
@@ -1848,198 +2453,591 @@ function bindHome() {
     }
   });
 
-  supervisorShiftForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
+  const latestBySubmittedAt = (rows = []) =>
+    rows.reduce((latest, row) => {
+      if (!latest) return row;
+      const a = Date.parse(row?.submittedAt || "") || 0;
+      const b = Date.parse(latest?.submittedAt || "") || 0;
+      return a >= b ? row : latest;
+    }, null);
+
+  const upsertRowById = (rows, nextRow) => {
+    if (!Array.isArray(rows) || !nextRow) return;
+    if (nextRow.id) {
+      const idx = rows.findIndex((row) => row.id === nextRow.id);
+      if (idx >= 0) {
+        rows[idx] = { ...rows[idx], ...nextRow };
+        return;
+      }
+    }
+    rows.push(nextRow);
+  };
+
+  const supervisorActorName = (session) => {
+    const sup = supervisorByUsername(session?.username || "");
+    return sup?.name || session?.username || "supervisor";
+  };
+
+  const isOpenRunRow = (row) =>
+    strictTimeValid(row?.productionStartTime) &&
+    strictTimeValid(row?.finishTime) &&
+    row.productionStartTime === row.finishTime;
+
+  const isOpenShiftRow = (row) =>
+    strictTimeValid(row?.startTime) &&
+    strictTimeValid(row?.finishTime) &&
+    row.startTime === row.finishTime;
+
+  const isOpenBreakRow = (row) =>
+    strictTimeValid(row?.breakStart) &&
+    !strictTimeValid(row?.breakFinish);
+
+  const isOpenDowntimeRow = (row) =>
+    strictTimeValid(row?.downtimeStart) &&
+    strictTimeValid(row?.downtimeFinish) &&
+    row.downtimeStart === row.downtimeFinish;
+
+  supervisorShiftForm.addEventListener("submit", (event) => event.preventDefault());
+  supervisorRunForm.addEventListener("submit", (event) => event.preventDefault());
+  supervisorDownForm.addEventListener("submit", (event) => event.preventDefault());
+
+  const submitSupervisorShift = async ({ complete = false } = {}) => {
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
-    if (!session.assignedLineIds.includes(lineId) || !appState.lines[lineId]) {
+    const line = appState.lines[lineId];
+    if (!session.assignedLineIds.includes(lineId) || !line) {
       alert("You are not assigned to that line.");
       return;
     }
+
     const date = document.getElementById("superShiftDate").value || todayISO();
     const shift = document.getElementById("superShiftShift").value || "Day";
-    const crewOnShift = Math.max(0, Math.floor(num(document.getElementById("superShiftCrew").value || 0)));
-    const startTime = document.getElementById("superShiftStart").value || "";
-    const break1Start = document.getElementById("superShiftBreak1").value || "";
-    const break2Start = document.getElementById("superShiftBreak2").value || "";
-    const break3Start = document.getElementById("superShiftBreak3").value || "";
-    const finishTime = document.getElementById("superShiftFinish").value || "";
+    const startInput = document.getElementById("superShiftStart").value || "";
+    const finishInput = document.getElementById("superShiftFinish").value || "";
+    const crewRaw = document.getElementById("superShiftCrew").value;
+
     if (!rowIsValidDateShift(date, shift)) {
       alert("Date/shift are invalid.");
       return;
     }
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+
+    const matchingRows = (line.shiftRows || []).filter((row) => row.date === date && row.shift === shift);
+    let existing = null;
+    if (superShiftLogIdInput.value) {
+      existing = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
+      if (existing && (existing.date !== date || existing.shift !== shift)) existing = null;
+    }
+    if (!existing) {
+      existing = latestBySubmittedAt(matchingRows.filter(isOpenShiftRow));
+    }
+
+    const startTime = startInput || existing?.startTime || nowTimeHHMM();
+    const finishTime = finishInput || (complete ? nowTimeHHMM() : startTime);
+    const crewOnShift = crewRaw === ""
+      ? Math.max(0, Math.floor(num(existing?.crewOnShift)))
+      : Math.max(0, Math.floor(num(crewRaw)));
+
     if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
       alert("Shift start and finish must be in HH:MM (24h).");
       return;
     }
-    if (!optionalStrictTimeValid(break1Start) || !optionalStrictTimeValid(break2Start) || !optionalStrictTimeValid(break3Start)) {
-      alert("Break times must be HH:MM.");
+    if (!complete && finishTime !== startTime) {
+      alert("Open shift logs keep finish equal to start. Use Complete Shift when the shift ends.");
       return;
     }
-    if (crewOnShift < 0) {
-      alert("Crew on shift cannot be negative.");
+    if (complete && superShiftOpenBreakIdInput?.value) {
+      alert("End the current break before completing the shift.");
       return;
     }
+
+    const payload = { lineId, date, shift, crewOnShift, startTime, finishTime };
     try {
-      await syncSupervisorShiftLog(session, {
-        lineId,
-        date,
-        shift,
-        crewOnShift,
-        startTime,
-        break1Start,
-        break2Start,
-        break3Start,
-        finishTime
-      });
-      const line = appState.lines[lineId];
-      line.shiftRows.push({
-        date,
-        shift,
-        crewOnShift,
-        startTime,
-        break1Start,
-        break2Start,
-        break3Start,
-        finishTime,
-        submittedBy: session.username,
-        submittedAt: new Date().toISOString()
-      });
-      addAudit(line, "SUPERVISOR_SHIFT_LOG", `${session.username} logged ${shift} shift for ${date} (crew ${crewOnShift})`);
-      form.reset();
-      document.getElementById("superShiftDate").value = date;
+      const saved = existing?.id
+        ? await patchSupervisorShiftLog(session, existing.id, payload)
+        : await syncSupervisorShiftLog(session, payload);
+
+      const savedRow = {
+        ...(existing || {}),
+        ...payload,
+        id: saved?.id || existing?.id || "",
+        submittedBy: supervisorActorName(session),
+        submittedAt: saved?.submittedAt || nowIso()
+      };
+      upsertRowById(line.shiftRows, savedRow);
+      superShiftLogIdInput.value = complete ? "" : savedRow.id || "";
+      if (complete && superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+      addAudit(
+        line,
+        complete ? "SUPERVISOR_SHIFT_COMPLETE" : "SUPERVISOR_SHIFT_PROGRESS",
+        `${supervisorActorName(session)} ${complete ? "completed" : "updated"} ${shift} shift for ${date}`
+      );
+      if (complete) {
+        supervisorShiftForm.reset();
+        document.getElementById("superShiftDate").value = date;
+        document.getElementById("superShiftShift").value = shift;
+      }
       saveState();
       renderAll();
     } catch (error) {
       alert(`Could not save shift log.\n${error?.message || "Please try again."}`);
     }
-  });
+  };
 
-  supervisorRunForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
+  const submitSupervisorBreakStart = async () => {
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
-    if (!session.assignedLineIds.includes(lineId) || !appState.lines[lineId]) {
+    const line = appState.lines[lineId];
+    if (!session.assignedLineIds.includes(lineId) || !line) {
       alert("You are not assigned to that line.");
       return;
     }
-    const date = document.getElementById("superRunDate").value || todayISO();
-    const shift = document.getElementById("superRunShift").value || "Day";
-    const product = String(document.getElementById("superRunProduct").value || "").trim();
-    const setUpStartTime = document.getElementById("superRunSetupStart").value || "";
-    const productionStartTime = document.getElementById("superRunProdStart").value || "";
-    const finishTime = document.getElementById("superRunFinish").value || "";
-    const unitsProduced = num(document.getElementById("superRunUnits").value || 0);
-    if (!rowIsValidDateShift(date, shift)) {
-      alert("Date/shift are invalid.");
+    const date = document.getElementById("superShiftDate").value || todayISO();
+    const shift = document.getElementById("superShiftShift").value || "Day";
+    const breakStart = String(superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
+    if (!strictTimeValid(breakStart)) {
+      alert("Break start time must be HH:MM.");
       return;
     }
-    if (!product) return;
-    if (!optionalStrictTimeValid(setUpStartTime) || !strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+    let shiftLog = null;
+    if (superShiftLogIdInput?.value) {
+      shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
+      if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
+    }
+    if (!shiftLog) {
+      shiftLog = latestBySubmittedAt((line.shiftRows || []).filter((row) => row.date === date && row.shift === shift && isOpenShiftRow(row)));
+    }
+    if (!shiftLog?.id) {
+      alert("Start the shift first, then you can log breaks.");
+      return;
+    }
+    const openBreak = latestBySubmittedAt((line.breakRows || []).filter((row) => row.shiftLogId === shiftLog.id && isOpenBreakRow(row)));
+    if (openBreak?.id) {
+      alert("There is already an open break. End it before starting a new break.");
+      return;
+    }
+    try {
+      const savedBreak = await startSupervisorShiftBreak(session, shiftLog.id, breakStart);
+      const savedRow = {
+        date,
+        shift,
+        shiftLogId: shiftLog.id,
+        breakStart,
+        breakFinish: "",
+        id: savedBreak?.id || "",
+        submittedBy: supervisorActorName(session),
+        submittedAt: savedBreak?.submittedAt || nowIso()
+      };
+      upsertRowById(line.breakRows, savedRow);
+      if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = savedRow.id || "";
+      if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
+      addAudit(line, "SUPERVISOR_BREAK_START", `${supervisorActorName(session)} started break (${shift} ${date})`);
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not start break.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const submitSupervisorBreakEnd = async () => {
+    const session = appState.supervisorSession;
+    if (!session) return;
+    const lineId = selectedSupervisorLineId();
+    const line = appState.lines[lineId];
+    if (!session.assignedLineIds.includes(lineId) || !line) {
+      alert("You are not assigned to that line.");
+      return;
+    }
+    const date = document.getElementById("superShiftDate").value || todayISO();
+    const shift = document.getElementById("superShiftShift").value || "Day";
+    const breakFinish = String(superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
+    if (!strictTimeValid(breakFinish)) {
+      alert("Break finish time must be HH:MM.");
+      return;
+    }
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+    let shiftLog = null;
+    if (superShiftLogIdInput?.value) {
+      shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
+      if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
+    }
+    if (!shiftLog) {
+      shiftLog = latestBySubmittedAt((line.shiftRows || []).filter((row) => row.date === date && row.shift === shift && isOpenShiftRow(row)));
+    }
+    if (!shiftLog?.id) {
+      alert("No open shift found for this date/shift.");
+      return;
+    }
+    let openBreak = null;
+    if (superShiftOpenBreakIdInput?.value) {
+      openBreak = (line.breakRows || []).find((row) => row.id === superShiftOpenBreakIdInput.value) || null;
+      if (openBreak && openBreak.shiftLogId !== shiftLog.id) openBreak = null;
+    }
+    if (!openBreak) {
+      openBreak = latestBySubmittedAt((line.breakRows || []).filter((row) => row.shiftLogId === shiftLog.id && isOpenBreakRow(row)));
+    }
+    if (!openBreak?.id) {
+      alert("No open break found for this shift.");
+      return;
+    }
+    try {
+      const savedBreak = await endSupervisorShiftBreak(session, shiftLog.id, openBreak.id, breakFinish);
+      const savedRow = {
+        ...openBreak,
+        breakFinish,
+        submittedBy: supervisorActorName(session),
+        submittedAt: savedBreak?.submittedAt || nowIso()
+      };
+      upsertRowById(line.breakRows, savedRow);
+      if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+      if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
+      addAudit(line, "SUPERVISOR_BREAK_END", `${supervisorActorName(session)} ended break (${shift} ${date})`);
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not end break.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const submitSupervisorRun = async ({ complete = false } = {}) => {
+    const session = appState.supervisorSession;
+    if (!session) return;
+    const lineId = selectedSupervisorLineId();
+    const line = appState.lines[lineId];
+    if (!session.assignedLineIds.includes(lineId) || !line) {
+      alert("You are not assigned to that line.");
+      return;
+    }
+
+    const date = document.getElementById("superRunDate").value || todayISO();
+    const productInput = String(document.getElementById("superRunProduct").value || "").trim();
+    const prodStartInput = document.getElementById("superRunProdStart").value || "";
+    const finishInput = document.getElementById("superRunFinish").value || "";
+    const unitsRaw = document.getElementById("superRunUnits").value;
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
+      alert("Date is invalid.");
+      return;
+    }
+
+    let existing = null;
+    if (superRunLogIdInput.value) {
+      existing = (line.runRows || []).find((row) => row.id === superRunLogIdInput.value) || null;
+      if (
+        existing &&
+        (existing.date !== date || (productInput && existing.product !== productInput))
+      ) {
+        existing = null;
+      }
+    }
+
+    const product = productInput || existing?.product || "";
+    if (!product) {
+      alert("Product is required.");
+      return;
+    }
+
+    const productionStartTime = prodStartInput || existing?.productionStartTime || nowTimeHHMM();
+    const finishTime = finishInput || (complete ? nowTimeHHMM() : productionStartTime);
+    const unitsProduced = unitsRaw === ""
+      ? Math.max(0, num(existing?.unitsProduced))
+      : Math.max(0, num(unitsRaw));
+    const shift = existing?.shift || inferShiftForLog(line, date, productionStartTime, appState.supervisorSelectedShift || "Day");
+
+    if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
       alert("Production start and finish must be HH:MM (24h).");
       return;
     }
-    if (unitsProduced < 0) {
-      alert("Units produced cannot be negative.");
+    if (!complete && finishTime !== productionStartTime) {
+      alert("Open run logs keep finish equal to start. Use the Complete pill on the log when the run ends.");
       return;
     }
-    if (!product) return;
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+
+    const payload = { lineId, date, shift, setUpStartTime: "", product, productionStartTime, finishTime, unitsProduced };
     try {
-      await syncSupervisorRunLog(session, {
-        lineId,
-        date,
-        shift,
-        product,
-        setUpStartTime,
-        productionStartTime,
-        finishTime,
-        unitsProduced
-      });
-      const line = appState.lines[lineId];
-      line.runRows.push({
-        date,
-        shift,
-        product,
-        setUpStartTime,
-        productionStartTime,
-        finishTime,
-        unitsProduced,
-        submittedBy: session.username,
-        submittedAt: new Date().toISOString()
-      });
-      addAudit(line, "SUPERVISOR_RUN_LOG", `${session.username} logged run ${product} (${unitsProduced} units)`);
-      form.reset();
-      document.getElementById("superRunDate").value = date;
+      const saved = existing?.id
+        ? await patchSupervisorRunLog(session, existing.id, payload)
+        : await syncSupervisorRunLog(session, payload);
+
+      const savedRow = {
+        ...(existing || {}),
+        ...payload,
+        id: saved?.id || existing?.id || "",
+        submittedBy: supervisorActorName(session),
+        submittedAt: saved?.submittedAt || nowIso()
+      };
+      upsertRowById(line.runRows, savedRow);
+      superRunLogIdInput.value = "";
+      addAudit(
+        line,
+        complete ? "SUPERVISOR_RUN_COMPLETE" : "SUPERVISOR_RUN_PROGRESS",
+        `${supervisorActorName(session)} ${complete ? "completed" : "updated"} run ${product}`
+      );
+      if (complete) {
+        supervisorRunForm.reset();
+        document.getElementById("superRunDate").value = date;
+      }
       saveState();
       renderAll();
     } catch (error) {
       alert(`Could not save production run.\n${error?.message || "Please try again."}`);
     }
-  });
+  };
 
-  supervisorDownForm.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const form = event.currentTarget;
+  const formatMinutesToHHMM = (minutes) => {
+    const minsPerDay = 24 * 60;
+    const normalized = ((Math.floor(num(minutes)) % minsPerDay) + minsPerDay) % minsPerDay;
+    const hh = String(Math.floor(normalized / 60)).padStart(2, "0");
+    const mm = String(normalized % 60).padStart(2, "0");
+    return `${hh}:${mm}`;
+  };
+
+  const loadSupervisorRunForEdit = (runId) => {
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
-    if (!session.assignedLineIds.includes(lineId) || !appState.lines[lineId]) {
+    const line = appState.lines[lineId];
+    if (!line || !session.assignedLineIds.includes(lineId)) return;
+    const row = (line.runRows || []).find((item) => item.id === runId);
+    if (!row) return;
+
+    superRunLogIdInput.value = row.id || "";
+    document.getElementById("superRunDate").value = row.date || todayISO();
+    document.getElementById("superRunProduct").value = row.product || "";
+    document.getElementById("superRunProdStart").value = row.productionStartTime || "";
+    document.getElementById("superRunFinish").value = row.finishTime || "";
+    document.getElementById("superRunUnits").value = formatNum(Math.max(0, num(row.unitsProduced)), 0);
+    const productInput = document.getElementById("superRunProduct");
+    if (productInput) productInput.focus();
+  };
+
+  const completeSupervisorRunById = async (runId) => {
+    const session = appState.supervisorSession;
+    if (!session) return;
+    const lineId = selectedSupervisorLineId();
+    const line = appState.lines[lineId];
+    if (!session.assignedLineIds.includes(lineId) || !line) {
       alert("You are not assigned to that line.");
       return;
     }
-    const date = document.getElementById("superDownDate").value || todayISO();
-    const shift = document.getElementById("superDownShift").value || "Day";
-    const startTime = document.getElementById("superDownStart").value || "";
-    const finishTime = document.getElementById("superDownFinish").value || "";
-    const equipment = document.getElementById("superDownEquipment").value || "";
-    const reason = String(document.getElementById("superDownReason").value || "").trim();
-    if (!rowIsValidDateShift(date, shift)) {
-      alert("Date/shift are invalid.");
+    const row = (line.runRows || []).find((item) => item.id === runId);
+    if (!row) {
+      alert("Run log could not be found.");
       return;
     }
-    if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
+    const productionStartTime = row.productionStartTime || nowTimeHHMM();
+    if (!strictTimeValid(productionStartTime)) {
+      alert("Run start time is invalid. Edit the run and set a valid start time first.");
+      return;
+    }
+    const nowCandidate = nowTimeHHMM();
+    const startMins = parseTimeToMinutes(productionStartTime);
+    const nowMins = parseTimeToMinutes(nowCandidate);
+    const defaultFinish = Number.isFinite(startMins) && Number.isFinite(nowMins) && startMins === nowMins
+      ? formatMinutesToHHMM(startMins + 1)
+      : nowCandidate;
+    const finishPrompt = window.prompt("Finish time (HH:MM)", defaultFinish);
+    if (finishPrompt === null) return;
+    const finishTime = String(finishPrompt || "").trim();
+    if (!strictTimeValid(finishTime)) {
+      alert("Finish time must be HH:MM (24h).");
+      return;
+    }
+    if (finishTime === productionStartTime) {
+      alert("Finish time must be different from start time.");
+      return;
+    }
+    const unitsPrompt = window.prompt("Units produced", String(Math.max(0, num(row.unitsProduced))));
+    if (unitsPrompt === null) return;
+    const unitsProduced = Math.max(0, num(unitsPrompt));
+    const shift = row.shift || inferShiftForLog(line, row.date, productionStartTime, appState.supervisorSelectedShift || "Day");
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+    const payload = {
+      lineId,
+      date: row.date,
+      shift,
+      setUpStartTime: "",
+      product: row.product || "Run",
+      productionStartTime,
+      finishTime,
+      unitsProduced
+    };
+    try {
+      const saved = await patchSupervisorRunLog(session, row.id, payload);
+      const savedRow = {
+        ...row,
+        ...payload,
+        id: saved?.id || row.id || "",
+        submittedBy: supervisorActorName(session),
+        submittedAt: saved?.submittedAt || nowIso()
+      };
+      upsertRowById(line.runRows, savedRow);
+      if (superRunLogIdInput.value === row.id) superRunLogIdInput.value = "";
+      addAudit(
+        line,
+        "SUPERVISOR_RUN_COMPLETE",
+        `${supervisorActorName(session)} completed run ${payload.product}`
+      );
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not complete production run.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const submitSupervisorDowntime = async ({ complete = false } = {}) => {
+    const session = appState.supervisorSession;
+    if (!session) return;
+    const lineId = selectedSupervisorLineId();
+    const line = appState.lines[lineId];
+    if (!session.assignedLineIds.includes(lineId) || !line) {
+      alert("You are not assigned to that line.");
+      return;
+    }
+
+    const date = document.getElementById("superDownDate").value || todayISO();
+    const startInput = document.getElementById("superDownStart").value || "";
+    const finishInput = document.getElementById("superDownFinish").value || "";
+    const reasonCategoryInput = document.getElementById("superDownReasonCategory").value || "";
+    const reasonDetailInput = document.getElementById("superDownReasonDetail").value || "";
+    const reasonNoteInput = String(document.getElementById("superDownReasonNote").value || "").trim();
+
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
+      alert("Date is invalid.");
+      return;
+    }
+
+    let existing = null;
+    if (superDownLogIdInput.value) {
+      existing = (line.downtimeRows || []).find((row) => row.id === superDownLogIdInput.value) || null;
+      if (
+        existing &&
+        (existing.date !== date || (reasonCategoryInput === "Equipment" && reasonDetailInput && existing.equipment !== reasonDetailInput))
+      ) {
+        existing = null;
+      }
+    }
+    if (!existing) {
+      existing = latestBySubmittedAt(
+        (line.downtimeRows || []).filter((row) => row.date === date && isOpenDowntimeRow(row))
+      );
+    }
+
+    const downtimeStart = startInput || existing?.downtimeStart || nowTimeHHMM();
+    const downtimeFinish = finishInput || (complete ? nowTimeHHMM() : existing?.downtimeFinish || downtimeStart);
+    const shift = existing?.shift || inferShiftForLog(line, date, downtimeStart, appState.supervisorSelectedShift || "Day");
+    const reasonCategory = reasonCategoryInput || existing?.reasonCategory || "";
+    const reasonDetail = reasonDetailInput || existing?.reasonDetail || "";
+    const reasonNote = reasonNoteInput !== "" ? reasonNoteInput : existing?.reasonNote || "";
+    const equipment = reasonCategory === "Equipment" ? (reasonDetail || existing?.equipment || "") : "";
+    const reason = buildDowntimeReasonText(line, reasonCategory, reasonDetail, reasonNote);
+
+    if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
       alert("Downtime start and finish must be HH:MM (24h).");
       return;
     }
-    if (!equipment) {
-      alert("Select equipment stage.");
+    if (!reasonCategory) {
+      alert("Reason group is required.");
       return;
     }
+    if (!reasonDetail) {
+      alert("Reason detail is required.");
+      return;
+    }
+    if (reasonCategory === "Equipment" && !equipment) {
+      alert("Select an equipment stage.");
+      return;
+    }
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+
+    const payload = {
+      lineId,
+      date,
+      shift,
+      downtimeStart,
+      downtimeFinish,
+      equipment,
+      reason,
+      reasonCategory,
+      reasonDetail,
+      reasonNote
+    };
     try {
-      await syncSupervisorDowntimeLog(session, {
-        lineId,
-        date,
-        shift,
-        downtimeStart: startTime,
-        downtimeFinish: finishTime,
-        equipment,
-        reason
-      });
-      const line = appState.lines[lineId];
-      line.downtimeRows.push({
-        date,
-        shift,
-        downtimeStart: startTime,
-        downtimeFinish: finishTime,
-        equipment,
-        reason,
-        submittedBy: session.username,
-        submittedAt: new Date().toISOString()
-      });
-      addAudit(line, "SUPERVISOR_DOWNTIME_LOG", `${session.username} logged downtime on ${stageNameById(equipment)}`);
-      form.reset();
-      document.getElementById("superDownDate").value = date;
-      supervisorDownEquipment.innerHTML = supervisorEquipmentOptions(selectedSupervisorLine());
+      const saved = existing?.id
+        ? await patchSupervisorDowntimeLog(session, existing.id, payload)
+        : await syncSupervisorDowntimeLog(session, payload);
+
+      const savedRow = {
+        ...(existing || {}),
+        ...payload,
+        id: saved?.id || existing?.id || "",
+        submittedBy: supervisorActorName(session),
+        submittedAt: saved?.submittedAt || nowIso()
+      };
+      upsertRowById(line.downtimeRows, savedRow);
+      superDownLogIdInput.value = complete ? "" : savedRow.id || "";
+      addAudit(
+        line,
+        complete ? "SUPERVISOR_DOWNTIME_COMPLETE" : "SUPERVISOR_DOWNTIME_PROGRESS",
+        `${supervisorActorName(session)} ${complete ? "completed" : "updated"} downtime on ${stageNameById(equipment)}`
+      );
+      if (complete) {
+        supervisorDownForm.reset();
+        document.getElementById("superDownDate").value = date;
+        if (supervisorDownReasonCategory) supervisorDownReasonCategory.value = "";
+        refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
+      }
       saveState();
       renderAll();
     } catch (error) {
       alert(`Could not save downtime log.\n${error?.message || "Please try again."}`);
     }
-  });
+  };
+
+  superShiftSaveProgressBtn.addEventListener("click", () => submitSupervisorShift({ complete: false }));
+  if (superShiftBreakStartBtn) superShiftBreakStartBtn.addEventListener("click", submitSupervisorBreakStart);
+  if (superShiftBreakEndBtn) superShiftBreakEndBtn.addEventListener("click", submitSupervisorBreakEnd);
+  superShiftCompleteBtn.addEventListener("click", () => submitSupervisorShift({ complete: true }));
+  superRunSaveProgressBtn.addEventListener("click", () => submitSupervisorRun({ complete: false }));
+  if (superRunOpenList) {
+    superRunOpenList.addEventListener("click", (event) => {
+      const editBtn = event.target.closest("[data-super-run-edit]");
+      if (editBtn) {
+        const runId = editBtn.getAttribute("data-super-run-edit");
+        if (runId) loadSupervisorRunForEdit(runId);
+        return;
+      }
+      const completeBtn = event.target.closest("[data-super-run-complete]");
+      if (completeBtn) {
+        const runId = completeBtn.getAttribute("data-super-run-complete");
+        if (runId) completeSupervisorRunById(runId);
+      }
+    });
+  }
+  superDownSaveProgressBtn.addEventListener("click", () => submitSupervisorDowntime({ complete: false }));
+  superDownCompleteBtn.addEventListener("click", () => submitSupervisorDowntime({ complete: true }));
 
   openBuilderBtn.addEventListener("click", openBuilderModal);
   if (openBuilderSecondaryBtn) openBuilderSecondaryBtn.addEventListener("click", openBuilderModal);
@@ -2244,10 +3242,16 @@ function bindHome() {
         delete appState.lines[id];
         appState.supervisors = (appState.supervisors || []).map((sup) => ({
           ...sup,
-          assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => lineId !== id)
+          assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => lineId !== id),
+          assignedLineShifts: Object.fromEntries(
+            Object.entries(sup.assignedLineShifts || {}).filter(([lineId]) => lineId !== id)
+          )
         }));
         if (appState.supervisorSession) {
           appState.supervisorSession.assignedLineIds = (appState.supervisorSession.assignedLineIds || []).filter((lineId) => lineId !== id);
+          appState.supervisorSession.assignedLineShifts = Object.fromEntries(
+            Object.entries(appState.supervisorSession.assignedLineShifts || {}).filter(([lineId]) => lineId !== id)
+          );
         }
         if (!Object.keys(appState.lines).length) {
           const fallback = makeDefaultLine("line-1", "Production Line");
@@ -2331,14 +3335,16 @@ function bindDataSubtabs() {
 }
 
 function bindVisualiserControls() {
-  const dateInput = document.getElementById("selectedDate");
-  const shiftButtons = Array.from(document.querySelectorAll(".shift-option[data-shift]"));
+  const dateInputs = Array.from(document.querySelectorAll("[data-manager-date]"));
+  const shiftButtons = Array.from(document.querySelectorAll(".shift-option[data-shift], .shift-option[data-day-shift]"));
   const map = document.getElementById("lineMap");
   const editBtn = document.getElementById("toggleLayoutEdit");
   const addLineBtn = document.getElementById("addFlowLine");
   const addArrowBtn = document.getElementById("addFlowArrow");
   const uploadShapeBtn = document.getElementById("uploadFlowShapeBtn");
   const uploadShapeInput = document.getElementById("uploadFlowShapeInput");
+  const prevButtons = [document.getElementById("prevShift"), document.getElementById("dayPrevShift")].filter(Boolean);
+  const nextButtons = [document.getElementById("nextShift"), document.getElementById("dayNextShift")].filter(Boolean);
   let layoutDragState = null;
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -2364,19 +3370,26 @@ function bindVisualiserControls() {
     angle: 0
   });
 
-  dateInput.value = state.selectedDate;
+  dateInputs.forEach((dateInput) => {
+    dateInput.value = state.selectedDate;
+  });
   setShiftToggleUI();
   setLayoutEditButtonUI();
 
-  dateInput.addEventListener("change", () => {
-    state.selectedDate = dateInput.value || todayISO();
-    saveState();
-    renderAll();
+  dateInputs.forEach((dateInput) => {
+    dateInput.addEventListener("change", () => {
+      state.selectedDate = dateInput.value || todayISO();
+      dateInputs.forEach((input) => {
+        input.value = state.selectedDate;
+      });
+      saveState();
+      renderAll();
+    });
   });
 
   shiftButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      const nextShift = btn.dataset.shift;
+      const nextShift = btn.dataset.shift || btn.dataset.dayShift;
       if (!nextShift || nextShift === state.selectedShift) return;
       state.selectedShift = nextShift;
       setShiftToggleUI();
@@ -2385,8 +3398,8 @@ function bindVisualiserControls() {
     });
   });
 
-  document.getElementById("prevShift").addEventListener("click", () => moveShift(-1));
-  document.getElementById("nextShift").addEventListener("click", () => moveShift(1));
+  prevButtons.forEach((btn) => btn.addEventListener("click", () => moveShift(-1)));
+  nextButtons.forEach((btn) => btn.addEventListener("click", () => moveShift(1)));
   editBtn.addEventListener("click", () => {
     state.visualEditMode = !state.visualEditMode;
     setLayoutEditButtonUI();
@@ -2728,24 +3741,40 @@ function moveShift(direction) {
   }
   state.selectedDate = formatDateLocal(date);
 
-  document.getElementById("selectedDate").value = state.selectedDate;
+  document.querySelectorAll("[data-manager-date]").forEach((input) => {
+    input.value = state.selectedDate;
+  });
   saveState();
   renderAll();
 }
 
 function setShiftToggleUI() {
-  document.querySelectorAll(".shift-option[data-shift]").forEach((btn) => {
-    const active = btn.dataset.shift === state.selectedShift;
+  document.querySelectorAll(".shift-option[data-shift], .shift-option[data-day-shift]").forEach((btn) => {
+    const active = (btn.dataset.shift || btn.dataset.dayShift) === state.selectedShift;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
 }
 
 function bindForms() {
-  const equipmentSelect = document.getElementById("downtimeEquipment");
-  equipmentSelect.innerHTML = stageOptionListHTML();
+  const reasonCategorySelect = document.getElementById("downtimeReasonCategory");
+  const reasonDetailSelect = document.getElementById("downtimeReasonDetail");
 
-  document.getElementById("shiftForm").addEventListener("submit", async (event) => {
+  const refreshManagerDowntimeDetailOptions = () => {
+    const category = String(reasonCategorySelect?.value || "");
+    setDowntimeDetailOptions(reasonDetailSelect, state, category, reasonDetailSelect?.value || "");
+  };
+
+  if (reasonCategorySelect) {
+    reasonCategorySelect.addEventListener("change", refreshManagerDowntimeDetailOptions);
+  }
+  refreshManagerDowntimeDetailOptions();
+
+  const shiftForm = document.getElementById("shiftForm");
+  const runForm = document.getElementById("runForm");
+  const downtimeForm = document.getElementById("downtimeForm");
+
+  shiftForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
@@ -2758,27 +3787,26 @@ function bindForms() {
       alert("Shift start and finish must be HH:MM (24h).");
       return;
     }
-    if (!optionalStrictTimeValid(data.break1Start) || !optionalStrictTimeValid(data.break2Start) || !optionalStrictTimeValid(data.break3Start)) {
-      alert("Break times must be HH:MM.");
-      return;
-    }
     if (data.crewOnShift < 0) {
       alert("Crew on shift cannot be negative.");
       return;
     }
     try {
-      await syncManagerShiftLog({
+      const payload = {
         lineId: state.id,
         date: data.date,
         shift: data.shift,
         crewOnShift: data.crewOnShift,
         startTime: data.startTime,
-        break1Start: data.break1Start || "",
-        break2Start: data.break2Start || "",
-        break3Start: data.break3Start || "",
         finishTime: data.finishTime
+      };
+      const saved = await syncManagerShiftLog(payload);
+      state.shiftRows.push({
+        ...data,
+        id: saved?.id || data.id || makeLocalLogId("shift"),
+        submittedBy: "manager",
+        submittedAt: saved?.submittedAt || nowIso()
       });
-      state.shiftRows.push(data);
       addAudit(state, "MANAGER_SHIFT_LOG", `Manager logged ${data.shift} shift for ${data.date} (crew ${data.crewOnShift})`);
       form.reset();
       saveState();
@@ -2788,19 +3816,19 @@ function bindForms() {
     }
   });
 
-  document.getElementById("runForm").addEventListener("submit", async (event) => {
+  runForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    if (!rowIsValidDateShift(data.date, data.shift)) {
-      alert("Date and shift are required.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data.date || ""))) {
+      alert("Date is required.");
       return;
     }
     if (!String(data.product || "").trim()) {
       alert("Product is required.");
       return;
     }
-    if (!optionalStrictTimeValid(data.setUpStartTime) || !strictTimeValid(data.productionStartTime) || !strictTimeValid(data.finishTime)) {
+    if (!strictTimeValid(data.productionStartTime) || !strictTimeValid(data.finishTime)) {
       alert("Production start and finish must be HH:MM (24h).");
       return;
     }
@@ -2808,19 +3836,27 @@ function bindForms() {
       alert("Units produced cannot be negative.");
       return;
     }
+    data.shift = inferShiftForLog(state, data.date, data.productionStartTime, state.selectedShift || "Day");
+    data.setUpStartTime = "";
     data.unitsProduced = num(data.unitsProduced);
     try {
-      await syncManagerRunLog({
+      const payload = {
         lineId: state.id,
         date: data.date,
         shift: data.shift,
         product: data.product,
-        setUpStartTime: data.setUpStartTime || "",
+        setUpStartTime: "",
         productionStartTime: data.productionStartTime,
         finishTime: data.finishTime,
         unitsProduced: data.unitsProduced
+      };
+      const saved = await syncManagerRunLog(payload);
+      state.runRows.push({
+        ...data,
+        id: saved?.id || data.id || makeLocalLogId("run"),
+        submittedBy: "manager",
+        submittedAt: saved?.submittedAt || nowIso()
       });
-      state.runRows.push(data);
       addAudit(state, "MANAGER_RUN_LOG", `Manager logged run ${data.product} (${data.unitsProduced} units)`);
       form.reset();
       saveState();
@@ -2830,24 +3866,34 @@ function bindForms() {
     }
   });
 
-  document.getElementById("downtimeForm").addEventListener("submit", async (event) => {
+  downtimeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    if (!rowIsValidDateShift(data.date, data.shift)) {
-      alert("Date and shift are required.");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data.date || ""))) {
+      alert("Date is required.");
       return;
     }
     if (!strictTimeValid(data.downtimeStart) || !strictTimeValid(data.downtimeFinish)) {
       alert("Downtime start and finish must be HH:MM (24h).");
       return;
     }
-    if (!String(data.equipment || "")) {
-      alert("Equipment stage is required.");
+    data.reasonCategory = String(data.reasonCategory || "").trim();
+    data.reasonDetail = String(data.reasonDetail || "").trim();
+    data.reasonNote = String(data.reasonNote || "").trim();
+    if (!data.reasonCategory) {
+      alert("Reason group is required.");
       return;
     }
+    if (!data.reasonDetail) {
+      alert("Reason detail is required.");
+      return;
+    }
+    data.shift = inferShiftForLog(state, data.date, data.downtimeStart, state.selectedShift || "Day");
+    data.equipment = data.reasonCategory === "Equipment" ? data.reasonDetail : "";
+    data.reason = buildDowntimeReasonText(state, data.reasonCategory, data.reasonDetail, data.reasonNote);
     try {
-      await syncManagerDowntimeLog({
+      const payload = {
         lineId: state.id,
         date: data.date,
         shift: data.shift,
@@ -2855,16 +3901,154 @@ function bindForms() {
         downtimeFinish: data.downtimeFinish,
         equipment: data.equipment,
         reason: data.reason || ""
+      };
+      const saved = await syncManagerDowntimeLog(payload);
+      state.downtimeRows.push({
+        ...data,
+        id: saved?.id || data.id || makeLocalLogId("down"),
+        submittedBy: "manager",
+        submittedAt: saved?.submittedAt || nowIso()
       });
-      state.downtimeRows.push(data);
       addAudit(state, "MANAGER_DOWNTIME_LOG", `Manager logged downtime on ${stageNameById(data.equipment)}`);
       form.reset();
-      equipmentSelect.innerHTML = stageOptionListHTML();
+      refreshManagerDowntimeDetailOptions();
       saveState();
       renderAll();
     } catch (error) {
       alert(`Could not save downtime log.\n${error?.message || "Please try again."}`);
     }
+  });
+
+  const editManagerLog = async (type, logId) => {
+    if (!logId) return;
+    if (type === "shift") {
+      const row = (state.shiftRows || []).find((item) => item.id === logId);
+      if (!row) return;
+      const crewRaw = window.prompt("Crew on shift", String(num(row.crewOnShift)));
+      if (crewRaw === null) return;
+      const startTime = window.prompt("Start time (HH:MM)", String(row.startTime || ""));
+      if (startTime === null) return;
+      const finishTime = window.prompt("Finish time (HH:MM)", String(row.finishTime || ""));
+      if (finishTime === null) return;
+      const crewOnShift = Math.max(0, Math.floor(num(crewRaw)));
+      if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
+        alert("Times must be HH:MM (24h).");
+        return;
+      }
+      const payload = { crewOnShift, startTime, finishTime };
+      const canPatchServer = UUID_RE.test(String(logId || ""));
+      try {
+        if (canPatchServer) {
+          const saved = await patchManagerShiftLog(logId, payload);
+          Object.assign(row, payload, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+        } else {
+          Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
+        }
+        addAudit(state, "MANAGER_SHIFT_EDIT", `Manager edited shift row for ${row.date} (${row.shift})`);
+        saveState();
+        renderAll();
+      } catch (error) {
+        alert(`Could not update shift row.\n${error?.message || "Please try again."}`);
+      }
+      return;
+    }
+
+    if (type === "run") {
+      const row = (state.runRows || []).find((item) => item.id === logId);
+      if (!row) return;
+      const product = window.prompt("Product", String(row.product || ""));
+      if (product === null) return;
+      const productionStartTime = window.prompt("Production start (HH:MM)", String(row.productionStartTime || ""));
+      if (productionStartTime === null) return;
+      const finishTime = window.prompt("Finish time (HH:MM)", String(row.finishTime || ""));
+      if (finishTime === null) return;
+      const unitsRaw = window.prompt("Units produced", String(num(row.unitsProduced)));
+      if (unitsRaw === null) return;
+      const unitsProduced = Math.max(0, num(unitsRaw));
+      if (!product.trim()) {
+        alert("Product is required.");
+        return;
+      }
+      if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
+        alert("Times must be HH:MM (24h).");
+        return;
+      }
+      const payload = {
+        product: product.trim(),
+        setUpStartTime: "",
+        productionStartTime,
+        finishTime,
+        unitsProduced
+      };
+      const canPatchServer = UUID_RE.test(String(logId || ""));
+      try {
+        if (canPatchServer) {
+          const saved = await patchManagerRunLog(logId, payload);
+          Object.assign(row, payload, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+        } else {
+          Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
+        }
+        addAudit(state, "MANAGER_RUN_EDIT", `Manager edited run ${row.product}`);
+        saveState();
+        renderAll();
+      } catch (error) {
+        alert(`Could not update run row.\n${error?.message || "Please try again."}`);
+      }
+      return;
+    }
+
+    if (type === "downtime") {
+      const row = (state.downtimeRows || []).find((item) => item.id === logId);
+      if (!row) return;
+      const downtimeStart = window.prompt("Downtime start (HH:MM)", String(row.downtimeStart || ""));
+      if (downtimeStart === null) return;
+      const downtimeFinish = window.prompt("Downtime finish (HH:MM)", String(row.downtimeFinish || ""));
+      if (downtimeFinish === null) return;
+      const reason = window.prompt("Reason", String(row.reason || ""));
+      if (reason === null) return;
+      if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
+        alert("Times must be HH:MM (24h).");
+        return;
+      }
+      const updatedValues = {
+        downtimeStart,
+        downtimeFinish,
+        equipment: row.equipment || "",
+        reason
+      };
+      const payload = {
+        lineId: state.id,
+        ...updatedValues
+      };
+      const canPatchServer = UUID_RE.test(String(logId || ""));
+      try {
+        if (canPatchServer) {
+          const saved = await patchManagerDowntimeLog(logId, payload);
+          Object.assign(row, updatedValues, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+        } else {
+          Object.assign(row, updatedValues, { submittedBy: "manager", submittedAt: nowIso() });
+        }
+        addAudit(state, "MANAGER_DOWNTIME_EDIT", `Manager edited downtime row for ${row.date} (${row.shift})`);
+        saveState();
+        renderAll();
+      } catch (error) {
+        alert(`Could not update downtime row.\n${error?.message || "Please try again."}`);
+      }
+    }
+  };
+
+  const handleLogTableEdit = (event) => {
+    const btn = event.target.closest("[data-log-edit]");
+    if (!btn) return;
+    const type = btn.getAttribute("data-log-edit");
+    const logId = btn.getAttribute("data-log-id");
+    if (!type || !logId) return;
+    editManagerLog(type, logId);
+  };
+
+  ["shiftTable", "runTable", "downtimeTable"].forEach((tableId) => {
+    const table = document.getElementById(tableId);
+    if (table) table.addEventListener("click", handleLogTableEdit);
   });
 }
 
@@ -2876,8 +4060,10 @@ function bindDataControls() {
     state.trendGranularity = sample.trendGranularity;
     state.trendMonth = sample.trendMonth;
     state.shiftRows = sample.shiftRows;
+    state.breakRows = sample.breakRows;
     state.runRows = sample.runRows;
     state.downtimeRows = sample.downtimeRows;
+    ensureManagerLogRowIds(state);
     addAudit(state, "LOAD_SAMPLE_DATA", "Sample shift/run/downtime rows loaded");
     saveState();
     renderAll();
@@ -2902,7 +4088,7 @@ function bindDataControls() {
         DowntimeMins: "",
         Start: row.startTime || "",
         Finish: row.finishTime || "",
-        Details: `Breaks: ${row.break1Start || "-"}, ${row.break2Start || "-"}, ${row.break3Start || "-"}`
+        Details: `Breaks logged: ${(data.breakRows || []).filter((br) => br.date === row.date && br.shift === row.shift).length}`
       })),
       ...data.runRows.map((row) => ({
         RecordType: "Run",
@@ -2951,8 +4137,10 @@ function bindDataControls() {
       state.crewsByShift = normalizeCrewByShift(parsed);
       state.stageSettings = normalizeStageSettings(parsed);
       state.shiftRows = parsed.shiftRows || [];
+      state.breakRows = parsed.breakRows || [];
       state.runRows = parsed.runRows || [];
       state.downtimeRows = parsed.downtimeRows || [];
+      ensureManagerLogRowIds(state);
       addAudit(state, "IMPORT_JSON", "Line JSON imported");
       saveState();
       renderAll();
@@ -3080,7 +4268,7 @@ function renderTable(tableId, columns, rows, fieldMap) {
 }
 
 function selectedRows(rows) {
-  return rows.filter((row) => row.date === state.selectedDate && row.shift === state.selectedShift);
+  return selectedShiftRowsByDate(rows, state.selectedDate, state.selectedShift);
 }
 
 function parseTimeToMinutes(value) {
@@ -3126,11 +4314,23 @@ function stageNameByIdForLine(line, id) {
   return stageDisplayName(stages[idx], idx);
 }
 
-function buildDayVisualiserBlocks(data, selectedDate, stageNameResolver) {
-  const blocks = { shifts: [], runs: [], downtime: [] };
-  const shiftRows = data.shiftRows.filter((row) => row.date === selectedDate);
-  const runRows = data.runRows.filter((row) => row.date === selectedDate);
-  const downRows = data.downtimeRows.filter((row) => row.date === selectedDate);
+function shiftMatchesSelection(rowShift, selectedShift) {
+  return !selectedShift || selectedShift === "Full Day" || rowShift === selectedShift;
+}
+
+function shortHourLabel(hour) {
+  const normalized = ((Number(hour) % 24) + 24) % 24;
+  const suffix = normalized >= 12 ? "p" : "a";
+  const display = normalized % 12 === 0 ? 12 : normalized % 12;
+  return `${display}${suffix}`;
+}
+
+function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver) {
+  const blocks = { shifts: [], breaks: [], runs: [], downtime: [], source: {} };
+  const shiftRows = data.shiftRows.filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
+  const breakRows = (data.breakRows || []).filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
+  const runRows = data.runRows.filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
+  const downRows = data.downtimeRows.filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
 
   shiftRows
     .slice()
@@ -3146,22 +4346,20 @@ function buildDayVisualiserBlocks(data, selectedDate, stageNameResolver) {
           sub: `${formatTime12h(row.startTime)} - ${formatTime12h(row.finishTime)}`
         });
       });
+    });
 
-      [
-        { label: "Break 1", start: row.break1Start, mins: 15 },
-        { label: "Break 2", start: row.break2Start, mins: 30 },
-        { label: "Break 3", start: row.break3Start, mins: 15 }
-      ].forEach((brk) => {
-        const breakStart = parseTimeToMinutes(brk.start);
-        if (breakStart === null) return;
-        const breakEnd = (breakStart + brk.mins) % (24 * 60);
-        splitAcrossMidnight(breakStart, breakEnd).forEach((segment) => {
-          blocks.shifts.push({
-            ...segment,
-            type: "break",
-            title: brk.label,
-            sub: `${formatTime12h(brk.start)} (${brk.mins} min)`
-          });
+  breakRows
+    .slice()
+    .sort((a, b) => String(a.breakStart || "").localeCompare(String(b.breakStart || "")))
+    .forEach((brk, index) => {
+      const breakStart = parseTimeToMinutes(brk.breakStart);
+      const breakEnd = parseTimeToMinutes(brk.breakFinish);
+      splitAcrossMidnight(breakStart, breakEnd).forEach((segment) => {
+        blocks.breaks.push({
+          ...segment,
+          type: "break",
+          title: `Break ${index + 1}`,
+          sub: `${formatTime12h(brk.breakStart)} - ${formatTime12h(brk.breakFinish)}`
         });
       });
     });
@@ -3170,26 +4368,17 @@ function buildDayVisualiserBlocks(data, selectedDate, stageNameResolver) {
     .slice()
     .sort((a, b) => String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || "")))
     .forEach((row, index) => {
-      const setupStart = parseTimeToMinutes(row.setUpStartTime);
       const prodStart = parseTimeToMinutes(row.productionStartTime);
       const finish = parseTimeToMinutes(row.finishTime);
       const runLabel = `${row.product || "Run"} ${runRows.length > 1 ? `(${index + 1})` : ""}`.trim();
-
-      splitAcrossMidnight(setupStart, prodStart).forEach((segment) => {
-        blocks.runs.push({
-          ...segment,
-          type: "run-setup",
-          title: `${runLabel} Setup`,
-          sub: `${formatTime12h(row.setUpStartTime)} - ${formatTime12h(row.productionStartTime)}`
-        });
-      });
+      const unitsLabel = num(row.unitsProduced) > 0 ? ` | ${formatNum(num(row.unitsProduced), 0)} units` : "";
 
       splitAcrossMidnight(prodStart, finish).forEach((segment) => {
         blocks.runs.push({
           ...segment,
           type: "run-main",
           title: runLabel,
-          sub: `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}`
+          sub: `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}${unitsLabel}`
         });
       });
     });
@@ -3212,94 +4401,343 @@ function buildDayVisualiserBlocks(data, selectedDate, stageNameResolver) {
       });
     });
 
+  blocks.source = { shiftRows, breakRows, runRows, downRows };
   return blocks;
 }
 
-function renderDayVisualiserTo(rootId, data, selectedDate, stageNameResolver) {
+function buildDayAtGlance(blocks, stageNameResolver) {
+  const mergeIntervals = (rows) =>
+    rows
+      .map((row) => ({
+        start: Math.max(0, num(row.start)),
+        end: Math.min(24 * 60, num(row.end))
+      }))
+      .filter((interval) => interval.end > interval.start)
+      .sort((a, b) => a.start - b.start)
+      .reduce((merged, current) => {
+        const last = merged[merged.length - 1];
+        if (!last || current.start > last.end) merged.push({ ...current });
+        else if (current.end > last.end) last.end = current.end;
+        return merged;
+      }, []);
+  const overlapMins = (leftIntervals, rightIntervals) => {
+    let i = 0;
+    let j = 0;
+    let total = 0;
+    while (i < leftIntervals.length && j < rightIntervals.length) {
+      const left = leftIntervals[i];
+      const right = rightIntervals[j];
+      const start = Math.max(left.start, right.start);
+      const end = Math.min(left.end, right.end);
+      if (end > start) total += end - start;
+      if (left.end <= right.end) i += 1;
+      else j += 1;
+    }
+    return total;
+  };
+  const minutesFromBlocks = (rows) => rows.reduce((sum, row) => sum + Math.max(0, num(row.end) - num(row.start)), 0);
+  const runMins = minutesFromBlocks(blocks.runs);
+  const breakMins = minutesFromBlocks(blocks.breaks);
+  const downtimeMins = minutesFromBlocks(blocks.downtime);
+  const trackedTotal = runMins + breakMins + downtimeMins;
+  const shiftIntervals = mergeIntervals(blocks.shifts);
+  const activityIntervals = mergeIntervals([...blocks.runs, ...blocks.breaks, ...blocks.downtime]);
+  const shiftMins = shiftIntervals.reduce((sum, interval) => sum + (interval.end - interval.start), 0);
+  const coveredInShiftMins = overlapMins(shiftIntervals, activityIntervals);
+  const unassignedMins = Math.max(0, shiftMins - coveredInShiftMins);
+  const allocationTotal = trackedTotal + unassignedMins;
+
+  const allocations = [
+    { key: "run", label: "Run", minutes: runMins, className: "run-main" },
+    { key: "break", label: "Break", minutes: breakMins, className: "break" },
+    { key: "downtime", label: "Downtime", minutes: downtimeMins, className: "downtime" },
+    { key: "unassigned", label: "Unassigned", minutes: unassignedMins, className: "unassigned" }
+  ].map((entry) => ({
+    ...entry,
+    pct: allocationTotal > 0 ? (entry.minutes / allocationTotal) * 100 : 0
+  }));
+
+  const downtimeByCause = new Map();
+  (blocks.source.downRows || []).forEach((row) => {
+    const equipmentLabel = stageNameResolver(row.equipment || "");
+    const reasonText = String(row.reason || "").trim();
+    const label = reasonText ? `${reasonText}${equipmentLabel ? ` (${equipmentLabel})` : ""}` : equipmentLabel || "Unspecified cause";
+    const loggedMins = num(row.downtimeMins);
+    const mins = loggedMins > 0 ? loggedMins : diffMinutes(row.downtimeStart, row.downtimeFinish);
+    downtimeByCause.set(label, (downtimeByCause.get(label) || 0) + Math.max(0, mins));
+  });
+  const topDowntime = Array.from(downtimeByCause.entries())
+    .map(([label, minutes]) => ({ label, minutes }))
+    .sort((a, b) => b.minutes - a.minutes)
+    .slice(0, 3);
+
+  return {
+    trackedTotal,
+    allocations,
+    topDowntime,
+    runCount: (blocks.source.runRows || []).length,
+    downtimeCount: (blocks.source.downRows || []).length
+  };
+}
+
+function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageNameResolver) {
   const root = document.getElementById(rootId);
   if (!root) return;
-  const blocks = buildDayVisualiserBlocks(data, selectedDate, stageNameResolver);
-  const all = [...blocks.shifts, ...blocks.runs, ...blocks.downtime].filter((item) => Number.isFinite(item.start) && Number.isFinite(item.end));
+  const blocks = buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver);
+  const all = [...blocks.shifts, ...blocks.breaks, ...blocks.runs, ...blocks.downtime].filter(
+    (item) => Number.isFinite(item.start) && Number.isFinite(item.end)
+  );
   if (!all.length) {
-    root.style.removeProperty("--day-viz-hours");
     root.innerHTML = `<div class="day-viz-empty">No shift/run/downtime records for ${selectedDate}.</div>`;
     return;
   }
 
   const dayStartHour = 5;
-  let startHour = Math.max(dayStartHour, Math.floor(Math.min(...all.map((b) => b.start)) / 60) - 1);
-  let endHour = Math.min(24, Math.ceil(Math.max(...all.map((b) => b.end)) / 60) + 1);
-  if (endHour <= startHour) endHour = Math.min(24, startHour + 8);
-  if (endHour - startHour < 8) endHour = Math.min(24, startHour + 8);
-  if (endHour - startHour < 8) startHour = Math.max(dayStartHour, endHour - 8);
+  const startMins = dayStartHour * 60;
+  const endMins = startMins + 24 * 60;
+  const rangeMins = endMins - startMins;
+  const hourMarks = Array.from({ length: 25 }, (_, offset) => dayStartHour + offset);
+  const glance = buildDayAtGlance(blocks, stageNameResolver);
+  const selectedShiftLabel = selectedShift === "Day" || selectedShift === "Night" ? selectedShift : "All shifts";
 
-  const startMins = startHour * 60;
-  const endMins = endHour * 60;
-  const range = Math.max(60, endMins - startMins);
-  root.style.setProperty("--day-viz-hours", String(Math.max(1, endHour - startHour)));
-  const hourMarks = [];
-  for (let h = startHour; h <= endHour; h += 1) hourMarks.push(h);
-
-  const hourLabel = (h) => {
-    const suffix = h >= 12 ? "pm" : "am";
-    const display = h % 12 === 0 ? 12 : h % 12;
-    return `${display}${suffix}`;
+  const toWindowSegment = (start, end) => {
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
+    let mappedStart = start;
+    let mappedEnd = end;
+    if (mappedEnd <= startMins) {
+      mappedStart += 24 * 60;
+      mappedEnd += 24 * 60;
+    }
+    const clippedStart = Math.max(startMins, mappedStart);
+    const clippedEnd = Math.min(endMins, mappedEnd);
+    if (clippedEnd <= clippedStart) return null;
+    return { start: clippedStart, end: clippedEnd };
   };
 
-  const renderLane = (items) => {
-    const lines = hourMarks
-      .map((h) => {
-        const top = ((h * 60 - startMins) / range) * 100;
-        return `<div class="day-viz-hour-line" style="top:${top}%"></div>`;
+  const visibleIntervals = (items) =>
+    items
+      .map((item) => toWindowSegment(num(item.start), num(item.end)))
+      .filter(Boolean)
+      .sort((a, b) => a.start - b.start)
+      .reduce((merged, current) => {
+        const last = merged[merged.length - 1];
+        if (!last || current.start > last.end) {
+          merged.push({ ...current });
+        } else if (current.end > last.end) {
+          last.end = current.end;
+        }
+        return merged;
+      }, []);
+
+  const intervalsOverlapMinutes = (leftIntervals, rightIntervals) => {
+    let i = 0;
+    let j = 0;
+    let total = 0;
+    while (i < leftIntervals.length && j < rightIntervals.length) {
+      const a = leftIntervals[i];
+      const b = rightIntervals[j];
+      const start = Math.max(a.start, b.start);
+      const end = Math.min(a.end, b.end);
+      if (end > start) total += end - start;
+      if (a.end <= b.end) i += 1;
+      else j += 1;
+    }
+    return total;
+  };
+
+  const laneMinutes = (items) =>
+    items.reduce((sum, item) => {
+      const visible = toWindowSegment(num(item.start), num(item.end));
+      return sum + (visible ? visible.end - visible.start : 0);
+    }, 0);
+  const productionUnits = (blocks.source.runRows || []).reduce((sum, row) => sum + Math.max(0, num(row.unitsProduced)), 0);
+  const productionMinutes = laneMinutes(blocks.runs);
+  const productionIntervals = visibleIntervals(blocks.runs);
+  const downtimeIntervals = visibleIntervals(blocks.downtime);
+  const overlappingDowntimeMins = intervalsOverlapMinutes(productionIntervals, downtimeIntervals);
+  const netProductionMinutes = Math.max(0, productionMinutes - overlappingDowntimeMins);
+  const productionRate = netProductionMinutes > 0 ? productionUnits / netProductionMinutes : 0;
+  const productionTrafficForRate = (rate, netMins) =>
+    netMins <= 0
+      ? { className: "red", label: "Red", detail: "No production logged" }
+      : rate >= 10
+        ? { className: "green", label: "Green", detail: "On target" }
+        : rate >= 7
+          ? { className: "amber", label: "Amber", detail: "Monitor" }
+          : { className: "red", label: "Red", detail: "Below target" };
+  const laneTotals = {
+    shift: `${formatNum(laneMinutes(blocks.shifts), 0)} min`,
+    break: `${formatNum(laneMinutes(blocks.breaks), 0)} min`,
+    production: `${formatNum(productionRate, 2)} units / min`,
+    downtime: `${formatNum(laneMinutes(blocks.downtime), 1)} min`
+  };
+  const productionRunTiles = (blocks.source.runRows || [])
+    .slice()
+    .sort((a, b) => String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || "")))
+    .map((row, index) => {
+      const productName = String(row.product || "").trim() || `Run ${index + 1}`;
+      const units = Math.max(0, num(row.unitsProduced));
+      const runIntervals = splitAcrossMidnight(parseTimeToMinutes(row.productionStartTime), parseTimeToMinutes(row.finishTime))
+        .map((segment) => toWindowSegment(segment.start, segment.end))
+        .filter(Boolean);
+      const grossMins = runIntervals.reduce((sum, interval) => sum + (interval.end - interval.start), 0);
+      const downInRunMins = intervalsOverlapMinutes(runIntervals, downtimeIntervals);
+      const netRunMins = Math.max(0, grossMins - downInRunMins);
+      const traysPerMin = netRunMins > 0 ? units / netRunMins : 0;
+      const traffic = productionTrafficForRate(traysPerMin, netRunMins);
+      return `
+        <article class="day-glance-run-tile">
+          <div class="day-glance-run-main">
+            <span class="day-glance-light ${traffic.className}" aria-hidden="true"></span>
+            <div class="day-glance-run-copy">
+              <h5 class="day-glance-run-title">${htmlEscape(productName)}</h5>
+              <span class="day-glance-run-rate">${formatNum(traysPerMin, 2)} trays / min</span>
+            </div>
+          </div>
+          <div class="day-glance-run-callouts">
+            <div class="day-glance-run-callout"><span>Trays</span><strong>${formatNum(units, 0)}</strong></div>
+            <div class="day-glance-run-callout"><span>Down</span><strong>${formatNum(downInRunMins, 1)} min</strong></div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+
+  const axisLines = hourMarks
+    .map((hour) => {
+      const left = ((hour - dayStartHour) / 24) * 100;
+      return `<div class="day-viz-axis-line ${hour % 2 === 0 ? "major" : ""}" style="left:${left}%"></div>`;
+    })
+    .join("");
+  const axisTicks = hourMarks
+    .map((hour) => {
+      const left = ((hour - dayStartHour) / 24) * 100;
+      const major = hour % 2 === 0;
+      return `<div class="day-viz-axis-tick ${major ? "major" : ""}" style="left:${left}%;">${major ? `<span>${shortHourLabel(hour)}</span>` : ""}</div>`;
+    })
+    .join("");
+
+  const renderLane = (label, totalLabel, items) => {
+    const laneLines = hourMarks
+      .map((hour) => {
+        const left = ((hour - dayStartHour) / 24) * 100;
+        return `<div class="day-viz-hour-line ${hour % 2 === 0 ? "major" : ""}" style="left:${left}%"></div>`;
       })
       .join("");
 
     const cards = items
       .map((item) => {
-        const start = Math.max(startMins, item.start);
-        const end = Math.min(endMins, item.end);
-        if (end <= start) return "";
-        const top = ((start - startMins) / range) * 100;
-        const height = Math.max(2.2, ((end - start) / range) * 100);
+        const visible = toWindowSegment(num(item.start), num(item.end));
+        if (!visible) return "";
+        const left = ((visible.start - startMins) / rangeMins) * 100;
+        const width = ((visible.end - visible.start) / rangeMins) * 100;
+        const clampedLeft = Math.max(0, Math.min(100, left));
+        const clampedWidth = Math.max(0.65, Math.min(100 - clampedLeft, width));
+        if (clampedWidth <= 0) return "";
+        const tooltip = `${item.title}${item.sub ? ` | ${item.sub}` : ""}`;
         return `
-          <article class="day-viz-block ${item.type}" style="top:${top}%;height:${height}%;">
+          <article class="day-viz-block ${item.type}" style="left:${clampedLeft}%;width:${clampedWidth}%;" title="${htmlEscape(tooltip)}">
             <span class="day-viz-title">${htmlEscape(item.title)}</span>
             <span class="day-viz-sub">${htmlEscape(item.sub)}</span>
           </article>
         `;
       })
       .join("");
-    return `<div class="day-viz-lane">${lines}${cards}</div>`;
+
+    return `
+      <div class="day-viz-swimlane">
+        <div class="day-viz-lane-label">
+          <span class="day-viz-lane-title">${htmlEscape(label)}</span>
+          <span class="day-viz-lane-total">${htmlEscape(totalLabel)}</span>
+        </div>
+        <div class="day-viz-lane-track">
+          ${laneLines}
+          ${cards || `<div class="day-viz-lane-empty">No records</div>`}
+        </div>
+      </div>
+    `;
   };
 
+  const allocationSegments = glance.allocations
+    .filter((segment) => segment.pct > 0)
+    .map((segment) => `<span class="day-glance-seg ${segment.className}" style="width:${segment.pct}%"></span>`)
+    .join("");
+  const allocationLegend = glance.allocations
+    .map(
+      (segment) => `
+        <div class="day-glance-legend-item">
+          <span class="day-glance-dot ${segment.className}"></span>
+          <span>${htmlEscape(segment.label)}</span>
+          <strong>${formatNum(segment.minutes, 0)} min</strong>
+        </div>
+      `
+    )
+    .join("");
+  const topDowntime =
+    glance.topDowntime.length > 0
+      ? `<ul class="day-glance-list">
+          ${glance.topDowntime
+            .map(
+              (entry) => `
+                <li>
+                  <span>${htmlEscape(entry.label)}</span>
+                  <strong>${formatNum(entry.minutes, 1)} min</strong>
+                </li>
+              `
+            )
+            .join("")}
+        </ul>`
+      : `<p class="day-glance-empty">No downtime events in this selection.</p>`;
+
   root.innerHTML = `
-    <div class="day-viz-grid day-viz-head">
-      <div></div>
-      <div>Shifts</div>
-      <div>Production Runs</div>
-      <div>Downtime</div>
-    </div>
-    <div class="day-viz-grid">
-      <div class="day-viz-time-col">
-        ${hourMarks
-          .map(
-            (h) => `
-              <div class="day-viz-time">
-                ${hourLabel(h)}
-              </div>
-            `
-          )
-          .join("")}
+    <div class="day-viz-shell">
+      <div class="day-viz-inner">
+        <div class="day-viz-axis-row">
+          <div class="day-viz-axis-label">Time</div>
+          <div class="day-viz-axis-track">
+            ${axisLines}
+            ${axisTicks}
+          </div>
+        </div>
+        ${renderLane("Shift", laneTotals.shift, blocks.shifts)}
+        ${renderLane("Break", laneTotals.break, blocks.breaks)}
+        ${renderLane("Production", laneTotals.production, blocks.runs)}
+        ${renderLane("Downtime", laneTotals.downtime, blocks.downtime)}
       </div>
-      ${renderLane(blocks.shifts)}
-      ${renderLane(blocks.runs)}
-      ${renderLane(blocks.downtime)}
     </div>
+    <section class="day-glance">
+      <div class="day-glance-head">
+        <h3>Day at a glance</h3>
+        <p>${selectedDate} | ${selectedShiftLabel} | Runs: ${formatNum(glance.runCount, 0)} | Downtime events: ${formatNum(glance.downtimeCount, 0)}</p>
+      </div>
+      <div class="day-glance-grid">
+        <article class="day-glance-card">
+          <h4>Time Allocation</h4>
+          <p class="day-glance-meta">${formatNum(glance.trackedTotal, 0)} tracked minutes</p>
+          <div class="day-glance-stack">
+            ${allocationSegments || `<span class="day-glance-seg fallback"></span>`}
+          </div>
+          <div class="day-glance-legend">${allocationLegend}</div>
+        </article>
+        <article class="day-glance-card">
+          <h4>Production Runs</h4>
+          <p class="day-glance-meta">Per-run net trays/min. Downtime overlapping each run is excluded.</p>
+          <div class="day-glance-run-list">
+            ${productionRunTiles || `<p class="day-glance-empty">No production runs in this selection.</p>`}
+          </div>
+        </article>
+        <article class="day-glance-card">
+          <h4>Top Downtime Causes</h4>
+          <p class="day-glance-meta">By total logged minutes.</p>
+          ${topDowntime}
+        </article>
+      </div>
+    </section>
   `;
 }
 
 function renderDayVisualiser() {
-  renderDayVisualiserTo("dayVisualiserCanvas", derivedData(), state.selectedDate, stageNameById);
+  renderDayVisualiserTo("dayVisualiserCanvas", derivedData(), state.selectedDate, state.selectedShift, stageNameById);
 }
 
 function renderSupervisorDayVisualiser(line, selectedDate) {
@@ -3308,7 +4746,13 @@ function renderSupervisorDayVisualiser(line, selectedDate) {
     if (root) root.innerHTML = `<div class="day-viz-empty">No assigned lines selected.</div>`;
     return;
   }
-  renderDayVisualiserTo("supervisorDayVisualiserCanvas", derivedDataForLine(line), selectedDate, (id) => stageNameByIdForLine(line, id));
+  renderDayVisualiserTo(
+    "supervisorDayVisualiserCanvas",
+    derivedDataForLine(line),
+    selectedDate,
+    appState.supervisorSelectedShift,
+    (id) => stageNameByIdForLine(line, id)
+  );
 }
 
 function renderVisualiser() {
@@ -3325,9 +4769,20 @@ function renderVisualiser() {
   let utilAccumulator = 0;
   let utilCount = 0;
 
-  document.getElementById("kpiUnits").textContent = formatNum(units, 0);
-  document.getElementById("kpiDowntime").textContent = `${formatNum(totalDowntime, 1)} min`;
-  document.getElementById("kpiRunRate").textContent = `${formatNum(netRunRate, 2)} u/min`;
+  const unitsText = formatNum(units, 0);
+  const downtimeText = `${formatNum(totalDowntime, 1)} min`;
+  const runRateText = `${formatNum(netRunRate, 2)} u/min`;
+  const setText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = value;
+  };
+
+  setText("kpiUnits", unitsText);
+  setText("kpiDowntime", downtimeText);
+  setText("kpiRunRate", runRateText);
+  setText("dayKpiUnits", unitsText);
+  setText("dayKpiDowntime", downtimeText);
+  setText("dayKpiRunRate", runRateText);
 
   const map = document.getElementById("lineMap");
   map.innerHTML = "";
@@ -3457,18 +4912,19 @@ function renderVisualiser() {
   }
 
   const lineUtil = utilCount > 0 ? utilAccumulator / utilCount : 0;
-  document.getElementById("kpiUtilisation").textContent = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
+  const utilisationText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
+  setText("kpiUtilisation", utilisationText);
+  setText("dayKpiUtilisation", utilisationText);
 }
 
 function stageDailyMetrics(stage, date, shift, data) {
-  const shiftRow = data.shiftRows.find((row) => row.date === date && row.shift === shift);
-  const shiftMins = num(shiftRow?.totalShiftTime);
-  const stageDowntime = data.downtimeRows
-    .filter((row) => row.date === date && row.shift === shift)
+  const shiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift);
+  const shiftMins = shiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
+  const stageDowntime = selectedShiftRowsByDate(data.downtimeRows, date, shift)
     .filter((row) => matchesStage(stage, row.equipment))
     .reduce((sum, row) => sum + num(row.downtimeMins), 0);
 
-  const runRows = data.runRows.filter((row) => row.date === date && row.shift === shift);
+  const runRows = selectedShiftRowsByDate(data.runRows, date, shift);
   const units = runRows.reduce((sum, row) => sum + num(row.unitsProduced), 0);
   const totalNetTime = runRows.reduce((sum, row) => sum + num(row.netProductionTime), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
@@ -3482,9 +4938,9 @@ function stageDailyMetrics(stage, date, shift, data) {
 
 function trendDatesForShift(shift, data) {
   const dates = new Set();
-  data.shiftRows.forEach((row) => row.shift === shift && row.date && dates.add(row.date));
-  data.runRows.forEach((row) => row.shift === shift && row.date && dates.add(row.date));
-  data.downtimeRows.forEach((row) => row.shift === shift && row.date && dates.add(row.date));
+  data.shiftRows.forEach((row) => rowMatchesDateShift(row, row.date, shift) && row.date && dates.add(row.date));
+  data.runRows.forEach((row) => rowMatchesDateShift(row, row.date, shift) && row.date && dates.add(row.date));
+  data.downtimeRows.forEach((row) => rowMatchesDateShift(row, row.date, shift) && row.date && dates.add(row.date));
   return Array.from(dates).sort();
 }
 
@@ -3640,25 +5096,50 @@ function closeTrendModal() {
 }
 
 function renderTrackingTables() {
+  ensureManagerLogRowIds(state);
   const data = derivedData();
+  const actionHtml = (type, row) =>
+    `<button type="button" class="table-edit-pill" data-log-edit="${type}" data-log-id="${row.id || ""}">Edit</button>`;
+  const breakSummaryByShift = new Map();
+  (data.breakRows || []).forEach((row) => {
+    const key = `${row.date}__${row.shift}`;
+    const prev = breakSummaryByShift.get(key) || { count: 0, mins: 0 };
+    breakSummaryByShift.set(key, {
+      count: prev.count + 1,
+      mins: prev.mins + Math.max(0, num(row.breakMins))
+    });
+  });
+  const displayShiftRows = data.shiftRows.map((row) => {
+    const key = `${row.date}__${row.shift}`;
+    const summary = breakSummaryByShift.get(key) || { count: 0, mins: 0 };
+    return {
+      ...row,
+      breakCount: summary.count,
+      breakTimeMins: summary.mins,
+      action: actionHtml("shift", row)
+    };
+  });
 
-  renderTable("shiftTable", SHIFT_COLUMNS, data.shiftRows, {
+  renderTable("shiftTable", SHIFT_COLUMNS, displayShiftRows, {
     Date: "date",
     Shift: "shift",
     "Crew On Shift": "crewOnShift",
     "Start Time": "startTime",
-    "Break 1 Start": "break1Start",
-    "Break 2 Start": "break2Start",
-    "Break 3 Start": "break3Start",
     "Finish Time": "finishTime",
-    "Total Shift Time": "totalShiftTime"
+    "Break Count": "breakCount",
+    "Break Time (min)": "breakTimeMins",
+    "Total Shift Time": "totalShiftTime",
+    Action: "action"
   });
 
-  renderTable("runTable", RUN_COLUMNS, data.runRows, {
+  const displayRunRows = data.runRows.map((row) => ({
+    ...row,
+    action: actionHtml("run", row)
+  }));
+  renderTable("runTable", RUN_COLUMNS, displayRunRows, {
     Date: "date",
     Shift: "shift",
     Product: "product",
-    "Set Up Start Time": "setUpStartTime",
     "Production Start Time": "productionStartTime",
     "Finish Time": "finishTime",
     "Units Produced": "unitsProduced",
@@ -3666,10 +5147,15 @@ function renderTrackingTables() {
     "Associated Down Time": "associatedDownTime",
     "Net Production Time": "netProductionTime",
     "Gross Run Rate": "grossRunRate",
-    "Net Run Rate": "netRunRate"
+    "Net Run Rate": "netRunRate",
+    Action: "action"
   });
 
-  const displayDowntimeRows = data.downtimeRows.map((row) => ({ ...row, equipment: stageNameById(row.equipment) }));
+  const displayDowntimeRows = data.downtimeRows.map((row) => ({
+    ...row,
+    equipment: row.equipment ? stageNameById(row.equipment) : "-",
+    action: actionHtml("downtime", row)
+  }));
   renderTable("downtimeTable", DOWN_COLUMNS, displayDowntimeRows, {
     Date: "date",
     Shift: "shift",
@@ -3677,7 +5163,8 @@ function renderTrackingTables() {
     "Downtime Finish": "downtimeFinish",
     "Downtime (mins)": "downtimeMins",
     Equipment: "equipment",
-    Reason: "reason"
+    Reason: "reason",
+    Action: "action"
   });
 }
 
@@ -3712,10 +5199,10 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   if (!map) return;
   const stages = line?.stages?.length ? line.stages : STAGES;
   const data = derivedDataForLine(line || {});
-  const selectedRunRows = data.runRows.filter((row) => row.date === selectedDate && row.shift === selectedShift);
-  const selectedDownRows = data.downtimeRows.filter((row) => row.date === selectedDate && row.shift === selectedShift);
-  const selectedShiftRows = data.shiftRows.filter((row) => row.date === selectedDate && row.shift === selectedShift);
-  const shiftMins = num(selectedShiftRows[0]?.totalShiftTime);
+  const selectedRunRows = selectedShiftRowsByDate(data.runRows, selectedDate, selectedShift);
+  const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, selectedDate, selectedShift);
+  const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, selectedDate, selectedShift);
+  const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
   const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced), 0);
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime), 0);
@@ -3724,11 +5211,35 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   let utilCount = 0;
   let bottleneckCard = null;
   let bottleneckUtil = -1;
-  const activeCrew = line?.crewsByShift?.[selectedShift] || defaultStageCrew(stages);
+  const activeCrew = isFullDayShift(selectedShift)
+    ? Object.fromEntries(
+        stages.map((stage) => [
+          stage.id,
+          {
+            crew: Math.max(
+              0,
+              num(line?.crewsByShift?.Day?.[stage.id]?.crew),
+              num(line?.crewsByShift?.Night?.[stage.id]?.crew)
+            )
+          }
+        ])
+      )
+    : line?.crewsByShift?.[selectedShift] || defaultStageCrew(stages);
 
-  document.getElementById("svKpiUnits").textContent = formatNum(units, 0);
-  document.getElementById("svKpiDowntime").textContent = `${formatNum(totalDowntime, 1)} min`;
-  document.getElementById("svKpiRunRate").textContent = `${formatNum(netRunRate, 2)} u/min`;
+  const svUnitsText = formatNum(units, 0);
+  const svDowntimeText = `${formatNum(totalDowntime, 1)} min`;
+  const svRunRateText = `${formatNum(netRunRate, 2)} u/min`;
+  const setSvText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = value;
+  };
+
+  setSvText("svKpiUnits", svUnitsText);
+  setSvText("svKpiDowntime", svDowntimeText);
+  setSvText("svKpiRunRate", svRunRateText);
+  setSvText("svDayKpiUnits", svUnitsText);
+  setSvText("svDayKpiDowntime", svDowntimeText);
+  setSvText("svDayKpiRunRate", svRunRateText);
   map.innerHTML = "";
   map.classList.remove("layout-editing");
 
@@ -3819,7 +5330,9 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
     }
   }
   const lineUtil = utilCount > 0 ? utilAccumulator / utilCount : 0;
-  document.getElementById("svKpiUtilisation").textContent = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
+  const svUtilText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
+  setSvText("svKpiUtilisation", svUtilText);
+  setSvText("svDayKpiUtilisation", svUtilText);
 }
 
 function renderHome() {
@@ -3839,12 +5352,21 @@ function renderHome() {
   const supervisorMobileModeBtn = document.getElementById("supervisorMobileMode");
   const welcome = document.getElementById("supervisorWelcome");
   const lineSelect = document.getElementById("supervisorLineSelect");
-  const svDateInput = document.getElementById("svSelectedDate");
+  const svDateInputs = Array.from(document.querySelectorAll("[data-sv-date]"));
   const svShiftButtons = Array.from(document.querySelectorAll("[data-sv-shift]"));
-  const downEquipment = document.getElementById("superDownEquipment");
   const shiftDateInput = document.getElementById("superShiftDate");
+  const shiftShiftInput = document.getElementById("superShiftShift");
+  const shiftLogIdInput = document.getElementById("superShiftLogId");
+  const shiftOpenBreakIdInput = document.getElementById("superShiftOpenBreakId");
+  const shiftBreakStartBtn = document.getElementById("superShiftBreakStart");
+  const shiftBreakEndBtn = document.getElementById("superShiftBreakEnd");
   const runDateInput = document.getElementById("superRunDate");
+  const runLogIdInput = document.getElementById("superRunLogId");
+  const runOpenList = document.getElementById("superRunOpenList");
   const downDateInput = document.getElementById("superDownDate");
+  const downReasonCategoryInput = document.getElementById("superDownReasonCategory");
+  const downReasonDetailInput = document.getElementById("superDownReasonDetail");
+  const downLogIdInput = document.getElementById("superDownLogId");
   const entryList = document.getElementById("supervisorEntryList");
   const entryCards = document.getElementById("supervisorEntryCards");
   const superMainTabBtns = Array.from(document.querySelectorAll("[data-super-main-tab]"));
@@ -3854,7 +5376,7 @@ function renderHome() {
   const isSupervisor = appState.appMode === "supervisor";
 
   if (homeTitle) {
-    homeTitle.textContent = isSupervisor ? "Production Line Hub Supervisor Portal" : "Production Line Dashboard";
+    homeTitle.textContent = "Production Line Dashboard";
   }
   if (headerLogoutBtn) {
     headerLogoutBtn.classList.toggle("hidden", !(isSupervisor && session));
@@ -3930,14 +5452,11 @@ function renderHome() {
 
   if (!isSupervisor) return;
 
-  let assignedIds = session?.assignedLineIds?.filter((id) => appState.lines[id]) || [];
-  if (!assignedIds.length) {
-    const fallbackId = appState.supervisorSelectedLineId && appState.lines[appState.supervisorSelectedLineId]
-      ? appState.supervisorSelectedLineId
-      : appState.activeLineId && appState.lines[appState.activeLineId]
-        ? appState.activeLineId
-        : Object.keys(appState.lines || {})[0] || "";
-    if (fallbackId) assignedIds = [fallbackId];
+  const assignedLineShiftMap = normalizeSupervisorLineShifts(session?.assignedLineShifts, appState.lines, session?.assignedLineIds || []);
+  let assignedIds = Object.keys(assignedLineShiftMap);
+  if (session) {
+    session.assignedLineIds = assignedIds.slice();
+    session.assignedLineShifts = clone(assignedLineShiftMap);
   }
   loginSection.classList.toggle("hidden", Boolean(session));
   appSection.classList.toggle("hidden", !session);
@@ -3958,8 +5477,11 @@ function renderHome() {
   if (!assignedIds.includes(appState.supervisorSelectedLineId)) {
     appState.supervisorSelectedLineId = assignedIds[0] || "";
   }
+  const allowedShifts = expandedSupervisorShiftAccess(assignedLineShiftMap[appState.supervisorSelectedLineId]);
   if (!appState.supervisorSelectedDate) appState.supervisorSelectedDate = todayISO();
-  if (!["Day", "Night"].includes(appState.supervisorSelectedShift)) appState.supervisorSelectedShift = "Day";
+  if (!allowedShifts.includes(appState.supervisorSelectedShift)) {
+    appState.supervisorSelectedShift = allowedShifts[0] || "Day";
+  }
 
   const activeSupervisor = supervisorByUsername(session.username);
   welcome.textContent = `Logged in as ${activeSupervisor?.name || session.username}`;
@@ -3971,19 +5493,148 @@ function renderHome() {
     ? assignedIds.map((id) => `<option value="${id}">${appState.lines[id].name}</option>`).join("")
     : `<option value="">No assigned lines</option>`;
   lineSelect.value = appState.supervisorSelectedLineId || assignedIds[0] || "";
-  svDateInput.value = appState.supervisorSelectedDate;
+  svDateInputs.forEach((svDateInput) => {
+    svDateInput.value = appState.supervisorSelectedDate;
+  });
+  [shiftShiftInput].forEach((shiftInput) => {
+    if (!shiftInput) return;
+    Array.from(shiftInput.options).forEach((option) => {
+      option.disabled = !allowedShifts.includes(option.value);
+    });
+    if (!allowedShifts.includes(shiftInput.value)) {
+      shiftInput.value = allowedShifts[0] || "Day";
+    }
+    shiftInput.disabled = !allowedShifts.length;
+  });
   svShiftButtons.forEach((btn) => {
-    const active = btn.dataset.svShift === appState.supervisorSelectedShift;
+    const shift = btn.dataset.svShift || "";
+    const active = shift === appState.supervisorSelectedShift;
+    const enabled = allowedShifts.includes(shift);
+    btn.disabled = !enabled;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
-  downEquipment.innerHTML = supervisorEquipmentOptions(selectedSupervisorLine());
+  if (downReasonDetailInput) {
+    setDowntimeDetailOptions(
+      downReasonDetailInput,
+      selectedSupervisorLine(),
+      String(downReasonCategoryInput?.value || ""),
+      downReasonDetailInput.value || ""
+    );
+  }
   renderSupervisorVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate, appState.supervisorSelectedShift);
   renderSupervisorDayVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate);
 
   if (!shiftDateInput.value) shiftDateInput.value = todayISO();
   if (!runDateInput.value) runDateInput.value = todayISO();
   if (!downDateInput.value) downDateInput.value = todayISO();
+
+  const pickLatest = (rows = []) =>
+    rows.reduce((latest, row) => {
+      if (!latest) return row;
+      const a = Date.parse(row?.submittedAt || "") || 0;
+      const b = Date.parse(latest?.submittedAt || "") || 0;
+      return a >= b ? row : latest;
+    }, null);
+  const isRunOpen = (row) =>
+    strictTimeValid(row?.productionStartTime) &&
+    strictTimeValid(row?.finishTime) &&
+    row.productionStartTime === row.finishTime;
+  const isDownOpen = (row) =>
+    strictTimeValid(row?.downtimeStart) &&
+    strictTimeValid(row?.downtimeFinish) &&
+    row.downtimeStart === row.downtimeFinish;
+  const isShiftOpen = (row) =>
+    strictTimeValid(row?.startTime) &&
+    strictTimeValid(row?.finishTime) &&
+    row.startTime === row.finishTime;
+  const isBreakOpen = (row) =>
+    strictTimeValid(row?.breakStart) &&
+    !strictTimeValid(row?.breakFinish);
+
+  const activeLine = selectedSupervisorLine();
+  if (activeLine) {
+    const shiftKeyDate = shiftDateInput.value || appState.supervisorSelectedDate;
+    const shiftKeyShift = shiftShiftInput?.value || appState.supervisorSelectedShift;
+    const shiftOpen = pickLatest((activeLine.shiftRows || []).filter((row) => rowMatchesDateShift(row, shiftKeyDate, shiftKeyShift) && isShiftOpen(row)));
+    if (shiftLogIdInput) shiftLogIdInput.value = shiftOpen?.id || "";
+    const openBreak = pickLatest((activeLine.breakRows || []).filter((row) => row.shiftLogId === shiftOpen?.id && isBreakOpen(row)));
+    if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = openBreak?.id || "";
+    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !shiftOpen?.id || Boolean(openBreak?.id);
+    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !shiftOpen?.id || !openBreak?.id;
+
+    const runKeyDate = runDateInput.value || appState.supervisorSelectedDate;
+    const runOpenRows = (activeLine.runRows || [])
+      .filter(
+        (row) =>
+          row.date === runKeyDate &&
+          rowMatchesDateShift(row, runKeyDate, appState.supervisorSelectedShift) &&
+          isRunOpen(row)
+      )
+      .slice()
+      .sort((a, b) => {
+        const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
+        if (submittedCmp !== 0) return submittedCmp;
+        return String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || ""));
+      });
+    if (runLogIdInput && !runOpenRows.some((row) => row.id === runLogIdInput.value)) {
+      runLogIdInput.value = "";
+    }
+    if (runOpenList) {
+      runOpenList.innerHTML = runOpenRows.length
+        ? `
+          <div class="pending-log-list">
+            ${runOpenRows
+              .map((row) => {
+                const selectedClass = runLogIdInput?.value && runLogIdInput.value === row.id ? " active" : "";
+                return `
+                  <article class="pending-log-item${selectedClass}">
+                    <div class="pending-log-meta">
+                      <h5>${htmlEscape(row.product || "Run")}</h5>
+                      <p>
+                        ${htmlEscape(row.date || "-")} | ${htmlEscape(row.shift || "-")} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}
+                      </p>
+                    </div>
+                    <div class="pending-log-actions">
+                      <button type="button" class="table-edit-pill ghost-btn" data-super-run-edit="${row.id}">Edit</button>
+                      <button type="button" class="table-edit-pill ghost-btn pending-complete-pill" data-super-run-complete="${row.id}">Complete</button>
+                    </div>
+                  </article>
+                `;
+              })
+              .join("")}
+          </div>
+        `
+        : `<p class="muted pending-log-empty">No open production runs for this date/shift.</p>`;
+    }
+
+    const downKeyDate = downDateInput.value || appState.supervisorSelectedDate;
+    const downKeyCategory = String(downReasonCategoryInput?.value || "");
+    const downKeyDetail = String(downReasonDetailInput?.value || "");
+    const downOpen = pickLatest(
+      (activeLine.downtimeRows || []).filter(
+        (row) => {
+          const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+          const rowCategory = row.reasonCategory || parsedReason.reasonCategory;
+          const rowDetail = row.reasonDetail || parsedReason.reasonDetail;
+          return (
+            row.date === downKeyDate &&
+            rowMatchesDateShift(row, downKeyDate, appState.supervisorSelectedShift) &&
+            (!downKeyCategory || rowCategory === downKeyCategory) &&
+            (!downKeyDetail || rowDetail === downKeyDetail) &&
+            isDownOpen(row)
+          );
+        }
+      )
+    );
+    if (downLogIdInput) downLogIdInput.value = downOpen?.id || "";
+  } else {
+    if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = "";
+    if (runLogIdInput) runLogIdInput.value = "";
+    if (runOpenList) runOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
+    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = true;
+    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = true;
+  }
 
   const activeTab = ["superShift", "superRun", "superDown"].includes(appState.supervisorTab) ? appState.supervisorTab : "superShift";
   document.querySelectorAll("[data-supervisor-tab]").forEach((btn) => {
@@ -4027,7 +5678,7 @@ function renderHome() {
           date: row.date,
           shift: row.shift,
           type: "Downtime",
-          summary: `${stageNameById(row.equipment)}: ${row.reason || "-"}`,
+          summary: `${stageNameByIdForLine(line, row.equipment) || row.reasonCategory || "Downtime"}: ${row.reason || "-"}`,
           supervisor: row.submittedBy || "-",
           createdAt: row.submittedAt
         }));
@@ -4103,9 +5754,19 @@ function renderAll() {
       uploadShapeBtn.classList.toggle("hidden", !active);
     }
   }
-  const equip = document.getElementById("downtimeEquipment");
-  if (equip) equip.innerHTML = stageOptionListHTML();
-  document.getElementById("selectedDate").value = state.selectedDate;
+  const reasonCategorySelect = document.getElementById("downtimeReasonCategory");
+  const reasonDetailSelect = document.getElementById("downtimeReasonDetail");
+  if (reasonDetailSelect) {
+    setDowntimeDetailOptions(
+      reasonDetailSelect,
+      state,
+      String(reasonCategorySelect?.value || ""),
+      reasonDetailSelect.value || ""
+    );
+  }
+  document.querySelectorAll("[data-manager-date]").forEach((input) => {
+    input.value = state.selectedDate;
+  });
   setShiftToggleUI();
   setActiveDataSubtab();
   renderCrewInputs();

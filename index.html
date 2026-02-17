@@ -6,7 +6,7 @@
     <title>Production Line Visualiser</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Sora:wght@400;600;700&display=swap" rel="stylesheet" />
+    <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
     <script>
       window.PRODUCTION_LINE_API_BASE =
@@ -27,6 +27,15 @@
         <main class="dashboard-main">
           <header class="dashboard-topbar">
             <div class="home-title-block">
+              <div class="home-brand-row">
+                <img
+                  class="cordina-logo"
+                  src="assets/cordina-logo.png"
+                  alt="The Cordina Group logo"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
               <h1 id="homeTitle">Production Line Dashboard</h1>
               <p>Select a production line or build a new one</p>
             </div>
@@ -61,6 +70,7 @@
                     <div id="dashboardShiftToggle" class="shift-toggle" role="group" aria-label="Dashboard shift selector">
                       <button type="button" class="shift-option" data-dash-shift="Day">Day</button>
                       <button type="button" class="shift-option" data-dash-shift="Night">Night</button>
+                      <button type="button" class="shift-option" data-dash-shift="Full Day">Full Day</button>
                     </div>
                   </label>
                 </div>
@@ -123,19 +133,20 @@
 
             <section id="supervisorVisual" class="supervisor-main-panel active">
               <div class="control-row">
-                <button id="svPrevDay" class="ghost-btn" type="button">Previous Day</button>
+                <button id="svPrevDay" class="ghost-btn" type="button" data-sv-prev="true">Previous Day</button>
                 <label>
                   Date
-                  <input id="svSelectedDate" type="date" />
+                  <input id="svSelectedDate" type="date" data-sv-date="true" />
                 </label>
                 <label>
                   Shift
                   <div id="svShiftToggle" class="shift-toggle" role="group" aria-label="Supervisor shift selector">
                     <button type="button" class="shift-option" data-sv-shift="Day">Day</button>
                     <button type="button" class="shift-option" data-sv-shift="Night">Night</button>
+                    <button type="button" class="shift-option" data-sv-shift="Full Day">Full Day</button>
                   </div>
                 </label>
-                <button id="svNextDay" class="ghost-btn" type="button">Next Day</button>
+                <button id="svNextDay" class="ghost-btn" type="button" data-sv-next="true">Next Day</button>
               </div>
               <div class="kpi-grid">
                 <article>
@@ -159,9 +170,43 @@
             </section>
 
             <section id="supervisorDay" class="supervisor-main-panel">
+              <div class="control-row">
+                <button id="svDayPrevDay" class="ghost-btn" type="button" data-sv-prev="true">Previous Day</button>
+                <label>
+                  Date
+                  <input id="svDaySelectedDate" type="date" data-sv-date="true" />
+                </label>
+                <label>
+                  Shift
+                  <div id="svDayShiftToggle" class="shift-toggle" role="group" aria-label="Supervisor day visualiser shift selector">
+                    <button type="button" class="shift-option" data-sv-shift="Day">Day</button>
+                    <button type="button" class="shift-option" data-sv-shift="Night">Night</button>
+                    <button type="button" class="shift-option" data-sv-shift="Full Day">Full Day</button>
+                  </div>
+                </label>
+                <button id="svDayNextDay" class="ghost-btn" type="button" data-sv-next="true">Next Day</button>
+              </div>
+              <div class="kpi-grid">
+                <article>
+                  <h3>Total Units</h3>
+                  <p id="svDayKpiUnits">0</p>
+                </article>
+                <article>
+                  <h3>Total Downtime</h3>
+                  <p id="svDayKpiDowntime">0 min</p>
+                </article>
+                <article>
+                  <h3>Line Utilisation</h3>
+                  <p id="svDayKpiUtilisation">0%</p>
+                </article>
+                <article>
+                  <h3>Net Run Rate</h3>
+                  <p id="svDayKpiRunRate">0 u/min</p>
+                </article>
+              </div>
               <section class="panel">
                 <h2>Day Visualiser</h2>
-                <p class="muted">Timeline by column for the selected date. Production setup and run are split into separate blocks.</p>
+                <p class="muted">Horizontal timeline with swimlanes for shift, breaks, production and downtime.</p>
                 <div id="supervisorDayVisualiserCanvas" class="day-viz-canvas"></div>
               </section>
             </section>
@@ -175,49 +220,83 @@
 
               <section id="superShift" class="data-section active">
                 <form id="supervisorShiftForm" class="form-grid">
+                  <input id="superShiftLogId" type="hidden" />
+                  <input id="superShiftOpenBreakId" type="hidden" />
                   <input id="superShiftDate" type="date" required />
                   <select id="superShiftShift" required>
                     <option value="Day">Day</option>
                     <option value="Night">Night</option>
+                    <option value="Full Day">Full Day</option>
                   </select>
                   <input id="superShiftCrew" type="number" min="0" step="1" placeholder="Crew On Shift" required />
-                  <input id="superShiftStart" placeholder="Start Time (HH:MM)" />
-                  <input id="superShiftBreak1" placeholder="Break 1 Start (HH:MM)" />
-                  <input id="superShiftBreak2" placeholder="Break 2 Start (HH:MM)" />
-                  <input id="superShiftBreak3" placeholder="Break 3 Start (HH:MM)" />
-                  <input id="superShiftFinish" placeholder="Finish Time (HH:MM)" />
-                  <button type="submit">Log Shift</button>
+                  <label class="input-now-wrap">
+                    <input id="superShiftStart" placeholder="Start Time (HH:MM)" />
+                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superShiftStart">Now</button>
+                  </label>
+                  <label class="input-now-wrap">
+                    <input id="superShiftBreakTime" placeholder="Break Time (HH:MM)" />
+                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superShiftBreakTime">Now</button>
+                  </label>
+                  <label class="input-now-wrap">
+                    <input id="superShiftFinish" placeholder="Finish Time (HH:MM)" />
+                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superShiftFinish">Now</button>
+                  </label>
+                  <div class="form-submit-actions">
+                    <button id="superShiftSaveProgress" type="button">Start / Save Progress</button>
+                    <button id="superShiftBreakStart" type="button" class="ghost-btn">Start Break</button>
+                    <button id="superShiftBreakEnd" type="button" class="ghost-btn">End Break</button>
+                    <button id="superShiftComplete" type="button" class="ghost-btn">Complete Shift</button>
+                  </div>
                 </form>
               </section>
 
               <section id="superRun" class="data-section">
                 <form id="supervisorRunForm" class="form-grid">
+                  <input id="superRunLogId" type="hidden" />
                   <input id="superRunDate" type="date" required />
-                  <select id="superRunShift" required>
-                    <option value="Day">Day</option>
-                    <option value="Night">Night</option>
-                  </select>
                   <input id="superRunProduct" placeholder="Product" required />
-                  <input id="superRunSetupStart" placeholder="Set Up Start Time (HH:MM)" />
-                  <input id="superRunProdStart" placeholder="Production Start Time (HH:MM)" />
-                  <input id="superRunFinish" placeholder="Finish Time (HH:MM)" />
+                  <label class="input-now-wrap">
+                    <input id="superRunProdStart" placeholder="Production Start Time (HH:MM)" />
+                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superRunProdStart">Now</button>
+                  </label>
+                  <label class="input-now-wrap">
+                    <input id="superRunFinish" placeholder="Finish Time (HH:MM)" />
+                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superRunFinish">Now</button>
+                  </label>
                   <input id="superRunUnits" type="number" min="0" step="1" placeholder="Units Produced" />
-                  <button type="submit">Log Production Run</button>
+                  <div class="form-submit-actions">
+                    <button id="superRunSaveProgress" type="button">Start / Save Progress</button>
+                  </div>
                 </form>
+                <div id="superRunOpenList" class="pending-log-wrap"></div>
               </section>
 
               <section id="superDown" class="data-section">
                 <form id="supervisorDownForm" class="form-grid">
+                  <input id="superDownLogId" type="hidden" />
                   <input id="superDownDate" type="date" required />
-                  <select id="superDownShift" required>
-                    <option value="Day">Day</option>
-                    <option value="Night">Night</option>
+                  <label class="input-now-wrap">
+                    <input id="superDownStart" placeholder="Downtime Start (HH:MM)" />
+                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superDownStart">Now</button>
+                  </label>
+                  <label class="input-now-wrap">
+                    <input id="superDownFinish" placeholder="Downtime Finish (HH:MM)" />
+                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superDownFinish">Now</button>
+                  </label>
+                  <select id="superDownReasonCategory" required>
+                    <option value="">Reason Group</option>
+                    <option value="Equipment">Equipment</option>
+                    <option value="Donor Meat">Donor Meat</option>
+                    <option value="People">People</option>
+                    <option value="Materials">Materials</option>
+                    <option value="Other">Other</option>
                   </select>
-                  <input id="superDownStart" placeholder="Downtime Start (HH:MM)" />
-                  <input id="superDownFinish" placeholder="Downtime Finish (HH:MM)" />
-                  <select id="superDownEquipment" required></select>
-                  <input id="superDownReason" placeholder="Reason" />
-                  <button type="submit">Log Downtime</button>
+                  <select id="superDownReasonDetail" required></select>
+                  <input id="superDownReasonNote" placeholder="Reason Notes (optional)" />
+                  <div class="form-submit-actions">
+                    <button id="superDownSaveProgress" type="button">Start / Save Progress</button>
+                    <button id="superDownComplete" type="button" class="ghost-btn">Complete Downtime</button>
+                  </div>
                 </form>
               </section>
               <div id="supervisorEntryList" class="table-wrap"></div>
@@ -234,7 +313,7 @@
         <div class="modal-head">
           <div class="modal-title-block">
             <h2 id="manageSupervisorsTitle">Manage Supervisors</h2>
-            <p class="muted">Assign or remove line access and delete supervisors.</p>
+            <p class="muted">Assign production lines and day/night shift access, then update or delete supervisors.</p>
           </div>
           <button id="closeManageSupervisorsModal" class="ghost-btn" type="button">Close</button>
         </div>
@@ -247,7 +326,7 @@
         <div class="modal-head">
           <div class="modal-title-block">
             <h2 id="addSupervisorTitle">Add Supervisor</h2>
-            <p class="muted">Create a supervisor account and assign production lines.</p>
+            <p class="muted">Create a supervisor account and assign production lines and shifts.</p>
           </div>
           <button id="closeAddSupervisorModal" class="ghost-btn" type="button">Close</button>
         </div>
@@ -255,7 +334,12 @@
           <input id="newSupervisorName" placeholder="Name" required />
           <input id="newSupervisorUsername" placeholder="Username" required />
           <input id="newSupervisorPassword" type="password" placeholder="Password" required />
-          <div id="newSupervisorLines" class="supervisor-line-grid"></div>
+          <div class="supervisor-assignment-sections">
+            <section class="supervisor-assignment-group">
+              <h3 class="supervisor-assignment-title">Line and Shift Access</h3>
+              <div id="newSupervisorLines" class="supervisor-access-grid"></div>
+            </section>
+          </div>
           <button type="submit">Create Supervisor</button>
         </form>
       </div>
@@ -316,13 +400,14 @@
             <button id="prevShift" class="ghost-btn" type="button">Previous Day</button>
             <label>
               Date
-              <input id="selectedDate" type="date" />
+              <input id="selectedDate" type="date" data-manager-date="true" />
             </label>
             <label>
               Shift
               <div id="selectedShiftToggle" class="shift-toggle" role="group" aria-label="Shift selector">
                 <button type="button" class="shift-option" data-shift="Day">Day</button>
                 <button type="button" class="shift-option" data-shift="Night">Night</button>
+                <button type="button" class="shift-option" data-shift="Full Day">Full Day</button>
               </div>
             </label>
             <button id="nextShift" class="ghost-btn" type="button">Next Day</button>
@@ -358,9 +443,44 @@
         </section>
 
         <section id="dayVisualiser" class="tab-panel" role="tabpanel">
+          <div class="control-row">
+            <button id="dayPrevShift" class="ghost-btn" type="button">Previous Day</button>
+            <label>
+              Date
+              <input id="daySelectedDate" type="date" data-manager-date="true" />
+            </label>
+            <label>
+              Shift
+              <div id="daySelectedShiftToggle" class="shift-toggle" role="group" aria-label="Day visualiser shift selector">
+                <button type="button" class="shift-option" data-day-shift="Day">Day</button>
+                <button type="button" class="shift-option" data-day-shift="Night">Night</button>
+                <button type="button" class="shift-option" data-day-shift="Full Day">Full Day</button>
+              </div>
+            </label>
+            <button id="dayNextShift" class="ghost-btn" type="button">Next Day</button>
+          </div>
+
+          <div class="kpi-grid">
+            <article>
+              <h3>Total Units</h3>
+              <p id="dayKpiUnits">0</p>
+            </article>
+            <article>
+              <h3>Total Downtime</h3>
+              <p id="dayKpiDowntime">0 min</p>
+            </article>
+            <article>
+              <h3>Line Utilisation</h3>
+              <p id="dayKpiUtilisation">0%</p>
+            </article>
+            <article>
+              <h3>Net Run Rate</h3>
+              <p id="dayKpiRunRate">0 u/min</p>
+            </article>
+          </div>
           <section class="panel">
             <h2>Day Visualiser</h2>
-            <p class="muted">Timeline by column for the selected date. Production setup and run are split into separate blocks.</p>
+            <p class="muted">Horizontal timeline with swimlanes for shift, breaks, production and downtime.</p>
             <div id="dayVisualiserCanvas" class="day-viz-canvas"></div>
           </section>
         </section>
@@ -381,12 +501,10 @@
                 <select name="shift" required>
                   <option value="Day">Day</option>
                   <option value="Night">Night</option>
+                  <option value="Full Day">Full Day</option>
                 </select>
                 <input name="crewOnShift" type="number" min="0" step="1" placeholder="Crew On Shift" required />
                 <input name="startTime" placeholder="Start Time" />
-                <input name="break1Start" placeholder="Break 1 Start" />
-                <input name="break2Start" placeholder="Break 2 Start" />
-                <input name="break3Start" placeholder="Break 3 Start" />
                 <input name="finishTime" placeholder="Finish Time" />
                 <button type="submit">Add Shift Row</button>
               </form>
@@ -397,12 +515,7 @@
               <h2>Product Run Tracking</h2>
               <form id="runForm" class="form-grid">
                 <input name="date" type="date" required />
-                <select name="shift" required>
-                  <option value="Day">Day</option>
-                  <option value="Night">Night</option>
-                </select>
                 <input name="product" placeholder="Product" required />
-                <input name="setUpStartTime" placeholder="Set Up Start Time" />
                 <input name="productionStartTime" placeholder="Production Start Time" />
                 <input name="finishTime" placeholder="Finish Time" />
                 <input name="unitsProduced" type="number" step="1" placeholder="Units Produced" />
@@ -415,14 +528,18 @@
               <h2>Downtime Tracking</h2>
               <form id="downtimeForm" class="form-grid">
                 <input name="date" type="date" required />
-                <select name="shift" required>
-                  <option value="Day">Day</option>
-                  <option value="Night">Night</option>
-                </select>
                 <input name="downtimeStart" placeholder="Downtime Start" />
                 <input name="downtimeFinish" placeholder="Downtime Finish" />
-                <select name="equipment" id="downtimeEquipment" required></select>
-                <input name="reason" placeholder="Reason" />
+                <select name="reasonCategory" id="downtimeReasonCategory" required>
+                  <option value="">Reason Group</option>
+                  <option value="Equipment">Equipment</option>
+                  <option value="Donor Meat">Donor Meat</option>
+                  <option value="People">People</option>
+                  <option value="Materials">Materials</option>
+                  <option value="Other">Other</option>
+                </select>
+                <select name="reasonDetail" id="downtimeReasonDetail" required></select>
+                <input name="reasonNote" id="downtimeReasonNote" placeholder="Reason Notes (optional)" />
                 <button type="submit">Add Downtime Row</button>
               </form>
               <div class="table-wrap"><table id="downtimeTable"></table></div>
