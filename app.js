@@ -8,13 +8,13 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-
 
 const STAGES = [
   { id: "s1", name: "1. Tumbler", crew: 2, group: "prep", match: ["tumbler"], x: 66.5, y: 64, w: 10, h: 26 },
-  { id: "s2", name: "2. Transfer", crew: 0, group: "prep", match: ["transfer"], x: 56.5, y: 74, w: 7.5, h: 10, kind: "transfer" },
-  { id: "s3", name: "3. Kebab Box Pack", crew: 4, group: "prep", match: ["box", "pack"], x: 23, y: 49, w: 14, h: 16 },
+  { id: "s2", name: "2. Transfer", crew: 1, group: "prep", match: ["transfer"], x: 56.5, y: 74, w: 7.5, h: 10, kind: "transfer" },
+  { id: "s3", name: "3. Kebab Box Pack", crew: 3, group: "prep", match: ["box", "pack"], x: 23, y: 49, w: 14, h: 16 },
   { id: "s4", name: "4. Kebab Box Cut", crew: 1, group: "prep", match: ["box", "cut"], x: 13.5, y: 49, w: 9.5, h: 16 },
   { id: "s5", name: "5. Kebab Box Unload", crew: 1, group: "prep", match: ["box", "unload"], x: 5, y: 49, w: 8.5, h: 16 },
-  { id: "s6", name: "6. Transfer", crew: 0, group: "prep", match: ["transfer"], x: 0.8, y: 34, w: 7.5, h: 10, kind: "transfer" },
-  { id: "s7", name: "7. Kebab Split", crew: 1, group: "main", match: ["split"], x: 4.5, y: 14, w: 8.5, h: 15 },
-  { id: "s8", name: "8. Marinate", crew: 5, group: "main", match: ["marinate"], x: 13.5, y: 14, w: 15, h: 15 },
+  { id: "s6", name: "6. Transfer", crew: 1, group: "prep", match: ["transfer"], x: 0.8, y: 34, w: 7.5, h: 10, kind: "transfer" },
+  { id: "s7", name: "7. Kebab Split", crew: 2, group: "main", match: ["split"], x: 4.5, y: 14, w: 8.5, h: 15 },
+  { id: "s8", name: "8. Marinate", crew: 10, group: "main", match: ["marinate"], x: 13.5, y: 14, w: 15, h: 15 },
   { id: "s9", name: "9. Wipe", crew: 1, group: "main", match: ["wipe"], x: 33.5, y: 14, w: 6, h: 15 },
   { id: "s10", name: "10. Proseal", crew: 1, group: "main", match: ["proseal"], x: 40.5, y: 14, w: 9.5, h: 15 },
   { id: "s11", name: "11. Metal Detector", crew: 1, group: "main", match: ["metal"], x: 55.5, y: 14, w: 6.8, h: 15 },
@@ -23,17 +23,34 @@ const STAGES = [
   { id: "s14", name: "14. Pack", crew: 2, group: "main", match: ["pack"], x: 90, y: 14, w: 5.5, h: 15 }
 ];
 
-const SHIFT_COLUMNS = ["Date", "Shift", "Crew On Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Action"];
-const RUN_COLUMNS = ["Date", "Shift", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Action"];
-const DOWN_COLUMNS = ["Date", "Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Action"];
+const PERMANENT_STAGE_TEMPLATE = Object.freeze({
+  tumbler: { crew: 2, maxThroughput: 50 },
+  transfer: { crew: 1, maxThroughput: 100 },
+  "kebab box pack": { crew: 3, maxThroughput: 15 },
+  "kebab box cut": { crew: 1, maxThroughput: 50 },
+  "kebab box unload": { crew: 1, maxThroughput: 100 },
+  "kebab split": { crew: 2, maxThroughput: 25 },
+  marinate: { crew: 10, maxThroughput: 2.2 },
+  wipe: { crew: 1, maxThroughput: 25 },
+  proseal: { crew: 1, maxThroughput: 35 },
+  "metal detector": { crew: 1, maxThroughput: 50 },
+  "bottom labeller": { crew: 1, maxThroughput: 50 },
+  "top labeller": { crew: 1, maxThroughput: 50 },
+  pack: { crew: 2, maxThroughput: 25 }
+});
+
+const SHIFT_COLUMNS = ["Date", "Shift", "Crew On Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Submitted By", "Action"];
+const RUN_COLUMNS = ["Date", "Assigned Shift", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Submitted By", "Action"];
+const DOWN_COLUMNS = ["Date", "Assigned Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Submitted By", "Action"];
 const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
 const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "Utilisation (%)", "Net Run Rate (u/min)", "Bottleneck", "Staffing"];
 const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
+const LOG_ASSIGNABLE_SHIFTS = ["Day", "Night"];
 const SUPERVISOR_SHIFT_OPTIONS = ["Day", "Night"];
 const DOWNTIME_REASON_PRESETS = {
   "Donor Meat": ["Stock Out", "Late Delivery", "Quality Hold", "Temperature Hold"],
   People: ["Understaffed", "Training", "Handover Delay", "Absence"],
-  Materials: ["Film Shortage", "Label Shortage", "Tray Shortage", "Marinade Shortage"],
+  Materials: ["Film Shortage", "Label Shortage", "Tray Shortage", "Marinade Shortage", "Skewer shortage"],
   Other: ["Cleaning", "QA Hold", "Power", "Unplanned Stop"]
 };
 const DEFAULT_SUPERVISORS = [
@@ -45,6 +62,9 @@ const DEFAULT_SUPERVISORS = [
 let appState = loadState();
 let state = appState.lines[appState.activeLineId];
 let visualiserDragMoved = false;
+let managerLogInlineEdit = { lineId: "", type: "", logId: "" };
+let supervisorShiftTileEditId = "";
+let runCrewingPatternModalState = null;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 let lineModelSyncTimer = null;
 let hostedRefreshErrorShown = false;
@@ -55,6 +75,26 @@ let managerBackendSession = {
 };
 restoreRouteFromHash();
 state = appState.lines[appState.activeLineId];
+
+function setManagerLogInlineEdit(lineId = "", type = "", logId = "") {
+  managerLogInlineEdit = {
+    lineId: String(lineId || ""),
+    type: String(type || ""),
+    logId: String(logId || "")
+  };
+}
+
+function clearManagerLogInlineEdit() {
+  setManagerLogInlineEdit("", "", "");
+}
+
+function isManagerLogInlineEditRow(lineId, type, logId) {
+  return (
+    managerLogInlineEdit.lineId === String(lineId || "") &&
+    managerLogInlineEdit.type === String(type || "") &&
+    managerLogInlineEdit.logId === String(logId || "")
+  );
+}
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
@@ -88,8 +128,25 @@ function generateSecretKey() {
   return key;
 }
 
+function stageTemplateDefaults(stage) {
+  const key = stageNameCore(stage?.name || "");
+  return PERMANENT_STAGE_TEMPLATE[key] || null;
+}
+
+function defaultCrewForStage(stage) {
+  const templated = stageTemplateDefaults(stage);
+  if (templated && Number.isFinite(templated.crew)) return Math.max(0, num(templated.crew));
+  return Math.max(0, num(stage?.crew));
+}
+
+function defaultMaxThroughputForStage(stage) {
+  const templated = stageTemplateDefaults(stage);
+  if (templated && Number.isFinite(templated.maxThroughput)) return Math.max(0, num(templated.maxThroughput));
+  return stage?.kind === "transfer" ? 3 : 2;
+}
+
 function defaultStageCrew(stages = STAGES) {
-  return Object.fromEntries(stages.map((stage) => [stage.id, { crew: stage.crew }]));
+  return Object.fromEntries(stages.map((stage) => [stage.id, { crew: defaultCrewForStage(stage) }]));
 }
 
 function defaultStageSettings(stages = STAGES) {
@@ -97,7 +154,7 @@ function defaultStageSettings(stages = STAGES) {
     stages.map((stage) => [
       stage.id,
       {
-        maxThroughput: stage.kind === "transfer" ? 3 : 2
+        maxThroughput: defaultMaxThroughputForStage(stage)
       }
     ])
   );
@@ -115,8 +172,8 @@ function normalizeCrewByShift(parsed, stages = STAGES) {
     const day = {};
     const night = {};
     stages.forEach((stage) => {
-      day[stage.id] = { crew: num(parsed.crewsByShift.Day?.[stage.id]?.crew ?? stage.crew) };
-      night[stage.id] = { crew: num(parsed.crewsByShift.Night?.[stage.id]?.crew ?? stage.crew) };
+      day[stage.id] = { crew: num(parsed.crewsByShift.Day?.[stage.id]?.crew ?? defaultCrewForStage(stage)) };
+      night[stage.id] = { crew: num(parsed.crewsByShift.Night?.[stage.id]?.crew ?? defaultCrewForStage(stage)) };
     });
     return { Day: day, Night: night };
   }
@@ -138,6 +195,25 @@ function normalizeStageSettings(parsed, stages = STAGES) {
     }
   });
   return incoming;
+}
+
+function enforcePermanentCrewAndThroughput(line) {
+  if (!line || !Array.isArray(line.stages)) return;
+  if (!line.crewsByShift || typeof line.crewsByShift !== "object") line.crewsByShift = {};
+  if (!line.crewsByShift.Day || typeof line.crewsByShift.Day !== "object") line.crewsByShift.Day = {};
+  if (!line.crewsByShift.Night || typeof line.crewsByShift.Night !== "object") line.crewsByShift.Night = {};
+  if (!line.stageSettings || typeof line.stageSettings !== "object") line.stageSettings = {};
+
+  line.stages.forEach((stage) => {
+    const templated = stageTemplateDefaults(stage);
+    if (!templated) return;
+    const crew = defaultCrewForStage(stage);
+    const maxThroughput = defaultMaxThroughputForStage(stage);
+    stage.crew = crew;
+    line.crewsByShift.Day[stage.id] = { ...(line.crewsByShift.Day[stage.id] || {}), crew };
+    line.crewsByShift.Night[stage.id] = { ...(line.crewsByShift.Night[stage.id] || {}), crew };
+    line.stageSettings[stage.id] = { ...(line.stageSettings[stage.id] || {}), maxThroughput };
+  });
 }
 
 function normalizeFlowGuides(guides) {
@@ -307,25 +383,232 @@ function stageTotalMaxThroughputForLine(line, stageId, shift) {
   return stageMaxThroughputForLine(line, stageId) * stageCrewForShiftForLine(line, stageId, shift);
 }
 
+function isCrewedStage(stage) {
+  if (!stage) return false;
+  const kind = String(stage.kind || "").toLowerCase();
+  const group = String(stage.group || "").toLowerCase();
+  return kind !== "transfer" && group !== "transfer";
+}
+
+function crewedStagesForLine(line) {
+  return (line?.stages || [])
+    .map((stage, index) => ({ stage, index }))
+    .filter(({ stage }) => isCrewedStage(stage));
+}
+
+function parseRunCrewingPattern(value) {
+  if (value && typeof value === "object" && !Array.isArray(value)) return value;
+  const raw = String(value || "").trim();
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function normalizeRunCrewingPattern(pattern, line, shift, { fallbackToIdeal = false } = {}) {
+  const source = parseRunCrewingPattern(pattern);
+  const normalized = {};
+  crewedStagesForLine(line).forEach(({ stage }) => {
+    const hasValue = Object.prototype.hasOwnProperty.call(source, stage.id);
+    if (!hasValue) {
+      if (fallbackToIdeal) {
+        normalized[stage.id] = Math.max(0, Math.floor(num(stageCrewForShiftForLine(line, stage.id, shift))));
+      }
+      return;
+    }
+    normalized[stage.id] = Math.max(0, Math.floor(num(source[stage.id])));
+  });
+  return normalized;
+}
+
+function runCrewingPatternFromInput(inputEl, line, shift, { fallbackToIdeal = false } = {}) {
+  const raw = inputEl ? inputEl.value : "";
+  return normalizeRunCrewingPattern(raw, line, shift, { fallbackToIdeal });
+}
+
+function runCrewingPatternSetCount(pattern, line) {
+  const stageIds = new Set(crewedStagesForLine(line).map(({ stage }) => stage.id));
+  return Object.keys(pattern || {}).filter((stageId) => stageIds.has(stageId)).length;
+}
+
+function runCrewingPatternTotalCrew(pattern = {}) {
+  return Object.values(pattern || {}).reduce((sum, value) => sum + Math.max(0, Math.floor(num(value))), 0);
+}
+
+function runCrewingPatternSummaryText(pattern, line) {
+  const stageCount = crewedStagesForLine(line).length;
+  if (!stageCount) return "No crewed stages on this line.";
+  const setCount = runCrewingPatternSetCount(pattern, line);
+  if (!setCount) return "No crewing pattern set.";
+  const totalCrew = runCrewingPatternTotalCrew(pattern);
+  return `${setCount}/${stageCount} stages set (${formatNum(totalCrew, 0)} crew total)`;
+}
+
+function setRunCrewingPatternField(inputEl, summaryEl, line, shift, pattern, { fallbackToIdeal = false } = {}) {
+  const normalized = normalizeRunCrewingPattern(pattern, line, shift, { fallbackToIdeal });
+  if (inputEl) inputEl.value = Object.keys(normalized).length ? JSON.stringify(normalized) : "";
+  if (summaryEl) summaryEl.textContent = runCrewingPatternSummaryText(normalized, line);
+  return normalized;
+}
+
+function runCrewingPatternModalLine() {
+  const lineId = String(runCrewingPatternModalState?.lineId || "");
+  if (!lineId) return null;
+  return appState.lines[lineId] || (state?.id === lineId ? state : null);
+}
+
+function closeRunCrewingPatternModal() {
+  const modal = document.getElementById("runCrewingPatternModal");
+  if (!modal) return;
+  modal.classList.remove("open");
+  modal.setAttribute("aria-hidden", "true");
+  runCrewingPatternModalState = null;
+}
+
+function renderRunCrewingPatternModalInputs() {
+  const list = document.getElementById("runCrewingPatternList");
+  const meta = document.getElementById("runCrewingPatternMeta");
+  if (!list || !meta || !runCrewingPatternModalState) return;
+  const line = runCrewingPatternModalLine();
+  const shift = runCrewingPatternModalState.shift || "Day";
+  const stageRows = crewedStagesForLine(line);
+  meta.textContent = `Set crew values for each non-transfer stage on this ${shift} run.`;
+  if (!line || !stageRows.length) {
+    list.innerHTML = `<p class="muted">No crewed stages available for this line.</p>`;
+    return;
+  }
+  const pattern = runCrewingPatternModalState.pattern || {};
+  list.innerHTML = stageRows
+    .map(({ stage, index }) => {
+      const value = Math.max(0, Math.floor(num(pattern[stage.id])));
+      return `
+        <label class="run-crewing-stage-row">
+          <span class="run-crewing-stage-name">${htmlEscape(stageDisplayName(stage, index))}</span>
+          <input type="number" min="0" step="1" data-run-crewing-stage="${htmlEscape(stage.id)}" value="${value}" />
+        </label>
+      `;
+    })
+    .join("");
+}
+
+function openRunCrewingPatternModal({ line, shift = "Day", inputEl = null, summaryEl = null } = {}) {
+  const modal = document.getElementById("runCrewingPatternModal");
+  if (!modal || !line || !inputEl) return;
+  const activeShift = String(shift || "Day");
+  const existingPattern = runCrewingPatternFromInput(inputEl, line, activeShift, { fallbackToIdeal: false });
+  const pattern = Object.keys(existingPattern).length
+    ? existingPattern
+    : normalizeRunCrewingPattern({}, line, activeShift, { fallbackToIdeal: true });
+  runCrewingPatternModalState = {
+    lineId: line.id,
+    shift: activeShift,
+    inputEl,
+    summaryEl,
+    pattern
+  };
+  renderRunCrewingPatternModalInputs();
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function saveRunCrewingPatternFromModal() {
+  if (!runCrewingPatternModalState) return;
+  const list = document.getElementById("runCrewingPatternList");
+  const line = runCrewingPatternModalLine();
+  const shift = runCrewingPatternModalState.shift || "Day";
+  if (!list || !line) {
+    closeRunCrewingPatternModal();
+    return;
+  }
+  const pattern = {};
+  Array.from(list.querySelectorAll("[data-run-crewing-stage]")).forEach((input) => {
+    const stageId = String(input.getAttribute("data-run-crewing-stage") || "");
+    if (!stageId) return;
+    pattern[stageId] = Math.max(0, Math.floor(num(input.value)));
+  });
+  setRunCrewingPatternField(
+    runCrewingPatternModalState.inputEl,
+    runCrewingPatternModalState.summaryEl,
+    line,
+    shift,
+    pattern,
+    { fallbackToIdeal: false }
+  );
+  closeRunCrewingPatternModal();
+}
+
+function bindRunCrewingPatternModal() {
+  const modal = document.getElementById("runCrewingPatternModal");
+  const closeBtn = document.getElementById("closeRunCrewingPatternModal");
+  const saveBtn = document.getElementById("saveRunCrewingPattern");
+  if (!modal || !closeBtn || !saveBtn) return;
+
+  closeBtn.addEventListener("click", closeRunCrewingPatternModal);
+  saveBtn.addEventListener("click", saveRunCrewingPatternFromModal);
+  modal.addEventListener("click", (event) => {
+    if (event.target === modal) closeRunCrewingPatternModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && modal.classList.contains("open")) closeRunCrewingPatternModal();
+  });
+}
+
+function refreshRunCrewingPatternSummaries() {
+  const managerInput = document.getElementById("runCrewingPattern");
+  const managerSummary = document.getElementById("runCrewingPatternSummary");
+  if (managerInput && managerSummary && state) {
+    setRunCrewingPatternField(managerInput, managerSummary, state, state.selectedShift || "Day", managerInput.value, { fallbackToIdeal: false });
+  }
+
+  const supervisorInput = document.getElementById("superRunCrewingPattern");
+  const supervisorSummary = document.getElementById("superRunCrewingPatternSummary");
+  if (!supervisorInput || !supervisorSummary) return;
+  const line = selectedSupervisorLine() || (appState.supervisorSelectedLineId ? appState.lines[appState.supervisorSelectedLineId] : null);
+  if (!line) {
+    supervisorInput.value = "";
+    supervisorSummary.textContent = "No crewing pattern set.";
+    return;
+  }
+  setRunCrewingPatternField(
+    supervisorInput,
+    supervisorSummary,
+    line,
+    appState.supervisorSelectedShift || "Day",
+    supervisorInput.value,
+    { fallbackToIdeal: false }
+  );
+}
+
 function derivedDataForLine(line) {
-  const downtimeRows = (line?.downtimeRows || []).map(computeDowntimeRow);
+  const downtimeRows = (line?.downtimeRows || [])
+    .map(computeDowntimeRow)
+    .map((row) => decorateTimedLogShift(row, line, "downtimeStart", "downtimeFinish"));
   const shiftRows = (line?.shiftRows || []).map(computeShiftRow);
   const breakRows = (line?.breakRows || []).map(computeBreakRow);
   const downtimeByShift = new Map();
   downtimeRows.forEach((row) => {
-    const key = `${row.date}__${row.shift}`;
-    downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + num(row.downtimeMins));
+    LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
+      const mins = Math.max(0, num(row?.__shiftMinutes?.[shiftKey]));
+      if (mins <= 0) return;
+      const key = `${row.date}__${shiftKey}`;
+      downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + mins);
+    });
   });
-  const runRows = (line?.runRows || []).map((row) => computeRunRow(row, downtimeByShift));
+  const runRows = (line?.runRows || [])
+    .map((row) => decorateTimedLogShift(row, line, "productionStartTime", "finishTime"))
+    .map((row) => computeRunRow(row, downtimeByShift));
   return { shiftRows, breakRows, runRows, downtimeRows };
 }
 
 function computeLineMetrics(line, date, shift) {
   const stages = line?.stages?.length ? line.stages : STAGES;
   const data = derivedDataForLine(line || {});
-  const selectedRunRows = selectedShiftRowsByDate(data.runRows, date, shift);
-  const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, date, shift);
-  const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift);
+  const selectedRunRows = selectedShiftRowsByDate(data.runRows, date, shift, { line });
+  const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, date, shift, { line });
+  const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line });
   const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
 
   let requiredCrew = requiredCrewForLineShift(line, shift);
@@ -352,9 +635,9 @@ function computeLineMetrics(line, date, shift) {
   }
   const understaffedBy = hasCrewLog ? Math.max(0, requiredCrew - crewOnShift) : 0;
   const staffingCallout = !hasCrewLog ? "No shift data" : understaffedBy > 0 ? `Understaffed by ${understaffedBy}` : "Fully staffed";
-  const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced), 0);
-  const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins), 0);
-  const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime), 0);
+  const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, shift), 0);
+  const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
+  const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   let utilAccumulator = 0;
   let utilCount = 0;
@@ -364,7 +647,7 @@ function computeLineMetrics(line, date, shift) {
   stages.forEach((stage, index) => {
     const stageDowntime = selectedDownRows
       .filter((row) => matchesStage(stage, row.equipment))
-      .reduce((sum, row) => sum + num(row.downtimeMins), 0);
+      .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
     const totalMax = stageTotalMaxThroughputForLine(line, stage.id, shift);
@@ -414,18 +697,18 @@ function downloadTextFile(fileName, text, mimeType = "text/plain;charset=utf-8")
 }
 
 function loadState() {
-  const defaultLine = makeDefaultLine("line-1", "Production Line 1");
+  const defaultLine = makeDefaultLine("line-1", "Production Line 1", { seedSample: true });
   return {
     activeView: "home",
     appMode: "manager",
     dashboardDate: todayISO(),
     dashboardShift: "Day",
     supervisorMobileMode: false,
-    supervisorMainTab: "supervisorVisual",
+    supervisorMainTab: "supervisorDay",
     supervisorTab: "superShift",
     supervisorSelectedLineId: defaultLine.id,
     supervisorSelectedDate: todayISO(),
-    supervisorSelectedShift: "Day",
+    supervisorSelectedShift: "Full Day",
     supervisorSession: null,
     supervisors: [],
     activeLineId: defaultLine.id,
@@ -457,9 +740,9 @@ function saveState(options = {}) {
   syncRouteToHash();
 }
 
-function makeDefaultLine(id, name) {
+function makeDefaultLine(id, name, { seedSample = false } = {}) {
   const stages = clone(STAGES);
-  return {
+  const line = {
     id,
     name,
     secretKey: generateSecretKey(),
@@ -481,6 +764,9 @@ function makeDefaultLine(id, name) {
     supervisorLogs: [],
     auditRows: []
   };
+  enforcePermanentCrewAndThroughput(line);
+  if (seedSample) loadSampleDataIntoLine(line);
+  return line;
 }
 
 function normalizeLine(id, line) {
@@ -499,11 +785,23 @@ function normalizeLine(id, line) {
     stages,
     shiftRows: line?.shiftRows || [],
     breakRows: line?.breakRows || [],
-    runRows: line?.runRows || [],
-    downtimeRows: line?.downtimeRows || [],
+    runRows: Array.isArray(line?.runRows)
+      ? line.runRows.map((row) => ({
+          ...row,
+          runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
+          shift: ""
+        }))
+      : [],
+    downtimeRows: Array.isArray(line?.downtimeRows)
+      ? line.downtimeRows.map((row) => ({
+          ...row,
+          shift: ""
+        }))
+      : [],
     supervisorLogs: Array.isArray(line?.supervisorLogs) ? line.supervisorLogs : [],
     auditRows: Array.isArray(line?.auditRows) ? line.auditRows : []
   };
+  enforcePermanentCrewAndThroughput(normalized);
   ensureManagerLogRowIds(normalized);
   return normalized;
 }
@@ -576,7 +874,7 @@ function makeSettingsFromStages(stages) {
     stages.map((stage) => [
       stage.id,
       {
-        maxThroughput: Math.max(0, num(stage.maxThroughput) || (stage.kind === "transfer" ? 3 : 2))
+        maxThroughput: Math.max(0, num(stage.maxThroughput) || defaultMaxThroughputForStage(stage))
       }
     ])
   );
@@ -625,11 +923,101 @@ function optionalStrictTimeValid(value) {
   return strictTimeValid(value);
 }
 
+function isPendingRunLogRow(row) {
+  return strictTimeValid(row?.productionStartTime) && strictTimeValid(row?.finishTime) && row.productionStartTime === row.finishTime;
+}
+
+function isPendingShiftLogRow(row) {
+  return strictTimeValid(row?.startTime) && strictTimeValid(row?.finishTime) && row.startTime === row.finishTime;
+}
+
+function isPendingBreakLogRow(row) {
+  return strictTimeValid(row?.breakStart) && !strictTimeValid(row?.breakFinish);
+}
+
+function isPendingDowntimeLogRow(row) {
+  return strictTimeValid(row?.downtimeStart) && strictTimeValid(row?.downtimeFinish) && row.downtimeStart === row.downtimeFinish;
+}
+
+function rowNewestSortValue(row, primaryTimeField = "") {
+  const submittedAt = Date.parse(String(row?.submittedAt || ""));
+  if (Number.isFinite(submittedAt) && submittedAt > 0) return submittedAt;
+  const rowDate = String(row?.date || "").trim();
+  const rowTime = strictTimeValid(row?.[primaryTimeField]) ? String(row[primaryTimeField]) : "00:00";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rowDate)) {
+    const derived = Date.parse(`${rowDate}T${rowTime}:00`);
+    if (Number.isFinite(derived) && derived > 0) return derived;
+  }
+  return 0;
+}
+
+function managerLogSubmittedByLabel(row) {
+  const submittedBy = String(row?.submittedBy || "").trim();
+  if (!submittedBy) return "Manager";
+  if (submittedBy.toLowerCase() === "manager") return "Manager";
+  return submittedBy;
+}
+
+function breakRowsForShift(line, shiftLogId) {
+  return (line?.breakRows || [])
+    .filter((row) => String(row?.shiftLogId || "") === String(shiftLogId || ""))
+    .slice()
+    .sort((a, b) => {
+      const startCmp = String(a?.breakStart || "").localeCompare(String(b?.breakStart || ""));
+      if (startCmp !== 0) return startCmp;
+      const submittedCmp = String(a?.submittedAt || "").localeCompare(String(b?.submittedAt || ""));
+      if (submittedCmp !== 0) return submittedCmp;
+      return String(a?.id || "").localeCompare(String(b?.id || ""));
+    });
+}
+
 function nowTimeHHMM() {
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, "0");
   const mm = String(now.getMinutes()).padStart(2, "0");
   return `${hh}:${mm}`;
+}
+
+function selectedSupervisorShiftLogId({ line = null } = {}) {
+  const inputId = String(document.getElementById("superShiftLogId")?.value || "").trim();
+  const tileId = String(supervisorShiftTileEditId || "").trim();
+  const selectedId = inputId || tileId;
+  if (!selectedId || !line) return selectedId;
+  const row = (line.shiftRows || []).find((item) => String(item?.id || "") === selectedId);
+  if (!row) return "";
+  return selectedId;
+}
+
+function updateSupervisorProgressButtonLabels() {
+  const shiftBtn = document.getElementById("superShiftSaveProgress");
+  const runBtn = document.getElementById("superRunSaveProgress");
+  const downBtn = document.getElementById("superDownSaveProgress");
+  const shiftSelected = Boolean(selectedSupervisorShiftLogId());
+  const runSelected = Boolean(String(document.getElementById("superRunLogId")?.value || "").trim());
+  const downSelected = Boolean(String(document.getElementById("superDownLogId")?.value || "").trim());
+
+  if (shiftBtn) shiftBtn.textContent = shiftSelected ? "Save" : "Start";
+  if (runBtn) runBtn.textContent = runSelected ? "Save" : "Start";
+  if (downBtn) downBtn.textContent = downSelected ? "Save" : "Start";
+}
+
+function syncNowInputPrefixState(input) {
+  if (!input || typeof input.closest !== "function") return;
+  const wrapper = input.closest(".input-now-wrap[data-time-prefix]");
+  if (!wrapper) return;
+  const hasValue = String(input.value || "").trim().length > 0;
+  wrapper.classList.toggle("has-value", hasValue);
+  if (input.style) {
+    input.style.paddingLeft = hasValue ? "3.8rem" : "0.86rem";
+    input.style.paddingRight = "4.15rem";
+  }
+}
+
+function syncAllNowInputPrefixStates(root = document) {
+  if (!root || typeof root.querySelectorAll !== "function") return;
+  root.querySelectorAll(".input-now-wrap[data-time-prefix] input").forEach((input) => {
+    syncNowInputPrefixState(input);
+  });
 }
 
 function isFullDayShift(shift) {
@@ -641,8 +1029,168 @@ function shiftKeysForSelection(shift) {
   return [shift];
 }
 
-function rowMatchesDateShift(row, date, shift) {
+function mergeMinuteIntervals(intervals = []) {
+  return (intervals || [])
+    .map((segment) => ({ start: Math.max(0, num(segment?.start)), end: Math.min(24 * 60, num(segment?.end)) }))
+    .filter((segment) => Number.isFinite(segment.start) && Number.isFinite(segment.end) && segment.end > segment.start)
+    .sort((a, b) => a.start - b.start)
+    .reduce((merged, segment) => {
+      const last = merged[merged.length - 1];
+      if (!last || segment.start > last.end) {
+        merged.push({ ...segment });
+      } else if (segment.end > last.end) {
+        last.end = segment.end;
+      }
+      return merged;
+    }, []);
+}
+
+function intervalOverlapMinutes(a, b) {
+  if (!a || !b) return 0;
+  const start = Math.max(num(a.start), num(b.start));
+  const end = Math.min(num(a.end), num(b.end));
+  return end > start ? end - start : 0;
+}
+
+function intervalsFromTimes(startValue, finishValue) {
+  const startMins = parseTimeToMinutes(startValue);
+  const finishMins = parseTimeToMinutes(finishValue);
+  if (!Number.isFinite(startMins) || !Number.isFinite(finishMins)) return [];
+  return splitAcrossMidnight(startMins, finishMins)
+    .map((segment) => ({ start: num(segment.start), end: num(segment.end) }))
+    .filter((segment) => segment.end > segment.start);
+}
+
+function shiftIntervalsForDate(line, date) {
+  const byShift = Object.fromEntries(LOG_ASSIGNABLE_SHIFTS.map((shift) => [shift, []]));
+  (line?.shiftRows || [])
+    .filter((row) => row?.date === date && LOG_ASSIGNABLE_SHIFTS.includes(String(row?.shift || "")))
+    .forEach((row) => {
+      const shiftKey = String(row.shift || "");
+      let intervals = intervalsFromTimes(row.startTime, row.finishTime);
+      if (!intervals.length && strictTimeValid(row.startTime) && strictTimeValid(row.finishTime) && row.startTime === row.finishTime) {
+        const startMins = parseTimeToMinutes(row.startTime);
+        const nowCandidate = nowTimeHHMM();
+        const nowMins = parseTimeToMinutes(nowCandidate);
+        if (Number.isFinite(startMins) && Number.isFinite(nowMins)) {
+          const effectiveEnd = startMins === nowMins ? (startMins + 1) % (24 * 60) : nowMins;
+          intervals = splitAcrossMidnight(startMins, effectiveEnd);
+        }
+      }
+      byShift[shiftKey].push(...intervals);
+    });
+  LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
+    byShift[shiftKey] = mergeMinuteIntervals(byShift[shiftKey]);
+  });
+  return byShift;
+}
+
+function timedLogShiftLabelFromCoverage(coverage) {
+  const matches = Array.isArray(coverage?.shiftMatches) ? coverage.shiftMatches.filter((shift) => LOG_ASSIGNABLE_SHIFTS.includes(shift)) : [];
+  const unassignedMinutes = Math.max(0, num(coverage?.unassignedMinutes));
+  if (!matches.length) return "Unassigned";
+  const base = matches.join(" + ");
+  if (unassignedMinutes > 0) return `${base} + Unassigned`;
+  return base;
+}
+
+function shiftCoverageForTimedLog(line, date, startValue, finishValue) {
+  const empty = {
+    shiftMatches: [],
+    shiftMinutes: Object.fromEntries(LOG_ASSIGNABLE_SHIFTS.map((shift) => [shift, 0])),
+    totalMinutes: 0,
+    unassignedMinutes: 0,
+    label: "Unassigned"
+  };
+  if (!line || !/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) return empty;
+  const startMins = parseTimeToMinutes(startValue);
+  const finishMins = parseTimeToMinutes(finishValue);
+  if (!Number.isFinite(startMins) || !Number.isFinite(finishMins)) return empty;
+  const eventSegments = intervalsFromTimes(startValue, finishValue);
+  const isPointEvent = startMins === finishMins || !eventSegments.length;
+  const shiftIntervals = shiftIntervalsForDate(line, date);
+  const shiftMatches = new Set();
+  const shiftMinutes = Object.fromEntries(LOG_ASSIGNABLE_SHIFTS.map((shift) => [shift, 0]));
+
+  LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
+    const intervals = shiftIntervals[shiftKey] || [];
+    if (isPointEvent) {
+      if (intervals.some((interval) => startMins >= interval.start && startMins <= interval.end)) {
+        shiftMatches.add(shiftKey);
+      }
+      return;
+    }
+    const overlap = eventSegments.reduce(
+      (sum, eventSegment) => sum + intervals.reduce((inner, interval) => inner + intervalOverlapMinutes(eventSegment, interval), 0),
+      0
+    );
+    if (overlap > 0) {
+      shiftMinutes[shiftKey] = overlap;
+      shiftMatches.add(shiftKey);
+    }
+  });
+
+  const totalMinutes = isPointEvent ? 0 : eventSegments.reduce((sum, segment) => sum + Math.max(0, num(segment.end) - num(segment.start)), 0);
+  const assignedMinutes = LOG_ASSIGNABLE_SHIFTS.reduce((sum, shiftKey) => sum + Math.max(0, num(shiftMinutes[shiftKey])), 0);
+  const unassignedMinutes = isPointEvent ? 0 : Math.max(0, totalMinutes - assignedMinutes);
+  const coverage = {
+    shiftMatches: LOG_ASSIGNABLE_SHIFTS.filter((shiftKey) => shiftMatches.has(shiftKey)),
+    shiftMinutes,
+    totalMinutes,
+    unassignedMinutes,
+    label: ""
+  };
+  coverage.label = timedLogShiftLabelFromCoverage(coverage);
+  return coverage;
+}
+
+function decorateTimedLogShift(row, line, startField, finishField) {
+  const base = { ...(row || {}) };
+  const coverage = shiftCoverageForTimedLog(line, base.date, base[startField], base[finishField]);
+  const shiftMatches = coverage.shiftMatches;
+  const shiftMinutes = coverage.shiftMinutes;
+  const totalMinutes = Math.max(0, num(coverage.totalMinutes));
+  const unassignedMinutes = Math.max(0, num(coverage.unassignedMinutes));
+  const label = coverage.label;
+  return {
+    ...base,
+    shift: "",
+    __shiftMatches: shiftMatches,
+    __shiftMinutes: shiftMinutes,
+    __totalTimedMinutes: totalMinutes,
+    __unassignedMinutes: unassignedMinutes,
+    __shiftLabel: label
+  };
+}
+
+function timedLogShiftWeight(row, selectedShift) {
+  if (isFullDayShift(selectedShift)) return 1;
+  const shiftKey = selectedShift === "Night" ? "Night" : "Day";
+  const total = Math.max(0, num(row?.__totalTimedMinutes));
+  const covered = Math.max(0, num(row?.__shiftMinutes?.[shiftKey]));
+  if (total > 0) return covered / total;
+  if (Array.isArray(row?.__shiftMatches)) return row.__shiftMatches.includes(shiftKey) ? 1 : 0;
+  return 0;
+}
+
+function resolveTimedLogShiftLabel(row, line, startField, finishField) {
+  const explicit = String(row?.__shiftLabel || "").trim();
+  if (explicit) return explicit;
+  const coverage = shiftCoverageForTimedLog(line, row?.date, row?.[startField], row?.[finishField]);
+  if (coverage.shiftMatches.length || coverage.unassignedMinutes > 0) return coverage.label;
+  return "Unassigned";
+}
+
+function rowMatchesDateShift(row, date, shift, { line = null, startField = "", finishField = "" } = {}) {
   if (!row || row.date !== date) return false;
+  if (isFullDayShift(shift)) return true;
+  const requestedShift = shift === "Night" ? "Night" : "Day";
+  const explicitMatches = Array.isArray(row?.__shiftMatches) ? row.__shiftMatches : null;
+  if (explicitMatches) return explicitMatches.includes(requestedShift);
+  if (line && startField && finishField) {
+    const coverage = shiftCoverageForTimedLog(line, row.date, row[startField], row[finishField]);
+    return coverage.shiftMatches.includes(requestedShift);
+  }
   return shiftKeysForSelection(shift).includes(row.shift);
 }
 
@@ -679,8 +1227,16 @@ function inferShiftForLog(line, date, timeValue, fallbackShift = "Day") {
   return fallback;
 }
 
-function selectedShiftRowsByDate(rows, date, shift) {
-  return (rows || []).filter((row) => rowMatchesDateShift(row, date, shift));
+function selectedShiftRowsByDate(rows, date, shift, { line = null } = {}) {
+  return (rows || []).filter((row) => {
+    if (row && Object.prototype.hasOwnProperty.call(row, "productionStartTime") && Object.prototype.hasOwnProperty.call(row, "finishTime")) {
+      return rowMatchesDateShift(row, date, shift, { line, startField: "productionStartTime", finishField: "finishTime" });
+    }
+    if (row && Object.prototype.hasOwnProperty.call(row, "downtimeStart") && Object.prototype.hasOwnProperty.call(row, "downtimeFinish")) {
+      return rowMatchesDateShift(row, date, shift, { line, startField: "downtimeStart", finishField: "downtimeFinish" });
+    }
+    return rowMatchesDateShift(row, date, shift);
+  });
 }
 
 function rowIsValidDateShift(date, shift) {
@@ -815,9 +1371,9 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
   line.stageSettings = {};
   line.stages.forEach((stage) => {
     const bStage = backendStages.find((item) => item.id === stage.id);
-    line.crewsByShift.Day[stage.id] = { crew: Math.max(0, num(bStage?.dayCrew ?? stage.crew)) };
-    line.crewsByShift.Night[stage.id] = { crew: Math.max(0, num(bStage?.nightCrew ?? stage.crew)) };
-    line.stageSettings[stage.id] = { maxThroughput: Math.max(0, num(bStage?.maxThroughputPerCrew ?? 2)) };
+    line.crewsByShift.Day[stage.id] = { crew: Math.max(0, num(bStage?.dayCrew ?? defaultCrewForStage(stage))) };
+    line.crewsByShift.Night[stage.id] = { crew: Math.max(0, num(bStage?.nightCrew ?? defaultCrewForStage(stage))) };
+    line.stageSettings[stage.id] = { maxThroughput: Math.max(0, num(bStage?.maxThroughputPerCrew ?? defaultMaxThroughputForStage(stage))) };
   });
 
   line.flowGuides = Array.isArray(lineDetail?.guides)
@@ -835,12 +1391,19 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
 
   line.shiftRows = Array.isArray(logs?.shiftRows) ? logs.shiftRows : [];
   line.breakRows = Array.isArray(logs?.breakRows) ? logs.breakRows : [];
-  line.runRows = Array.isArray(logs?.runRows) ? logs.runRows : [];
+  line.runRows = Array.isArray(logs?.runRows)
+    ? logs.runRows.map((row) => ({
+        ...row,
+        runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
+        shift: ""
+      }))
+    : [];
   line.downtimeRows = Array.isArray(logs?.downtimeRows)
     ? logs.downtimeRows.map((row) => {
         const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
         return {
           ...row,
+          shift: "",
           reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
           reasonDetail: row?.reasonDetail || parsedReason.reasonDetail,
           reasonNote: row?.reasonNote || parsedReason.reasonNote
@@ -850,6 +1413,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
   line.auditRows = [];
   line.supervisorLogs = [];
   line.selectedStageId = line.stages[0]?.id || "";
+  enforcePermanentCrewAndThroughput(line);
   return line;
 }
 
@@ -881,9 +1445,11 @@ async function refreshHostedState(preferredSession = null) {
     });
 
     if (!Object.keys(hostedLines).length && activeSession.role !== "supervisor") {
-      const fallback = makeDefaultLine("line-1", "Production Line 1");
+      const fallback = makeDefaultLine("line-1", "Production Line 1", { seedSample: true });
       hostedLines[fallback.id] = fallback;
     }
+
+    ensurePermanentSampleData(hostedLines, appState.activeLineId);
 
     appState.lines = hostedLines;
     const ids = Object.keys(hostedLines);
@@ -1153,13 +1719,17 @@ async function startSupervisorShiftBreak(session, shiftLogId, breakStart) {
   return response?.breakLog || null;
 }
 
-async function endSupervisorShiftBreak(session, shiftLogId, breakId, breakFinish) {
+async function patchSupervisorShiftBreak(session, shiftLogId, breakId, payload) {
   const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
     method: "PATCH",
     token: session.backendToken,
-    body: { breakFinish }
+    body: payload
   });
   return response?.breakLog || null;
+}
+
+async function endSupervisorShiftBreak(session, shiftLogId, breakId, breakFinish) {
+  return patchSupervisorShiftBreak(session, shiftLogId, breakId, { breakFinish });
 }
 
 async function syncSupervisorRunLog(session, payload) {
@@ -1398,20 +1968,87 @@ function formatMonthLabel(month) {
   return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
-function sampleDataSet() {
+function lineHasTrackingData(line) {
+  return (
+    Math.max(0, line?.shiftRows?.length || 0) +
+      Math.max(0, line?.breakRows?.length || 0) +
+      Math.max(0, line?.runRows?.length || 0) +
+      Math.max(0, line?.downtimeRows?.length || 0) >
+    0
+  );
+}
+
+function capSampleRunRatesForUtilisation(sample, line, maxRatio = 0.95) {
+  if (!sample || !line) return;
+  const stages = line?.stages?.length ? line.stages : STAGES;
+  const minStageCapacityByShift = {
+    Day: 0,
+    Night: 0
+  };
+
+  ["Day", "Night"].forEach((shift) => {
+    const capacities = stages
+      .map((stage) => stageTotalMaxThroughputForLine(line, stage.id, shift))
+      .filter((value) => value > 0);
+    minStageCapacityByShift[shift] = capacities.length ? Math.min(...capacities) : 0;
+  });
+
+  const downtimeByShift = new Map();
+  (sample.downtimeRows || []).forEach((row) => {
+    const key = shiftKey(row.date, row.shift);
+    const mins = Math.max(0, diffMinutes(row.downtimeStart, row.downtimeFinish));
+    downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + mins);
+  });
+
+  const runGroups = new Map();
+  (sample.runRows || []).forEach((row) => {
+    const key = shiftKey(row.date, row.shift);
+    if (!runGroups.has(key)) runGroups.set(key, []);
+    runGroups.get(key).push(row);
+  });
+
+  runGroups.forEach((rows, key) => {
+    if (!rows.length) return;
+    const shift = rows[0]?.shift === "Night" ? "Night" : "Day";
+    const capRate = Math.max(0, minStageCapacityByShift[shift] * Math.max(0, num(maxRatio)));
+    if (capRate <= 0) return;
+
+    const downtimeMins = Math.max(0, num(downtimeByShift.get(key)));
+    let unitsTotal = 0;
+    let netTimeTotal = 0;
+    rows.forEach((row) => {
+      const gross = Math.max(0, diffMinutes(row.productionStartTime, row.finishTime));
+      const net = Math.max(0, gross - downtimeMins);
+      unitsTotal += Math.max(0, num(row.unitsProduced));
+      netTimeTotal += net;
+    });
+    if (unitsTotal <= 0 || netTimeTotal <= 0) return;
+
+    const currentRate = unitsTotal / netTimeTotal;
+    if (currentRate <= capRate) return;
+
+    const scale = capRate / currentRate;
+    rows.forEach((row) => {
+      row.unitsProduced = Math.max(1, Math.round(Math.max(0, num(row.unitsProduced)) * scale));
+    });
+  });
+}
+
+function sampleDataSet(lineModel = state) {
+  const line = lineModel || state || {};
   const shiftRows = [];
   const breakRows = [];
   const runRows = [];
   const downtimeRows = [];
   const start = new Date(2025, 10, 1);
   const days = 100;
-  const stageIds = getStages().map((stage) => stage.id).filter(Boolean);
+  const stageIds = (line?.stages?.length ? line.stages : STAGES).map((stage) => stage.id).filter(Boolean);
   const dayEquipment = stageIds.filter((_, idx) => idx % 2 === 0);
   const nightEquipment = stageIds.filter((_, idx) => idx % 2 === 1);
   const fallbackEquipment = stageIds[0] || "";
   const equipAt = (list, i, offset = 0) => (list.length ? list[(i + offset) % list.length] : fallbackEquipment);
-  const dayRequired = requiredCrewForLineShift(state, "Day");
-  const nightRequired = requiredCrewForLineShift(state, "Night");
+  const dayRequired = requiredCrewForLineShift(line, "Day");
+  const nightRequired = requiredCrewForLineShift(line, "Night");
 
   for (let i = 0; i < days; i += 1) {
     const d = new Date(start);
@@ -1485,19 +2122,19 @@ function sampleDataSet() {
     const neq = equipAt(nightEquipment, i);
     const dayReasonCategory = i % 4 === 0 ? "People" : "Equipment";
     const dayReasonDetail = dayReasonCategory === "Equipment" ? deq : DOWNTIME_REASON_PRESETS.People[i % DOWNTIME_REASON_PRESETS.People.length];
-    const dayReason = buildDowntimeReasonText(state, dayReasonCategory, dayReasonDetail, dayReasonCategory === "Equipment" ? "Planned maintenance" : "");
+    const dayReason = buildDowntimeReasonText(line, dayReasonCategory, dayReasonDetail, dayReasonCategory === "Equipment" ? "Planned maintenance" : "");
     const dayReasonCategory2 = i % 5 === 0 ? "Materials" : "Equipment";
     const dayReasonDetail2 =
       dayReasonCategory2 === "Equipment" ? equipAt(dayEquipment, i, 2) : DOWNTIME_REASON_PRESETS.Materials[i % DOWNTIME_REASON_PRESETS.Materials.length];
-    const dayReason2 = buildDowntimeReasonText(state, dayReasonCategory2, dayReasonDetail2, dayReasonCategory2 === "Equipment" ? "Minor stoppage" : "");
+    const dayReason2 = buildDowntimeReasonText(line, dayReasonCategory2, dayReasonDetail2, dayReasonCategory2 === "Equipment" ? "Minor stoppage" : "");
     const nightReasonCategory = i % 3 === 0 ? "Donor Meat" : "Equipment";
     const nightReasonDetail =
       nightReasonCategory === "Equipment" ? neq : DOWNTIME_REASON_PRESETS["Donor Meat"][i % DOWNTIME_REASON_PRESETS["Donor Meat"].length];
-    const nightReason = buildDowntimeReasonText(state, nightReasonCategory, nightReasonDetail, nightReasonCategory === "Equipment" ? "Sensor reset" : "");
+    const nightReason = buildDowntimeReasonText(line, nightReasonCategory, nightReasonDetail, nightReasonCategory === "Equipment" ? "Sensor reset" : "");
     const nightReasonCategory2 = i % 6 === 0 ? "Other" : "Equipment";
     const nightReasonDetail2 =
       nightReasonCategory2 === "Equipment" ? equipAt(nightEquipment, i, 3) : DOWNTIME_REASON_PRESETS.Other[i % DOWNTIME_REASON_PRESETS.Other.length];
-    const nightReason2 = buildDowntimeReasonText(state, nightReasonCategory2, nightReasonDetail2, nightReasonCategory2 === "Equipment" ? "Label adjustment" : "");
+    const nightReason2 = buildDowntimeReasonText(line, nightReasonCategory2, nightReasonDetail2, nightReasonCategory2 === "Equipment" ? "Label adjustment" : "");
     downtimeRows.push(
       {
         date,
@@ -1546,7 +2183,7 @@ function sampleDataSet() {
     );
   }
 
-  return {
+  const sample = {
     selectedDate: "2026-02-08",
     selectedShift: "Day",
     trendGranularity: "daily",
@@ -1556,6 +2193,32 @@ function sampleDataSet() {
     runRows,
     downtimeRows
   };
+  capSampleRunRatesForUtilisation(sample, line, 0.95);
+  return sample;
+}
+
+function loadSampleDataIntoLine(line) {
+  if (!line) return false;
+  const sample = sampleDataSet(line);
+  line.selectedDate = sample.selectedDate;
+  line.selectedShift = sample.selectedShift;
+  line.trendGranularity = sample.trendGranularity;
+  line.trendMonth = sample.trendMonth;
+  line.shiftRows = sample.shiftRows;
+  line.breakRows = sample.breakRows;
+  line.runRows = sample.runRows;
+  line.downtimeRows = sample.downtimeRows;
+  ensureManagerLogRowIds(line);
+  return true;
+}
+
+function ensurePermanentSampleData(lines, preferredLineId = "") {
+  if (!lines || typeof lines !== "object") return false;
+  const ids = Object.keys(lines);
+  if (!ids.length) return false;
+  if (ids.some((lineId) => lineHasTrackingData(lines[lineId]))) return false;
+  const targetId = preferredLineId && lines[preferredLineId] ? preferredLineId : ids[0];
+  return loadSampleDataIntoLine(lines[targetId]);
 }
 
 function parseTimeToDayFraction(value) {
@@ -1611,7 +2274,17 @@ function computeRunRow(row, downtimeByShift) {
   const grossProductionTime = grossCalc > 0 ? grossCalc : grossFallback;
 
   const associatedFallback = num(row.associatedDownTime);
-  const associatedFromDowntime = downtimeByShift.get(`${row.date}__${row.shift}`) ?? 0;
+  const perShiftMinutes = row?.__shiftMinutes;
+  const coveredShiftMinutes = LOG_ASSIGNABLE_SHIFTS.reduce((sum, shiftKey) => sum + Math.max(0, num(perShiftMinutes?.[shiftKey])), 0);
+  let associatedFromDowntime = 0;
+  if (coveredShiftMinutes > 0) {
+    LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
+      const mins = Math.max(0, num(perShiftMinutes?.[shiftKey]));
+      if (mins <= 0) return;
+      const downForShift = Math.max(0, num(downtimeByShift.get(`${row.date}__${shiftKey}`) || 0));
+      associatedFromDowntime += (mins / coveredShiftMinutes) * downForShift;
+    });
+  }
   const associatedDownTime = associatedFromDowntime > 0 ? associatedFromDowntime : associatedFallback;
 
   const netFallback = num(row.netProductionTime);
@@ -1633,15 +2306,23 @@ function computeRunRow(row, downtimeByShift) {
 }
 
 function derivedData() {
-  const downtimeRows = state.downtimeRows.map(computeDowntimeRow);
+  const downtimeRows = state.downtimeRows
+    .map(computeDowntimeRow)
+    .map((row) => decorateTimedLogShift(row, state, "downtimeStart", "downtimeFinish"));
   const shiftRows = state.shiftRows.map(computeShiftRow);
   const breakRows = (state.breakRows || []).map(computeBreakRow);
   const downtimeByShift = new Map();
   downtimeRows.forEach((row) => {
-    const key = `${row.date}__${row.shift}`;
-    downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + num(row.downtimeMins));
+    LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
+      const mins = Math.max(0, num(row?.__shiftMinutes?.[shiftKey]));
+      if (mins <= 0) return;
+      const key = `${row.date}__${shiftKey}`;
+      downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + mins);
+    });
   });
-  const runRows = state.runRows.map((row) => computeRunRow(row, downtimeByShift));
+  const runRows = state.runRows
+    .map((row) => decorateTimedLogShift(row, state, "productionStartTime", "finishTime"))
+    .map((row) => computeRunRow(row, downtimeByShift));
   return { shiftRows, breakRows, runRows, downtimeRows };
 }
 
@@ -1694,6 +2375,9 @@ function bindHome() {
   const dashboardShiftButtons = Array.from(document.querySelectorAll("[data-dash-shift]"));
   const exportDashboardCsvBtn = document.getElementById("exportDashboardCsv");
   const supervisorLoginForm = document.getElementById("supervisorLoginForm");
+  const supervisorUserInput = document.getElementById("supervisorUser");
+  const supervisorPassInput = document.getElementById("supervisorPass");
+  const supervisorTestLoginBtn = document.getElementById("supervisorTestLoginBtn");
   const supervisorLogoutBtn = document.getElementById("supervisorLogout");
   const supervisorMobileModeBtn = document.getElementById("supervisorMobileMode");
   const supervisorLineSelect = document.getElementById("supervisorLineSelect");
@@ -1708,15 +2392,18 @@ function bindHome() {
   const superShiftOpenBreakIdInput = document.getElementById("superShiftOpenBreakId");
   const superShiftBreakTimeInput = document.getElementById("superShiftBreakTime");
   const superRunLogIdInput = document.getElementById("superRunLogId");
+  const superRunCrewingPatternInput = document.getElementById("superRunCrewingPattern");
+  const superRunCrewingPatternBtn = document.getElementById("superRunCrewingPatternBtn");
+  const superRunCrewingPatternSummary = document.getElementById("superRunCrewingPatternSummary");
   const superDownLogIdInput = document.getElementById("superDownLogId");
   const superShiftSaveProgressBtn = document.getElementById("superShiftSaveProgress");
   const superShiftBreakStartBtn = document.getElementById("superShiftBreakStart");
   const superShiftBreakEndBtn = document.getElementById("superShiftBreakEnd");
-  const superShiftCompleteBtn = document.getElementById("superShiftComplete");
+  const superShiftOpenList = document.getElementById("superShiftOpenList");
   const superRunSaveProgressBtn = document.getElementById("superRunSaveProgress");
   const superRunOpenList = document.getElementById("superRunOpenList");
   const superDownSaveProgressBtn = document.getElementById("superDownSaveProgress");
-  const superDownCompleteBtn = document.getElementById("superDownComplete");
+  const superDownOpenList = document.getElementById("superDownOpenList");
   const supervisorDownReasonCategory = document.getElementById("superDownReasonCategory");
   const supervisorDownReasonDetail = document.getElementById("superDownReasonDetail");
   const manageSupervisorsBtn = document.getElementById("manageSupervisorsBtn");
@@ -1752,6 +2439,7 @@ function bindHome() {
   let dragState = null;
   let editingSupervisorId = "";
   let editingLineId = "";
+  let suppressSupervisorSelectionReset = false;
 
   const stripLeadingStageNumber = (name) => String(name || "").replace(/^\s*\d+\.\s*/, "").trim();
   const seedBuilderFromTemplate = () => ({
@@ -1833,14 +2521,15 @@ function bindHome() {
     newSupervisorLines.innerHTML = lineIds
       .map((id, index) => {
         const line = appState.lines[id];
+        const lineLabel = htmlEscape(line.name);
         const allowed = normalizeSupervisorShifts(normalizedSelection[id], { fallbackToAll: false });
         const dayId = `newSupervisor-${index}-day`;
         const nightId = `newSupervisor-${index}-night`;
         return `
           <div class="supervisor-access-row">
-            <span class="supervisor-access-line">${line.name}</span>
+            <span class="supervisor-access-line">${lineLabel}</span>
             <div class="supervisor-access-shifts">
-              <label class="supervisor-shift-pill" for="${dayId}">
+              <label class="supervisor-shift-pill${allowed.includes("Day") ? " is-selected" : ""}" for="${dayId}">
                 <input
                   id="${dayId}"
                   type="checkbox"
@@ -1851,7 +2540,7 @@ function bindHome() {
                 />
                 <span>Day</span>
               </label>
-              <label class="supervisor-shift-pill" for="${nightId}">
+              <label class="supervisor-shift-pill${allowed.includes("Night") ? " is-selected" : ""}" for="${nightId}">
                 <input
                   id="${nightId}"
                   type="checkbox"
@@ -1867,6 +2556,15 @@ function bindHome() {
         `;
       })
       .join("");
+    syncSupervisorShiftPillStyles(newSupervisorLines);
+  };
+
+  const syncSupervisorShiftPillStyles = (root) => {
+    if (!root || typeof root.querySelectorAll !== "function") return;
+    root.querySelectorAll(".supervisor-shift-pill").forEach((pill) => {
+      const checkbox = pill.querySelector('input[type="checkbox"]');
+      pill.classList.toggle("is-selected", Boolean(checkbox?.checked));
+    });
   };
 
   const refreshSupervisorDowntimeDetailOptions = (line = selectedSupervisorLine()) => {
@@ -1881,15 +2579,18 @@ function bindHome() {
     supervisorManagerList.innerHTML = (appState.supervisors || [])
       .map((sup) => {
         const accessMap = normalizeSupervisorLineShifts(sup.assignedLineShifts, appState.lines, sup.assignedLineIds || []);
+        const assignedLineCount = Object.keys(accessMap).length;
+        const assignmentSummary = `${assignedLineCount} line${assignedLineCount === 1 ? "" : "s"} assigned`;
         const accessRows = lineIds
           .map(
             (lineId, index) => {
               const allowed = normalizeSupervisorShifts(accessMap[lineId], { fallbackToAll: false });
+              const lineLabel = htmlEscape(linesById[lineId].name);
               return `
                 <div class="supervisor-access-row">
-                  <span class="supervisor-access-line">${linesById[lineId].name}</span>
-                  <div class="supervisor-access-shifts">
-                    <label class="supervisor-shift-pill" for="sup-${sup.id}-${index}-day">
+                  <span class="supervisor-access-line">${lineLabel}</span>
+                  <div class="supervisor-access-shifts" role="group" aria-label="${lineLabel} shift access">
+                    <label class="supervisor-shift-pill${allowed.includes("Day") ? " is-selected" : ""}" for="sup-${sup.id}-${index}-day">
                       <input
                         id="sup-${sup.id}-${index}-day"
                         type="checkbox"
@@ -1900,7 +2601,7 @@ function bindHome() {
                       />
                       <span>Day</span>
                     </label>
-                    <label class="supervisor-shift-pill" for="sup-${sup.id}-${index}-night">
+                    <label class="supervisor-shift-pill${allowed.includes("Night") ? " is-selected" : ""}" for="sup-${sup.id}-${index}-night">
                       <input
                         id="sup-${sup.id}-${index}-night"
                         type="checkbox"
@@ -1919,9 +2620,12 @@ function bindHome() {
           .join("");
         return `
           <section class="panel supervisor-manager-row" data-supervisor-id="${sup.id}">
-            <div class="action-row supervisor-manager-header">
-              <h3>${sup.name}</h3>
-              <span class="muted">@${sup.username}</span>
+            <div class="supervisor-manager-head">
+              <div class="supervisor-manager-identity">
+                <h3>${htmlEscape(sup.name)}</h3>
+                <span class="supervisor-manager-handle">@${htmlEscape(sup.username)}</span>
+              </div>
+              <span class="supervisor-count-chip">${assignmentSummary}</span>
             </div>
             <div class="supervisor-assignment-wrap">
               <section class="supervisor-assignment-group">
@@ -1932,17 +2636,22 @@ function bindHome() {
               </section>
             </div>
             <div class="action-row supervisor-manager-actions">
-              <button type="button" data-supervisor-save="${sup.id}">Save Assignments</button>
-              <button type="button" class="ghost-btn" data-supervisor-edit="${sup.id}">Edit</button>
-              <button type="button" class="danger" data-supervisor-delete="${sup.id}">Delete Supervisor</button>
+              <button type="button" class="supervisor-action-save" data-supervisor-save="${sup.id}">Save Assignments</button>
+              <button type="button" class="ghost-btn supervisor-action-edit" data-supervisor-edit="${sup.id}">Edit Details</button>
+              <button type="button" class="danger supervisor-action-delete" data-supervisor-delete="${sup.id}">Delete Supervisor</button>
             </div>
           </section>
         `;
       })
       .join("");
     if (!appState.supervisors?.length) {
-      supervisorManagerList.innerHTML = `<p class="muted">No supervisors created yet.</p>`;
+      supervisorManagerList.innerHTML = `
+        <div class="supervisor-manager-empty">
+          <p class="muted">No supervisors created yet.</p>
+        </div>
+      `;
     }
+    syncSupervisorShiftPillStyles(supervisorManagerList);
   };
 
   const openManageSupervisorsModal = async () => {
@@ -2071,10 +2780,22 @@ function bindHome() {
     downloadTextFile(`line-dashboard-${appState.dashboardDate || todayISO()}-${appState.dashboardShift || "Day"}.csv`, toCsv(csvRows, DASHBOARD_COLUMNS), "text/csv;charset=utf-8");
   });
 
+  if (supervisorTestLoginBtn && supervisorUserInput && supervisorPassInput) {
+    supervisorTestLoginBtn.addEventListener("click", () => {
+      supervisorUserInput.value = "supervisor";
+      supervisorPassInput.value = "supervisor123";
+      if (typeof supervisorLoginForm.requestSubmit === "function") {
+        supervisorLoginForm.requestSubmit();
+      } else {
+        supervisorLoginForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
+    });
+  }
+
   supervisorLoginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
-    const username = String(document.getElementById("supervisorUser").value || "").trim().toLowerCase();
-    const password = String(document.getElementById("supervisorPass").value || "");
+    const username = String(supervisorUserInput.value || "").trim().toLowerCase();
+    const password = String(supervisorPassInput.value || "");
     try {
       const loginPayload = await apiRequest("/api/auth/login", {
         method: "POST",
@@ -2125,35 +2846,54 @@ function bindHome() {
       const input = document.getElementById(target);
       if (!input) return;
       input.value = nowTimeHHMM();
+      syncNowInputPrefixState(input);
     });
+  });
+
+  document.querySelectorAll(".input-now-wrap[data-time-prefix] input").forEach((input) => {
+    const sync = () => syncNowInputPrefixState(input);
+    input.addEventListener("input", sync);
+    input.addEventListener("change", sync);
+    sync();
   });
 
   ["superShiftDate", "superShiftShift"].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("change", () => {
+      if (suppressSupervisorSelectionReset) return;
+      if (selectedSupervisorShiftLogId()) {
+        updateSupervisorProgressButtonLabels();
+        return;
+      }
       if (superShiftLogIdInput) superShiftLogIdInput.value = "";
       if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+      supervisorShiftTileEditId = "";
+      updateSupervisorProgressButtonLabels();
     });
   });
   ["superRunDate", "superRunProduct"].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", () => {
-      if (superRunLogIdInput) superRunLogIdInput.value = "";
+      if (suppressSupervisorSelectionReset) return;
+      updateSupervisorProgressButtonLabels();
     });
     el.addEventListener("change", () => {
-      if (superRunLogIdInput) superRunLogIdInput.value = "";
+      if (suppressSupervisorSelectionReset) return;
+      updateSupervisorProgressButtonLabels();
     });
   });
   ["superDownDate", "superDownStart", "superDownReasonCategory", "superDownReasonDetail"].forEach((id) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.addEventListener("input", () => {
-      if (superDownLogIdInput) superDownLogIdInput.value = "";
+      if (suppressSupervisorSelectionReset) return;
+      updateSupervisorProgressButtonLabels();
     });
     el.addEventListener("change", () => {
-      if (superDownLogIdInput) superDownLogIdInput.value = "";
+      if (suppressSupervisorSelectionReset) return;
+      updateSupervisorProgressButtonLabels();
     });
   });
 
@@ -2167,11 +2907,9 @@ function bindHome() {
 
   supervisorLineSelect.addEventListener("change", () => {
     appState.supervisorSelectedLineId = supervisorLineSelect.value || "";
-    const session = normalizeSupervisorSession(appState.supervisorSession, appState.supervisors, appState.lines);
-    const lineShiftMap = normalizeSupervisorLineShifts(session?.assignedLineShifts, appState.lines, session?.assignedLineIds || []);
-    const allowedShifts = expandedSupervisorShiftAccess(lineShiftMap[appState.supervisorSelectedLineId]);
-    if (!allowedShifts.includes(appState.supervisorSelectedShift)) {
-      appState.supervisorSelectedShift = allowedShifts[0] || "Day";
+    const visualAllowedShifts = SHIFT_OPTIONS.slice();
+    if (!visualAllowedShifts.includes(appState.supervisorSelectedShift)) {
+      appState.supervisorSelectedShift = visualAllowedShifts.includes("Full Day") ? "Full Day" : visualAllowedShifts[0] || "Day";
     }
     refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
     saveState();
@@ -2200,7 +2938,7 @@ function bindHome() {
   if (supervisorDownReasonCategory) {
     supervisorDownReasonCategory.addEventListener("change", () => {
       refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
-      if (superDownLogIdInput) superDownLogIdInput.value = "";
+      updateSupervisorProgressButtonLabels();
     });
   }
 
@@ -2226,7 +2964,7 @@ function bindHome() {
 
   document.querySelectorAll("[data-super-main-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
-      appState.supervisorMainTab = btn.dataset.superMainTab || "supervisorVisual";
+      appState.supervisorMainTab = btn.dataset.superMainTab || "supervisorDay";
       saveState();
       renderHome();
     });
@@ -2247,6 +2985,18 @@ function bindHome() {
   closeEditSupervisorModalBtn.addEventListener("click", closeEditSupervisorModal);
   editSupervisorModal.addEventListener("click", (event) => {
     if (event.target === editSupervisorModal) closeEditSupervisorModal();
+  });
+
+  newSupervisorLines.addEventListener("change", (event) => {
+    const checkbox = event.target.closest('input[data-new-supervisor-line-shift]');
+    if (!checkbox) return;
+    syncSupervisorShiftPillStyles(newSupervisorLines);
+  });
+
+  supervisorManagerList.addEventListener("change", (event) => {
+    const checkbox = event.target.closest('input[data-supervisor-line-shift]');
+    if (!checkbox) return;
+    syncSupervisorShiftPillStyles(supervisorManagerList);
   });
 
   supervisorManagerList.addEventListener("click", async (event) => {
@@ -2478,6 +3228,15 @@ function bindHome() {
     return sup?.name || session?.username || "supervisor";
   };
 
+  const resolveSupervisorLineContext = (lineIdOverride = "") => {
+    const session = appState.supervisorSession;
+    if (!session) return null;
+    const lineId = String(lineIdOverride || selectedSupervisorLineId() || "");
+    const line = appState.lines[lineId];
+    if (!lineId || !line || !session.assignedLineIds.includes(lineId)) return null;
+    return { session, lineId, line };
+  };
+
   const isOpenRunRow = (row) =>
     strictTimeValid(row?.productionStartTime) &&
     strictTimeValid(row?.finishTime) &&
@@ -2500,6 +3259,24 @@ function bindHome() {
   supervisorShiftForm.addEventListener("submit", (event) => event.preventDefault());
   supervisorRunForm.addEventListener("submit", (event) => event.preventDefault());
   supervisorDownForm.addEventListener("submit", (event) => event.preventDefault());
+  if (superRunCrewingPatternBtn) {
+    superRunCrewingPatternBtn.addEventListener("click", () => {
+      const line = selectedSupervisorLine();
+      if (!line) {
+        alert("No assigned line selected.");
+        return;
+      }
+      const runDate = String(document.getElementById("superRunDate")?.value || appState.supervisorSelectedDate || todayISO());
+      const runStart = String(document.getElementById("superRunProdStart")?.value || nowTimeHHMM());
+      const shiftForPattern = inferShiftForLog(line, runDate, runStart, appState.supervisorSelectedShift || "Day");
+      openRunCrewingPatternModal({
+        line,
+        shift: shiftForPattern,
+        inputEl: superRunCrewingPatternInput,
+        summaryEl: superRunCrewingPatternSummary
+      });
+    });
+  }
 
   const submitSupervisorShift = async ({ complete = false } = {}) => {
     const session = appState.supervisorSession;
@@ -2526,14 +3303,22 @@ function bindHome() {
       return;
     }
 
-    const matchingRows = (line.shiftRows || []).filter((row) => row.date === date && row.shift === shift);
+    const selectedShiftId = selectedSupervisorShiftLogId({ line });
     let existing = null;
-    if (superShiftLogIdInput.value) {
-      existing = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
-      if (existing && (existing.date !== date || existing.shift !== shift)) existing = null;
-    }
-    if (!existing) {
-      existing = latestBySubmittedAt(matchingRows.filter(isOpenShiftRow));
+    if (selectedShiftId) {
+      existing = (line.shiftRows || []).find((row) => row.id === selectedShiftId) || null;
+      if (!existing) {
+        alert("Selected shift log could not be found. Re-open it from Pending Shift Logs and try again.");
+        return;
+      }
+      if (!isOpenShiftRow(existing)) {
+        alert("Selected shift log is no longer open.");
+        return;
+      }
+      if (existing.date !== date || existing.shift !== shift) {
+        alert("Date and shift cannot be changed while editing an open shift log.");
+        return;
+      }
     }
 
     const startTime = startInput || existing?.startTime || nowTimeHHMM();
@@ -2547,7 +3332,7 @@ function bindHome() {
       return;
     }
     if (!complete && finishTime !== startTime) {
-      alert("Open shift logs keep finish equal to start. Use Complete Shift when the shift ends.");
+      alert("Open shift logs keep finish equal to start. Use the Finalise pill on the log when the shift ends.");
       return;
     }
     if (complete && superShiftOpenBreakIdInput?.value) {
@@ -2569,8 +3354,15 @@ function bindHome() {
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.shiftRows, savedRow);
-      superShiftLogIdInput.value = complete ? "" : savedRow.id || "";
-      if (complete && superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+      if (complete) {
+        superShiftLogIdInput.value = "";
+        if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+        supervisorShiftTileEditId = "";
+      } else {
+        if (superShiftLogIdInput) superShiftLogIdInput.value = "";
+        if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+        supervisorShiftTileEditId = "";
+      }
       addAudit(
         line,
         complete ? "SUPERVISOR_SHIFT_COMPLETE" : "SUPERVISOR_SHIFT_PROGRESS",
@@ -2583,12 +3375,19 @@ function bindHome() {
       }
       saveState();
       renderAll();
+      if (!complete) {
+        supervisorShiftForm.reset();
+        if (superShiftLogIdInput) superShiftLogIdInput.value = "";
+        if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+        if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
+        supervisorShiftTileEditId = "";
+      }
     } catch (error) {
       alert(`Could not save shift log.\n${error?.message || "Please try again."}`);
     }
   };
 
-  const submitSupervisorBreakStart = async () => {
+  const submitSupervisorBreakStart = async ({ shiftId = "", breakStartOverride = "" } = {}) => {
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
@@ -2597,9 +3396,23 @@ function bindHome() {
       alert("You are not assigned to that line.");
       return;
     }
-    const date = document.getElementById("superShiftDate").value || todayISO();
-    const shift = document.getElementById("superShiftShift").value || "Day";
-    const breakStart = String(superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
+
+    let shiftLog = null;
+    if (shiftId) {
+      shiftLog = (line.shiftRows || []).find((row) => row.id === shiftId) || null;
+      if (!shiftLog?.id) {
+        alert("Shift log could not be found.");
+        return;
+      }
+      if (!isOpenShiftRow(shiftLog)) {
+        alert("This shift is already finalised.");
+        return;
+      }
+    }
+
+    const date = shiftLog?.date || document.getElementById("superShiftDate").value || todayISO();
+    const shift = shiftLog?.shift || document.getElementById("superShiftShift").value || "Day";
+    const breakStart = String(breakStartOverride || superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
     if (!strictTimeValid(breakStart)) {
       alert("Break start time must be HH:MM.");
       return;
@@ -2608,8 +3421,8 @@ function bindHome() {
       alert(`You are not assigned to the ${shift} shift.`);
       return;
     }
-    let shiftLog = null;
-    if (superShiftLogIdInput?.value) {
+
+    if (!shiftLog && superShiftLogIdInput?.value) {
       shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
       if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
     }
@@ -2638,7 +3451,7 @@ function bindHome() {
         submittedAt: savedBreak?.submittedAt || nowIso()
       };
       upsertRowById(line.breakRows, savedRow);
-      if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = savedRow.id || "";
+      if (superShiftOpenBreakIdInput && superShiftLogIdInput?.value === shiftLog.id) superShiftOpenBreakIdInput.value = savedRow.id || "";
       if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
       addAudit(line, "SUPERVISOR_BREAK_START", `${supervisorActorName(session)} started break (${shift} ${date})`);
       saveState();
@@ -2648,7 +3461,7 @@ function bindHome() {
     }
   };
 
-  const submitSupervisorBreakEnd = async () => {
+  const submitSupervisorBreakEnd = async ({ shiftId = "", breakId = "", breakFinishOverride = "" } = {}) => {
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
@@ -2657,9 +3470,19 @@ function bindHome() {
       alert("You are not assigned to that line.");
       return;
     }
-    const date = document.getElementById("superShiftDate").value || todayISO();
-    const shift = document.getElementById("superShiftShift").value || "Day";
-    const breakFinish = String(superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
+
+    let shiftLog = null;
+    if (shiftId) {
+      shiftLog = (line.shiftRows || []).find((row) => row.id === shiftId) || null;
+      if (!shiftLog?.id) {
+        alert("Shift log could not be found.");
+        return;
+      }
+    }
+
+    const date = shiftLog?.date || document.getElementById("superShiftDate").value || todayISO();
+    const shift = shiftLog?.shift || document.getElementById("superShiftShift").value || "Day";
+    const breakFinish = String(breakFinishOverride || superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
     if (!strictTimeValid(breakFinish)) {
       alert("Break finish time must be HH:MM.");
       return;
@@ -2668,8 +3491,8 @@ function bindHome() {
       alert(`You are not assigned to the ${shift} shift.`);
       return;
     }
-    let shiftLog = null;
-    if (superShiftLogIdInput?.value) {
+
+    if (!shiftLog && superShiftLogIdInput?.value) {
       shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
       if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
     }
@@ -2681,7 +3504,10 @@ function bindHome() {
       return;
     }
     let openBreak = null;
-    if (superShiftOpenBreakIdInput?.value) {
+    if (breakId) {
+      openBreak = (line.breakRows || []).find((row) => row.id === breakId && row.shiftLogId === shiftLog.id) || null;
+    }
+    if (!openBreak && superShiftOpenBreakIdInput?.value) {
       openBreak = (line.breakRows || []).find((row) => row.id === superShiftOpenBreakIdInput.value) || null;
       if (openBreak && openBreak.shiftLogId !== shiftLog.id) openBreak = null;
     }
@@ -2701,13 +3527,173 @@ function bindHome() {
         submittedAt: savedBreak?.submittedAt || nowIso()
       };
       upsertRowById(line.breakRows, savedRow);
-      if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+      if (superShiftOpenBreakIdInput && superShiftLogIdInput?.value === shiftLog.id) superShiftOpenBreakIdInput.value = "";
       if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
       addAudit(line, "SUPERVISOR_BREAK_END", `${supervisorActorName(session)} ended break (${shift} ${date})`);
       saveState();
       renderAll();
     } catch (error) {
       alert(`Could not end break.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const saveSupervisorShiftBreakEdits = async (shiftId, tileNode) => {
+    const session = appState.supervisorSession;
+    if (!session) return;
+    const lineId = selectedSupervisorLineId();
+    const line = appState.lines[lineId];
+    if (!session.assignedLineIds.includes(lineId) || !line) {
+      alert("You are not assigned to that line.");
+      return;
+    }
+    const shiftLog = (line.shiftRows || []).find((row) => row.id === shiftId) || null;
+    if (!shiftLog?.id) {
+      alert("Shift log could not be found.");
+      return;
+    }
+    const editorRows = Array.from(tileNode?.querySelectorAll("[data-break-editor-row]") || []);
+    if (!editorRows.length) return;
+
+    try {
+      let changed = false;
+      const warnings = new Set();
+      for (const editorRow of editorRows) {
+        const breakId = String(editorRow.getAttribute("data-break-id") || "");
+        const breakIndex = Number(editorRow.getAttribute("data-break-index"));
+        const startValue = String(editorRow.querySelector('[data-break-field="start"]')?.value || "").trim();
+        const finishValue = String(editorRow.querySelector('[data-break-field="finish"]')?.value || "").trim();
+        if (startValue && !strictTimeValid(startValue)) {
+          alert("Break start time must be HH:MM.");
+          return;
+        }
+        if (finishValue && !strictTimeValid(finishValue)) {
+          alert("Break finish time must be HH:MM.");
+          return;
+        }
+
+        const shiftBreakRows = breakRowsForShift(line, shiftId);
+        let existingBreak = null;
+        if (breakId) {
+          existingBreak = shiftBreakRows.find((row) => String(row.id || "") === breakId) || null;
+        }
+        if (!existingBreak && Number.isInteger(breakIndex) && breakIndex >= 0) {
+          existingBreak = shiftBreakRows[breakIndex] || null;
+        }
+
+        if (existingBreak) {
+          const originalStart = String(existingBreak.breakStart || "").trim();
+          const originalFinish = String(existingBreak.breakFinish || "").trim();
+          const nextStart = startValue || originalStart;
+          const nextFinish = finishValue;
+          if (!nextStart || !strictTimeValid(nextStart)) {
+            alert("Each existing break must have a valid start time.");
+            return;
+          }
+          const isBackendBreak = UUID_RE.test(String(existingBreak.id || ""));
+          if (isBackendBreak) {
+            const breakPatch = {};
+            if (nextStart !== originalStart) breakPatch.breakStart = nextStart;
+            if (nextFinish !== originalFinish) {
+              if (!nextFinish && originalFinish) {
+                warnings.add("Break finish cannot be cleared once set.");
+              } else if (nextFinish) {
+                breakPatch.breakFinish = nextFinish;
+              }
+            }
+            if (Object.keys(breakPatch).length) {
+              const savedBreak = await patchSupervisorShiftBreak(session, shiftLog.id, existingBreak.id, breakPatch);
+              const savedStart = savedBreak?.breakStart || breakPatch.breakStart || originalStart;
+              const savedFinish = savedBreak?.breakFinish !== undefined
+                ? String(savedBreak.breakFinish || "")
+                : breakPatch.breakFinish !== undefined
+                  ? breakPatch.breakFinish
+                  : originalFinish;
+              Object.assign(existingBreak, {
+                breakStart: savedStart,
+                breakFinish: savedFinish,
+                submittedBy: supervisorActorName(session),
+                submittedAt: savedBreak?.submittedAt || nowIso()
+              });
+              changed = true;
+            }
+          } else {
+            if (nextStart !== originalStart || nextFinish !== originalFinish) {
+              Object.assign(existingBreak, {
+                breakStart: nextStart,
+                breakFinish: nextFinish,
+                submittedBy: supervisorActorName(session),
+                submittedAt: nowIso()
+              });
+              changed = true;
+            }
+          }
+          continue;
+        }
+
+        if (!startValue && !finishValue) continue;
+        if (!startValue) {
+          alert("New break rows need a start time.");
+          return;
+        }
+
+        if (UUID_RE.test(String(shiftLog.id || ""))) {
+          const savedStart = await startSupervisorShiftBreak(session, shiftLog.id, startValue);
+          const newBreakRow = {
+            id: savedStart?.id || "",
+            lineId: lineId || "",
+            date: shiftLog.date || todayISO(),
+            shift: shiftLog.shift || "Day",
+            shiftLogId: shiftLog.id,
+            breakStart: startValue,
+            breakFinish: "",
+            submittedBy: supervisorActorName(session),
+            submittedAt: savedStart?.submittedAt || nowIso()
+          };
+          upsertRowById(line.breakRows, newBreakRow);
+          changed = true;
+          if (finishValue) {
+            if (!newBreakRow.id || !UUID_RE.test(String(newBreakRow.id))) {
+              warnings.add("New break was created but finish could not be set immediately.");
+            } else {
+              const savedFinish = await endSupervisorShiftBreak(session, shiftLog.id, newBreakRow.id, finishValue);
+              Object.assign(newBreakRow, {
+                breakFinish: finishValue,
+                submittedBy: supervisorActorName(session),
+                submittedAt: savedFinish?.submittedAt || nowIso()
+              });
+              upsertRowById(line.breakRows, newBreakRow);
+            }
+          }
+        } else {
+          upsertRowById(line.breakRows, {
+            id: makeLocalLogId("break"),
+            lineId: lineId || "",
+            date: shiftLog.date || todayISO(),
+            shift: shiftLog.shift || "Day",
+            shiftLogId: shiftLog.id,
+            breakStart: startValue,
+            breakFinish: finishValue || "",
+            submittedBy: supervisorActorName(session),
+            submittedAt: nowIso()
+          });
+          changed = true;
+        }
+      }
+
+      if (warnings.size) alert(Array.from(warnings).join("\n"));
+      if (!changed) {
+        if (!warnings.size) alert("No break changes to save.");
+        return;
+      }
+      addAudit(
+        line,
+        "SUPERVISOR_BREAK_EDIT",
+        `${supervisorActorName(session)} updated break logs (${shiftLog.shift || "Shift"} ${shiftLog.date || todayISO()})`
+      );
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not save break edits.\n${error?.message || "Please try again."}`);
     }
   };
 
@@ -2732,14 +3718,17 @@ function bindHome() {
       return;
     }
 
+    const selectedRunLogId = String(superRunLogIdInput?.value || "").trim();
     let existing = null;
-    if (superRunLogIdInput.value) {
-      existing = (line.runRows || []).find((row) => row.id === superRunLogIdInput.value) || null;
-      if (
-        existing &&
-        (existing.date !== date || (productInput && existing.product !== productInput))
-      ) {
-        existing = null;
+    if (selectedRunLogId) {
+      existing = (line.runRows || []).find((row) => row.id === selectedRunLogId) || null;
+      if (!existing) {
+        alert("Selected production run could not be found. Re-open it from Pending Production Runs and try again.");
+        return;
+      }
+      if (existing.date !== date) {
+        alert("Date cannot be changed while editing an open production run.");
+        return;
       }
     }
 
@@ -2754,22 +3743,48 @@ function bindHome() {
     const unitsProduced = unitsRaw === ""
       ? Math.max(0, num(existing?.unitsProduced))
       : Math.max(0, num(unitsRaw));
-    const shift = existing?.shift || inferShiftForLog(line, date, productionStartTime, appState.supervisorSelectedShift || "Day");
+    const backendShift = inferShiftForLog(line, date, productionStartTime, appState.supervisorSelectedShift || "Day");
 
     if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
       alert("Production start and finish must be HH:MM (24h).");
       return;
     }
     if (!complete && finishTime !== productionStartTime) {
-      alert("Open run logs keep finish equal to start. Use the Complete pill on the log when the run ends.");
+      alert("Open run logs keep finish equal to start. Use the Finalise pill on the log when the run ends.");
       return;
     }
-    if (!supervisorCanAccessShift(session, lineId, shift)) {
-      alert(`You are not assigned to the ${shift} shift.`);
+    if (!supervisorCanAccessShift(session, lineId, backendShift)) {
+      alert(`You are not assigned to the ${backendShift} shift.`);
       return;
     }
 
-    const payload = { lineId, date, shift, setUpStartTime: "", product, productionStartTime, finishTime, unitsProduced };
+    const inputPattern = runCrewingPatternFromInput(superRunCrewingPatternInput, line, backendShift, { fallbackToIdeal: false });
+    const existingPattern = normalizeRunCrewingPattern(existing?.runCrewingPattern, line, backendShift, { fallbackToIdeal: false });
+    const runCrewingPattern = Object.keys(inputPattern).length ? inputPattern : existingPattern;
+    if (!Object.keys(runCrewingPattern).length) {
+      alert("Set crewing pattern for this run before saving.");
+      return;
+    }
+    setRunCrewingPatternField(
+      superRunCrewingPatternInput,
+      superRunCrewingPatternSummary,
+      line,
+      backendShift,
+      runCrewingPattern,
+      { fallbackToIdeal: false }
+    );
+
+    const payload = {
+      lineId,
+      date,
+      shift: backendShift,
+      setUpStartTime: "",
+      product,
+      productionStartTime,
+      finishTime,
+      unitsProduced,
+      runCrewingPattern
+    };
     try {
       const saved = existing?.id
         ? await patchSupervisorRunLog(session, existing.id, payload)
@@ -2778,12 +3793,18 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
+        shift: "",
+        runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, line, backendShift, { fallbackToIdeal: false }),
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.runRows, savedRow);
-      superRunLogIdInput.value = "";
+      if (complete) {
+        superRunLogIdInput.value = "";
+      } else {
+        if (superRunLogIdInput) superRunLogIdInput.value = "";
+      }
       addAudit(
         line,
         complete ? "SUPERVISOR_RUN_COMPLETE" : "SUPERVISOR_RUN_PROGRESS",
@@ -2792,9 +3813,29 @@ function bindHome() {
       if (complete) {
         supervisorRunForm.reset();
         document.getElementById("superRunDate").value = date;
+        setRunCrewingPatternField(
+          superRunCrewingPatternInput,
+          superRunCrewingPatternSummary,
+          line,
+          appState.supervisorSelectedShift || "Day",
+          {},
+          { fallbackToIdeal: false }
+        );
       }
       saveState();
       renderAll();
+      if (!complete) {
+        supervisorRunForm.reset();
+        if (superRunLogIdInput) superRunLogIdInput.value = "";
+        setRunCrewingPatternField(
+          superRunCrewingPatternInput,
+          superRunCrewingPatternSummary,
+          line,
+          appState.supervisorSelectedShift || "Day",
+          {},
+          { fallbackToIdeal: false }
+        );
+      }
     } catch (error) {
       alert(`Could not save production run.\n${error?.message || "Please try again."}`);
     }
@@ -2808,6 +3849,36 @@ function bindHome() {
     return `${hh}:${mm}`;
   };
 
+  const loadSupervisorShiftForEdit = (shiftId) => {
+    const session = appState.supervisorSession;
+    if (!session) return;
+    const lineId = selectedSupervisorLineId();
+    const line = appState.lines[lineId];
+    if (!line || !session.assignedLineIds.includes(lineId)) return;
+    const row = (line.shiftRows || []).find((item) => item.id === shiftId);
+    if (!row) return;
+
+    const openBreak = latestBySubmittedAt((line.breakRows || []).filter((breakRow) => breakRow.shiftLogId === row.id && isOpenBreakRow(breakRow)));
+    suppressSupervisorSelectionReset = true;
+    document.getElementById("superShiftDate").value = row.date || todayISO();
+    document.getElementById("superShiftShift").value = row.shift || "Day";
+    document.getElementById("superShiftCrew").value = String(Math.max(0, Math.floor(num(row.crewOnShift))));
+    document.getElementById("superShiftStart").value = row.startTime || "";
+    document.getElementById("superShiftFinish").value = isOpenShiftRow(row) ? "" : row.finishTime || "";
+    if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
+    superShiftLogIdInput.value = row.id || "";
+    supervisorShiftTileEditId = row.id || "";
+    if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = openBreak?.id || "";
+    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !row.id || Boolean(openBreak?.id);
+    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !row.id || !openBreak?.id;
+    suppressSupervisorSelectionReset = false;
+    // Refresh the supervisor data entry UI so the selected pending shift shows Save immediately.
+    renderHome();
+    updateSupervisorProgressButtonLabels();
+    const crewInput = document.getElementById("superShiftCrew");
+    if (crewInput) crewInput.focus();
+  };
+
   const loadSupervisorRunForEdit = (runId) => {
     const session = appState.supervisorSession;
     if (!session) return;
@@ -2817,28 +3888,155 @@ function bindHome() {
     const row = (line.runRows || []).find((item) => item.id === runId);
     if (!row) return;
 
-    superRunLogIdInput.value = row.id || "";
+    suppressSupervisorSelectionReset = true;
     document.getElementById("superRunDate").value = row.date || todayISO();
     document.getElementById("superRunProduct").value = row.product || "";
     document.getElementById("superRunProdStart").value = row.productionStartTime || "";
-    document.getElementById("superRunFinish").value = row.finishTime || "";
-    document.getElementById("superRunUnits").value = formatNum(Math.max(0, num(row.unitsProduced)), 0);
+    const rowIsOpen = isOpenRunRow(row);
+    document.getElementById("superRunFinish").value = rowIsOpen ? "" : row.finishTime || "";
+    document.getElementById("superRunUnits").value = num(row.unitsProduced) > 0 ? formatNum(Math.max(0, num(row.unitsProduced)), 0) : "";
+    superRunLogIdInput.value = row.id || "";
+    const rowShift = row.shift || inferShiftForLog(line, row.date, row.productionStartTime, appState.supervisorSelectedShift || "Day");
+    setRunCrewingPatternField(
+      superRunCrewingPatternInput,
+      superRunCrewingPatternSummary,
+      line,
+      rowShift,
+      row.runCrewingPattern,
+      { fallbackToIdeal: true }
+    );
+    suppressSupervisorSelectionReset = false;
+    updateSupervisorProgressButtonLabels();
     const productInput = document.getElementById("superRunProduct");
     if (productInput) productInput.focus();
   };
 
-  const completeSupervisorRunById = async (runId) => {
+  const loadSupervisorDowntimeForEdit = (downtimeId) => {
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
     const line = appState.lines[lineId];
-    if (!session.assignedLineIds.includes(lineId) || !line) {
+    if (!line || !session.assignedLineIds.includes(lineId)) return;
+    const row = (line.downtimeRows || []).find((item) => item.id === downtimeId);
+    if (!row) return;
+
+    const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+    const reasonCategory = row.reasonCategory || parsedReason.reasonCategory;
+    const reasonDetail = row.reasonDetail || parsedReason.reasonDetail;
+    const reasonNote = String((row.reasonNote ?? parsedReason.reasonNote) || "");
+    suppressSupervisorSelectionReset = true;
+    document.getElementById("superDownDate").value = row.date || todayISO();
+    document.getElementById("superDownStart").value = row.downtimeStart || "";
+    document.getElementById("superDownFinish").value = isOpenDowntimeRow(row) ? "" : row.downtimeFinish || "";
+    if (supervisorDownReasonCategory) supervisorDownReasonCategory.value = reasonCategory || "";
+    if (supervisorDownReasonDetail) {
+      setDowntimeDetailOptions(supervisorDownReasonDetail, line, reasonCategory || "", reasonDetail || "");
+    }
+    document.getElementById("superDownReasonNote").value = reasonNote;
+    superDownLogIdInput.value = row.id || "";
+    suppressSupervisorSelectionReset = false;
+    updateSupervisorProgressButtonLabels();
+    const startInput = document.getElementById("superDownStart");
+    if (startInput) startInput.focus();
+  };
+
+  const completeSupervisorShiftById = async (shiftId, { lineId: lineIdOverride } = {}) => {
+    const context = resolveSupervisorLineContext(lineIdOverride);
+    if (!context) {
       alert("You are not assigned to that line.");
       return;
     }
+    const { session, lineId, line } = context;
+    const row = (line.shiftRows || []).find((item) => item.id === shiftId);
+    if (!row) {
+      alert("Shift log could not be found.");
+      return;
+    }
+    if (!isOpenShiftRow(row)) {
+      alert("This shift is already finalised.");
+      return;
+    }
+    const startTime = row.startTime || nowTimeHHMM();
+    if (!strictTimeValid(startTime)) {
+      alert("Shift start time is invalid. Edit the shift and set a valid start time first.");
+      return;
+    }
+    const openBreak = latestBySubmittedAt((line.breakRows || []).filter((breakRow) => breakRow.shiftLogId === row.id && isOpenBreakRow(breakRow)));
+    if (openBreak?.id) {
+      alert("End the current break before finalising the shift.");
+      return;
+    }
+    const nowCandidate = nowTimeHHMM();
+    const startMins = parseTimeToMinutes(startTime);
+    const nowMins = parseTimeToMinutes(nowCandidate);
+    const defaultFinish = Number.isFinite(startMins) && Number.isFinite(nowMins) && startMins === nowMins
+      ? formatMinutesToHHMM(startMins + 1)
+      : nowCandidate;
+    const finishPrompt = window.prompt("Finish time (HH:MM)", defaultFinish);
+    if (finishPrompt === null) return;
+    const finishTime = String(finishPrompt || "").trim();
+    if (!strictTimeValid(finishTime)) {
+      alert("Finish time must be HH:MM (24h).");
+      return;
+    }
+    if (finishTime === startTime) {
+      alert("Finish time must be different from start time.");
+      return;
+    }
+    const shift = row.shift || inferShiftForLog(line, row.date, startTime, appState.supervisorSelectedShift || "Day");
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+    const payload = {
+      lineId,
+      date: row.date,
+      shift,
+      crewOnShift: Math.max(0, Math.floor(num(row.crewOnShift))),
+      startTime,
+      finishTime
+    };
+    try {
+      const saved = await patchSupervisorShiftLog(session, row.id, payload);
+      const savedRow = {
+        ...row,
+        ...payload,
+        id: saved?.id || row.id || "",
+        submittedBy: supervisorActorName(session),
+        submittedAt: saved?.submittedAt || nowIso()
+      };
+      upsertRowById(line.shiftRows, savedRow);
+      if (superShiftLogIdInput.value === row.id) superShiftLogIdInput.value = "";
+      if (superShiftOpenBreakIdInput?.value) {
+        const activeBreak = (line.breakRows || []).find((breakRow) => breakRow.id === superShiftOpenBreakIdInput.value);
+        if (activeBreak?.shiftLogId === row.id) superShiftOpenBreakIdInput.value = "";
+      }
+      addAudit(
+        line,
+        "SUPERVISOR_SHIFT_COMPLETE",
+        `${supervisorActorName(session)} completed ${shift} shift for ${row.date}`
+      );
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not complete shift log.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const completeSupervisorRunById = async (runId, { lineId: lineIdOverride } = {}) => {
+    const context = resolveSupervisorLineContext(lineIdOverride);
+    if (!context) {
+      alert("You are not assigned to that line.");
+      return;
+    }
+    const { session, lineId, line } = context;
     const row = (line.runRows || []).find((item) => item.id === runId);
     if (!row) {
       alert("Run log could not be found.");
+      return;
+    }
+    if (!isOpenRunRow(row)) {
+      alert("This production run is already finalised.");
       return;
     }
     const productionStartTime = row.productionStartTime || nowTimeHHMM();
@@ -2886,6 +4084,7 @@ function bindHome() {
       const savedRow = {
         ...row,
         ...payload,
+        shift: "",
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
         submittedAt: saved?.submittedAt || nowIso()
@@ -2901,6 +4100,98 @@ function bindHome() {
       renderAll();
     } catch (error) {
       alert(`Could not complete production run.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const completeSupervisorDowntimeById = async (downtimeId, { lineId: lineIdOverride } = {}) => {
+    const context = resolveSupervisorLineContext(lineIdOverride);
+    if (!context) {
+      alert("You are not assigned to that line.");
+      return;
+    }
+    const { session, lineId, line } = context;
+    const row = (line.downtimeRows || []).find((item) => item.id === downtimeId);
+    if (!row) {
+      alert("Downtime log could not be found.");
+      return;
+    }
+    if (!isOpenDowntimeRow(row)) {
+      alert("This downtime log is already finalised.");
+      return;
+    }
+    const downtimeStart = row.downtimeStart || nowTimeHHMM();
+    if (!strictTimeValid(downtimeStart)) {
+      alert("Downtime start is invalid. Edit the downtime log and set a valid start time first.");
+      return;
+    }
+    const nowCandidate = nowTimeHHMM();
+    const startMins = parseTimeToMinutes(downtimeStart);
+    const nowMins = parseTimeToMinutes(nowCandidate);
+    const defaultFinish = Number.isFinite(startMins) && Number.isFinite(nowMins) && startMins === nowMins
+      ? formatMinutesToHHMM(startMins + 1)
+      : nowCandidate;
+    const finishPrompt = window.prompt("Downtime finish time (HH:MM)", defaultFinish);
+    if (finishPrompt === null) return;
+    const downtimeFinish = String(finishPrompt || "").trim();
+    if (!strictTimeValid(downtimeFinish)) {
+      alert("Finish time must be HH:MM (24h).");
+      return;
+    }
+    if (downtimeFinish === downtimeStart) {
+      alert("Finish time must be different from start time.");
+      return;
+    }
+    const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+    const reasonCategory = row.reasonCategory || parsedReason.reasonCategory;
+    const reasonDetail = row.reasonDetail || parsedReason.reasonDetail;
+    const reasonNote = String((row.reasonNote ?? parsedReason.reasonNote) || "").trim();
+    if (!reasonCategory || !reasonDetail) {
+      alert("Reason group and detail are required before finalising downtime.");
+      return;
+    }
+    const equipment = reasonCategory === "Equipment" ? (row.equipment || reasonDetail) : "";
+    if (reasonCategory === "Equipment" && !equipment) {
+      alert("Equipment downtime requires an equipment stage.");
+      return;
+    }
+    const shift = row.shift || inferShiftForLog(line, row.date, downtimeStart, appState.supervisorSelectedShift || "Day");
+    if (!supervisorCanAccessShift(session, lineId, shift)) {
+      alert(`You are not assigned to the ${shift} shift.`);
+      return;
+    }
+    const payload = {
+      lineId,
+      date: row.date,
+      shift,
+      downtimeStart,
+      downtimeFinish,
+      equipment,
+      reasonCategory,
+      reasonDetail,
+      reasonNote,
+      reason: buildDowntimeReasonText(line, reasonCategory, reasonDetail, reasonNote)
+    };
+    try {
+      const saved = await patchSupervisorDowntimeLog(session, row.id, payload);
+      const savedRow = {
+        ...row,
+        ...payload,
+        shift: "",
+        id: saved?.id || row.id || "",
+        submittedBy: supervisorActorName(session),
+        submittedAt: saved?.submittedAt || nowIso()
+      };
+      upsertRowById(line.downtimeRows, savedRow);
+      if (superDownLogIdInput.value === row.id) superDownLogIdInput.value = "";
+      addAudit(
+        line,
+        "SUPERVISOR_DOWNTIME_COMPLETE",
+        `${supervisorActorName(session)} completed downtime on ${stageNameByIdForLine(line, equipment) || reasonCategory}`
+      );
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not complete downtime log.\n${error?.message || "Please try again."}`);
     }
   };
 
@@ -2926,25 +4217,23 @@ function bindHome() {
       return;
     }
 
+    const selectedDownLogId = String(superDownLogIdInput?.value || "").trim();
     let existing = null;
-    if (superDownLogIdInput.value) {
-      existing = (line.downtimeRows || []).find((row) => row.id === superDownLogIdInput.value) || null;
-      if (
-        existing &&
-        (existing.date !== date || (reasonCategoryInput === "Equipment" && reasonDetailInput && existing.equipment !== reasonDetailInput))
-      ) {
-        existing = null;
+    if (selectedDownLogId) {
+      existing = (line.downtimeRows || []).find((row) => row.id === selectedDownLogId) || null;
+      if (!existing) {
+        alert("Selected downtime log could not be found. Re-open it from Pending Downtime Logs and try again.");
+        return;
       }
-    }
-    if (!existing) {
-      existing = latestBySubmittedAt(
-        (line.downtimeRows || []).filter((row) => row.date === date && isOpenDowntimeRow(row))
-      );
+      if (existing.date !== date) {
+        alert("Date cannot be changed while editing an open downtime log.");
+        return;
+      }
     }
 
     const downtimeStart = startInput || existing?.downtimeStart || nowTimeHHMM();
     const downtimeFinish = finishInput || (complete ? nowTimeHHMM() : existing?.downtimeFinish || downtimeStart);
-    const shift = existing?.shift || inferShiftForLog(line, date, downtimeStart, appState.supervisorSelectedShift || "Day");
+    const backendShift = inferShiftForLog(line, date, downtimeStart, appState.supervisorSelectedShift || "Day");
     const reasonCategory = reasonCategoryInput || existing?.reasonCategory || "";
     const reasonDetail = reasonDetailInput || existing?.reasonDetail || "";
     const reasonNote = reasonNoteInput !== "" ? reasonNoteInput : existing?.reasonNote || "";
@@ -2967,15 +4256,15 @@ function bindHome() {
       alert("Select an equipment stage.");
       return;
     }
-    if (!supervisorCanAccessShift(session, lineId, shift)) {
-      alert(`You are not assigned to the ${shift} shift.`);
+    if (!supervisorCanAccessShift(session, lineId, backendShift)) {
+      alert(`You are not assigned to the ${backendShift} shift.`);
       return;
     }
 
     const payload = {
       lineId,
       date,
-      shift,
+      shift: backendShift,
       downtimeStart,
       downtimeFinish,
       equipment,
@@ -2992,12 +4281,17 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
+        shift: "",
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.downtimeRows, savedRow);
-      superDownLogIdInput.value = complete ? "" : savedRow.id || "";
+      if (complete) {
+        superDownLogIdInput.value = "";
+      } else {
+        if (superDownLogIdInput) superDownLogIdInput.value = "";
+      }
       addAudit(
         line,
         complete ? "SUPERVISOR_DOWNTIME_COMPLETE" : "SUPERVISOR_DOWNTIME_PROGRESS",
@@ -3011,15 +4305,79 @@ function bindHome() {
       }
       saveState();
       renderAll();
+      if (!complete) {
+        supervisorDownForm.reset();
+        if (superDownLogIdInput) superDownLogIdInput.value = "";
+        if (supervisorDownReasonCategory) supervisorDownReasonCategory.value = "";
+        refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
+      }
     } catch (error) {
       alert(`Could not save downtime log.\n${error?.message || "Please try again."}`);
     }
   };
 
   superShiftSaveProgressBtn.addEventListener("click", () => submitSupervisorShift({ complete: false }));
-  if (superShiftBreakStartBtn) superShiftBreakStartBtn.addEventListener("click", submitSupervisorBreakStart);
-  if (superShiftBreakEndBtn) superShiftBreakEndBtn.addEventListener("click", submitSupervisorBreakEnd);
-  superShiftCompleteBtn.addEventListener("click", () => submitSupervisorShift({ complete: true }));
+  if (superShiftOpenList) {
+    superShiftOpenList.addEventListener("click", (event) => {
+      const editBtn = event.target.closest("[data-super-shift-edit]");
+      if (editBtn) {
+        const shiftId = editBtn.getAttribute("data-super-shift-edit");
+        if (shiftId) {
+          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
+          supervisorShiftTileEditId = shiftId;
+          updateSupervisorProgressButtonLabels();
+          loadSupervisorShiftForEdit(shiftId);
+        }
+        return;
+      }
+      const breakStartBtn = event.target.closest("[data-super-shift-break-start]");
+      if (breakStartBtn) {
+        const shiftId = breakStartBtn.getAttribute("data-super-shift-break-start");
+        if (shiftId) {
+          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
+          supervisorShiftTileEditId = shiftId;
+          updateSupervisorProgressButtonLabels();
+          submitSupervisorBreakStart({ shiftId });
+        }
+        return;
+      }
+      const breakEndBtn = event.target.closest("[data-super-shift-break-end]");
+      if (breakEndBtn) {
+        const shiftId = breakEndBtn.getAttribute("data-super-shift-break-end");
+        const breakId = breakEndBtn.getAttribute("data-super-shift-break-id") || "";
+        if (shiftId) {
+          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
+          supervisorShiftTileEditId = shiftId;
+          updateSupervisorProgressButtonLabels();
+          submitSupervisorBreakEnd({ shiftId, breakId });
+        }
+        return;
+      }
+      const breakSaveBtn = event.target.closest("[data-super-shift-break-save]");
+      if (breakSaveBtn) {
+        const shiftId = breakSaveBtn.getAttribute("data-super-shift-break-save");
+        const tileNode = breakSaveBtn.closest(".pending-log-item");
+        if (shiftId && tileNode) {
+          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
+          supervisorShiftTileEditId = shiftId;
+          updateSupervisorProgressButtonLabels();
+          saveSupervisorShiftBreakEdits(shiftId, tileNode);
+        }
+        return;
+      }
+      const completeBtn = event.target.closest("[data-super-shift-complete]");
+      if (completeBtn) {
+        const shiftId = completeBtn.getAttribute("data-super-shift-complete");
+        if (shiftId) {
+          if (superShiftLogIdInput) superShiftLogIdInput.value = "";
+          if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
+          supervisorShiftTileEditId = "";
+          updateSupervisorProgressButtonLabels();
+          completeSupervisorShiftById(shiftId);
+        }
+      }
+    });
+  }
   superRunSaveProgressBtn.addEventListener("click", () => submitSupervisorRun({ complete: false }));
   if (superRunOpenList) {
     superRunOpenList.addEventListener("click", (event) => {
@@ -3037,7 +4395,21 @@ function bindHome() {
     });
   }
   superDownSaveProgressBtn.addEventListener("click", () => submitSupervisorDowntime({ complete: false }));
-  superDownCompleteBtn.addEventListener("click", () => submitSupervisorDowntime({ complete: true }));
+  if (superDownOpenList) {
+    superDownOpenList.addEventListener("click", (event) => {
+      const editBtn = event.target.closest("[data-super-down-edit]");
+      if (editBtn) {
+        const downtimeId = editBtn.getAttribute("data-super-down-edit");
+        if (downtimeId) loadSupervisorDowntimeForEdit(downtimeId);
+        return;
+      }
+      const completeBtn = event.target.closest("[data-super-down-complete]");
+      if (completeBtn) {
+        const downtimeId = completeBtn.getAttribute("data-super-down-complete");
+        if (downtimeId) completeSupervisorDowntimeById(downtimeId);
+      }
+    });
+  }
 
   openBuilderBtn.addEventListener("click", openBuilderModal);
   if (openBuilderSecondaryBtn) openBuilderSecondaryBtn.addEventListener("click", openBuilderModal);
@@ -3254,7 +4626,7 @@ function bindHome() {
           );
         }
         if (!Object.keys(appState.lines).length) {
-          const fallback = makeDefaultLine("line-1", "Production Line");
+          const fallback = makeDefaultLine("line-1", "Production Line 1", { seedSample: true });
           appState.lines[fallback.id] = fallback;
         }
         appState.activeLineId = Object.keys(appState.lines)[0];
@@ -3772,7 +5144,33 @@ function bindForms() {
 
   const shiftForm = document.getElementById("shiftForm");
   const runForm = document.getElementById("runForm");
+  const runCrewingPatternInput = document.getElementById("runCrewingPattern");
+  const runCrewingPatternBtn = document.getElementById("runCrewingPatternBtn");
+  const runCrewingPatternSummary = document.getElementById("runCrewingPatternSummary");
   const downtimeForm = document.getElementById("downtimeForm");
+
+  if (runCrewingPatternBtn && runCrewingPatternInput) {
+    runCrewingPatternBtn.addEventListener("click", () => {
+      if (!state) return;
+      const runDate = String(runForm?.querySelector('[name="date"]')?.value || state.selectedDate || todayISO());
+      const runStart = String(runForm?.querySelector('[name="productionStartTime"]')?.value || nowTimeHHMM());
+      const shiftForPattern = inferShiftForLog(state, runDate, runStart, state.selectedShift || "Day");
+      openRunCrewingPatternModal({
+        line: state,
+        shift: shiftForPattern,
+        inputEl: runCrewingPatternInput,
+        summaryEl: runCrewingPatternSummary
+      });
+    });
+  }
+  setRunCrewingPatternField(
+    runCrewingPatternInput,
+    runCrewingPatternSummary,
+    state,
+    state?.selectedShift || "Day",
+    runCrewingPatternInput?.value || "",
+    { fallbackToIdeal: false }
+  );
 
   shiftForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -3836,29 +5234,40 @@ function bindForms() {
       alert("Units produced cannot be negative.");
       return;
     }
-    data.shift = inferShiftForLog(state, data.date, data.productionStartTime, state.selectedShift || "Day");
+    const backendShift = inferShiftForLog(state, data.date, data.productionStartTime, state.selectedShift || "Day");
+    const runCrewingPattern = runCrewingPatternFromInput(runCrewingPatternInput, state, backendShift, { fallbackToIdeal: false });
+    if (!Object.keys(runCrewingPattern).length) {
+      alert("Set crewing pattern for this run before saving.");
+      return;
+    }
+    setRunCrewingPatternField(runCrewingPatternInput, runCrewingPatternSummary, state, backendShift, runCrewingPattern, { fallbackToIdeal: false });
     data.setUpStartTime = "";
     data.unitsProduced = num(data.unitsProduced);
+    data.runCrewingPattern = runCrewingPattern;
     try {
       const payload = {
         lineId: state.id,
         date: data.date,
-        shift: data.shift,
+        shift: backendShift,
         product: data.product,
         setUpStartTime: "",
         productionStartTime: data.productionStartTime,
         finishTime: data.finishTime,
-        unitsProduced: data.unitsProduced
+        unitsProduced: data.unitsProduced,
+        runCrewingPattern
       };
       const saved = await syncManagerRunLog(payload);
       state.runRows.push({
         ...data,
+        shift: "",
+        runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || data.runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
         id: saved?.id || data.id || makeLocalLogId("run"),
         submittedBy: "manager",
         submittedAt: saved?.submittedAt || nowIso()
       });
       addAudit(state, "MANAGER_RUN_LOG", `Manager logged run ${data.product} (${data.unitsProduced} units)`);
       form.reset();
+      setRunCrewingPatternField(runCrewingPatternInput, runCrewingPatternSummary, state, state.selectedShift || "Day", {}, { fallbackToIdeal: false });
       saveState();
       renderAll();
     } catch (error) {
@@ -3889,14 +5298,14 @@ function bindForms() {
       alert("Reason detail is required.");
       return;
     }
-    data.shift = inferShiftForLog(state, data.date, data.downtimeStart, state.selectedShift || "Day");
+    const backendShift = inferShiftForLog(state, data.date, data.downtimeStart, state.selectedShift || "Day");
     data.equipment = data.reasonCategory === "Equipment" ? data.reasonDetail : "";
     data.reason = buildDowntimeReasonText(state, data.reasonCategory, data.reasonDetail, data.reasonNote);
     try {
       const payload = {
         lineId: state.id,
         date: data.date,
-        shift: data.shift,
+        shift: backendShift,
         downtimeStart: data.downtimeStart,
         downtimeFinish: data.downtimeFinish,
         equipment: data.equipment,
@@ -3905,6 +5314,7 @@ function bindForms() {
       const saved = await syncManagerDowntimeLog(payload);
       state.downtimeRows.push({
         ...data,
+        shift: "",
         id: saved?.id || data.id || makeLocalLogId("down"),
         submittedBy: "manager",
         submittedAt: saved?.submittedAt || nowIso()
@@ -3919,18 +5329,18 @@ function bindForms() {
     }
   });
 
-  const editManagerLog = async (type, logId) => {
-    if (!logId) return;
+  const inlineValue = (rowNode, field) => String(rowNode?.querySelector(`[data-inline-field="${field}"]`)?.value || "").trim();
+
+  const saveManagerLogInlineEdit = async (type, logId, rowNode) => {
+    if (!logId || !rowNode) return;
+    if (!isManagerLogInlineEditRow(state.id, type, logId)) return;
+
     if (type === "shift") {
       const row = (state.shiftRows || []).find((item) => item.id === logId);
       if (!row) return;
-      const crewRaw = window.prompt("Crew on shift", String(num(row.crewOnShift)));
-      if (crewRaw === null) return;
-      const startTime = window.prompt("Start time (HH:MM)", String(row.startTime || ""));
-      if (startTime === null) return;
-      const finishTime = window.prompt("Finish time (HH:MM)", String(row.finishTime || ""));
-      if (finishTime === null) return;
-      const crewOnShift = Math.max(0, Math.floor(num(crewRaw)));
+      const crewOnShift = Math.max(0, Math.floor(num(inlineValue(rowNode, "crewOnShift"))));
+      const startTime = inlineValue(rowNode, "startTime");
+      const finishTime = inlineValue(rowNode, "finishTime");
       if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
         alert("Times must be HH:MM (24h).");
         return;
@@ -3944,6 +5354,7 @@ function bindForms() {
         } else {
           Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
         }
+        clearManagerLogInlineEdit();
         addAudit(state, "MANAGER_SHIFT_EDIT", `Manager edited shift row for ${row.date} (${row.shift})`);
         saveState();
         renderAll();
@@ -3956,16 +5367,11 @@ function bindForms() {
     if (type === "run") {
       const row = (state.runRows || []).find((item) => item.id === logId);
       if (!row) return;
-      const product = window.prompt("Product", String(row.product || ""));
-      if (product === null) return;
-      const productionStartTime = window.prompt("Production start (HH:MM)", String(row.productionStartTime || ""));
-      if (productionStartTime === null) return;
-      const finishTime = window.prompt("Finish time (HH:MM)", String(row.finishTime || ""));
-      if (finishTime === null) return;
-      const unitsRaw = window.prompt("Units produced", String(num(row.unitsProduced)));
-      if (unitsRaw === null) return;
-      const unitsProduced = Math.max(0, num(unitsRaw));
-      if (!product.trim()) {
+      const product = inlineValue(rowNode, "product");
+      const productionStartTime = inlineValue(rowNode, "productionStartTime");
+      const finishTime = inlineValue(rowNode, "finishTime");
+      const unitsProduced = Math.max(0, num(inlineValue(rowNode, "unitsProduced")));
+      if (!product) {
         alert("Product is required.");
         return;
       }
@@ -3974,7 +5380,7 @@ function bindForms() {
         return;
       }
       const payload = {
-        product: product.trim(),
+        product,
         setUpStartTime: "",
         productionStartTime,
         finishTime,
@@ -3984,10 +5390,11 @@ function bindForms() {
       try {
         if (canPatchServer) {
           const saved = await patchManagerRunLog(logId, payload);
-          Object.assign(row, payload, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+          Object.assign(row, payload, { shift: "", submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
         } else {
-          Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
+          Object.assign(row, payload, { shift: "", submittedBy: "manager", submittedAt: nowIso() });
         }
+        clearManagerLogInlineEdit();
         addAudit(state, "MANAGER_RUN_EDIT", `Manager edited run ${row.product}`);
         saveState();
         renderAll();
@@ -4000,12 +5407,9 @@ function bindForms() {
     if (type === "downtime") {
       const row = (state.downtimeRows || []).find((item) => item.id === logId);
       if (!row) return;
-      const downtimeStart = window.prompt("Downtime start (HH:MM)", String(row.downtimeStart || ""));
-      if (downtimeStart === null) return;
-      const downtimeFinish = window.prompt("Downtime finish (HH:MM)", String(row.downtimeFinish || ""));
-      if (downtimeFinish === null) return;
-      const reason = window.prompt("Reason", String(row.reason || ""));
-      if (reason === null) return;
+      const downtimeStart = inlineValue(rowNode, "downtimeStart");
+      const downtimeFinish = inlineValue(rowNode, "downtimeFinish");
+      const reason = inlineValue(rowNode, "reason");
       if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
         alert("Times must be HH:MM (24h).");
         return;
@@ -4024,11 +5428,16 @@ function bindForms() {
       try {
         if (canPatchServer) {
           const saved = await patchManagerDowntimeLog(logId, payload);
-          Object.assign(row, updatedValues, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+          Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
         } else {
-          Object.assign(row, updatedValues, { submittedBy: "manager", submittedAt: nowIso() });
+          Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: nowIso() });
         }
-        addAudit(state, "MANAGER_DOWNTIME_EDIT", `Manager edited downtime row for ${row.date} (${row.shift})`);
+        clearManagerLogInlineEdit();
+        addAudit(
+          state,
+          "MANAGER_DOWNTIME_EDIT",
+          `Manager edited downtime row for ${row.date} (${resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish")})`
+        );
         saveState();
         renderAll();
       } catch (error) {
@@ -4037,13 +5446,19 @@ function bindForms() {
     }
   };
 
-  const handleLogTableEdit = (event) => {
-    const btn = event.target.closest("[data-log-edit]");
+  const handleLogTableEdit = async (event) => {
+    const btn = event.target.closest("[data-log-action]");
     if (!btn) return;
-    const type = btn.getAttribute("data-log-edit");
+    const type = btn.getAttribute("data-log-type");
     const logId = btn.getAttribute("data-log-id");
-    if (!type || !logId) return;
-    editManagerLog(type, logId);
+    const action = btn.getAttribute("data-log-action");
+    if (!type || !logId || !action) return;
+    if (action === "save") {
+      await saveManagerLogInlineEdit(type, logId, btn.closest("tr"));
+      return;
+    }
+    setManagerLogInlineEdit(state.id, type, logId);
+    renderTrackingTables();
   };
 
   ["shiftTable", "runTable", "downtimeTable"].forEach((tableId) => {
@@ -4054,16 +5469,7 @@ function bindForms() {
 
 function bindDataControls() {
   document.getElementById("loadSampleData").addEventListener("click", () => {
-    const sample = sampleDataSet();
-    state.selectedDate = sample.selectedDate;
-    state.selectedShift = sample.selectedShift;
-    state.trendGranularity = sample.trendGranularity;
-    state.trendMonth = sample.trendMonth;
-    state.shiftRows = sample.shiftRows;
-    state.breakRows = sample.breakRows;
-    state.runRows = sample.runRows;
-    state.downtimeRows = sample.downtimeRows;
-    ensureManagerLogRowIds(state);
+    loadSampleDataIntoLine(state);
     addAudit(state, "LOAD_SAMPLE_DATA", "Sample shift/run/downtime rows loaded");
     saveState();
     renderAll();
@@ -4093,7 +5499,7 @@ function bindDataControls() {
       ...data.runRows.map((row) => ({
         RecordType: "Run",
         Date: row.date,
-        Shift: row.shift,
+        Shift: resolveTimedLogShiftLabel(row, state, "productionStartTime", "finishTime"),
         Product: row.product || "",
         Equipment: "",
         Units: Number(row.unitsProduced || 0).toFixed(2),
@@ -4105,7 +5511,7 @@ function bindDataControls() {
       ...data.downtimeRows.map((row) => ({
         RecordType: "Downtime",
         Date: row.date,
-        Shift: row.shift,
+        Shift: resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish"),
         Product: "",
         Equipment: stageNameById(row.equipment),
         Units: "",
@@ -4138,8 +5544,19 @@ function bindDataControls() {
       state.stageSettings = normalizeStageSettings(parsed);
       state.shiftRows = parsed.shiftRows || [];
       state.breakRows = parsed.breakRows || [];
-      state.runRows = parsed.runRows || [];
-      state.downtimeRows = parsed.downtimeRows || [];
+      state.runRows = Array.isArray(parsed.runRows)
+        ? parsed.runRows.map((row) => ({
+            ...row,
+            runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
+            shift: ""
+          }))
+        : [];
+      state.downtimeRows = Array.isArray(parsed.downtimeRows)
+        ? parsed.downtimeRows.map((row) => ({
+            ...row,
+            shift: ""
+          }))
+        : [];
       ensureManagerLogRowIds(state);
       addAudit(state, "IMPORT_JSON", "Line JSON imported");
       saveState();
@@ -4261,7 +5678,11 @@ function renderTable(tableId, columns, rows, fieldMap) {
   const table = document.getElementById(tableId);
   const header = `<thead><tr>${columns.map((col) => `<th>${col}</th>`).join("")}</tr></thead>`;
   const body = rows
-    .map((row) => `<tr>${columns.map((col) => `<td>${formatTableCellValue(row[fieldMap[col]])}</td>`).join("")}</tr>`)
+    .map((row) => {
+      const rowClass = String(row?.__rowClass || "").trim();
+      const rowClassAttr = rowClass ? ` class="${htmlEscape(rowClass)}"` : "";
+      return `<tr${rowClassAttr}>${columns.map((col) => `<td>${formatTableCellValue(row[fieldMap[col]])}</td>`).join("")}</tr>`;
+    })
     .join("");
 
   table.innerHTML = `${header}<tbody>${body}</tbody>`;
@@ -4327,10 +5748,27 @@ function shortHourLabel(hour) {
 
 function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver) {
   const blocks = { shifts: [], breaks: [], runs: [], downtime: [], source: {} };
-  const shiftRows = data.shiftRows.filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
+  const allShiftRowsForDate = data.shiftRows.filter((row) => row.date === selectedDate);
+  const shiftRows = allShiftRowsForDate.filter((row) => shiftMatchesSelection(row.shift, selectedShift));
   const breakRows = (data.breakRows || []).filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
-  const runRows = data.runRows.filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
-  const downRows = data.downtimeRows.filter((row) => row.date === selectedDate && shiftMatchesSelection(row.shift, selectedShift));
+  const runRows = data.runRows.filter((row) => rowMatchesDateShift(row, selectedDate, selectedShift));
+  const downRows = data.downtimeRows.filter((row) => rowMatchesDateShift(row, selectedDate, selectedShift));
+  const selectedShiftIntervals =
+    selectedShift === "Day" || selectedShift === "Night"
+      ? shiftIntervalsForDate({ shiftRows: allShiftRowsForDate }, selectedDate)[selectedShift] || []
+      : [];
+  const clipSegmentsToSelectedShift = (segments) => {
+    if (!selectedShiftIntervals.length || isFullDayShift(selectedShift)) return segments;
+    return segments.flatMap((segment) =>
+      selectedShiftIntervals
+        .map((windowSegment) => {
+          const start = Math.max(num(segment.start), num(windowSegment.start));
+          const end = Math.min(num(segment.end), num(windowSegment.end));
+          return end > start ? { start, end } : null;
+        })
+        .filter(Boolean)
+    );
+  };
 
   shiftRows
     .slice()
@@ -4373,7 +5811,8 @@ function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameRe
       const runLabel = `${row.product || "Run"} ${runRows.length > 1 ? `(${index + 1})` : ""}`.trim();
       const unitsLabel = num(row.unitsProduced) > 0 ? ` | ${formatNum(num(row.unitsProduced), 0)} units` : "";
 
-      splitAcrossMidnight(prodStart, finish).forEach((segment) => {
+      const segments = clipSegmentsToSelectedShift(splitAcrossMidnight(prodStart, finish));
+      segments.forEach((segment) => {
         blocks.runs.push({
           ...segment,
           type: "run-main",
@@ -4391,7 +5830,8 @@ function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameRe
       const end = parseTimeToMinutes(row.downtimeFinish);
       const equipmentLabel = stageNameResolver(row.equipment || "");
       const reasonText = String(row.reason || "").trim();
-      splitAcrossMidnight(start, end).forEach((segment) => {
+      const segments = clipSegmentsToSelectedShift(splitAcrossMidnight(start, end));
+      segments.forEach((segment) => {
         blocks.downtime.push({
           ...segment,
           type: "downtime",
@@ -4405,7 +5845,7 @@ function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameRe
   return blocks;
 }
 
-function buildDayAtGlance(blocks, stageNameResolver) {
+function buildDayAtGlance(blocks, stageNameResolver, selectedShift = "Full Day") {
   const mergeIntervals = (rows) =>
     rows
       .map((row) => ({
@@ -4463,7 +5903,9 @@ function buildDayAtGlance(blocks, stageNameResolver) {
     const reasonText = String(row.reason || "").trim();
     const label = reasonText ? `${reasonText}${equipmentLabel ? ` (${equipmentLabel})` : ""}` : equipmentLabel || "Unspecified cause";
     const loggedMins = num(row.downtimeMins);
-    const mins = loggedMins > 0 ? loggedMins : diffMinutes(row.downtimeStart, row.downtimeFinish);
+    const weightedLogged = loggedMins * timedLogShiftWeight(row, selectedShift);
+    const rawMins = loggedMins > 0 ? weightedLogged : diffMinutes(row.downtimeStart, row.downtimeFinish) * timedLogShiftWeight(row, selectedShift);
+    const mins = Math.max(0, rawMins);
     downtimeByCause.set(label, (downtimeByCause.get(label) || 0) + Math.max(0, mins));
   });
   const topDowntime = Array.from(downtimeByCause.entries())
@@ -4475,8 +5917,8 @@ function buildDayAtGlance(blocks, stageNameResolver) {
     trackedTotal,
     allocations,
     topDowntime,
-    runCount: (blocks.source.runRows || []).length,
-    downtimeCount: (blocks.source.downRows || []).length
+    runCount: (blocks.source.runRows || []).filter((row) => timedLogShiftWeight(row, selectedShift) > 0).length,
+    downtimeCount: (blocks.source.downRows || []).filter((row) => timedLogShiftWeight(row, selectedShift) > 0).length
   };
 }
 
@@ -4497,7 +5939,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   const endMins = startMins + 24 * 60;
   const rangeMins = endMins - startMins;
   const hourMarks = Array.from({ length: 25 }, (_, offset) => dayStartHour + offset);
-  const glance = buildDayAtGlance(blocks, stageNameResolver);
+  const glance = buildDayAtGlance(blocks, stageNameResolver, selectedShift);
   const selectedShiftLabel = selectedShift === "Day" || selectedShift === "Night" ? selectedShift : "All shifts";
 
   const toWindowSegment = (start, end) => {
@@ -4550,7 +5992,10 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       const visible = toWindowSegment(num(item.start), num(item.end));
       return sum + (visible ? visible.end - visible.start : 0);
     }, 0);
-  const productionUnits = (blocks.source.runRows || []).reduce((sum, row) => sum + Math.max(0, num(row.unitsProduced)), 0);
+  const productionUnits = (blocks.source.runRows || []).reduce(
+    (sum, row) => sum + Math.max(0, num(row.unitsProduced) * timedLogShiftWeight(row, selectedShift)),
+    0
+  );
   const productionMinutes = laneMinutes(blocks.runs);
   const productionIntervals = visibleIntervals(blocks.runs);
   const downtimeIntervals = visibleIntervals(blocks.downtime);
@@ -4571,13 +6016,29 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     production: `${formatNum(productionRate, 2)} units / min`,
     downtime: `${formatNum(laneMinutes(blocks.downtime), 1)} min`
   };
+  const runTileShiftWindows =
+    selectedShift === "Day" || selectedShift === "Night"
+      ? shiftIntervalsForDate({ shiftRows: (data.shiftRows || []).filter((row) => row.date === selectedDate) }, selectedDate)[selectedShift] || []
+      : [];
+  const clipRunTileSegmentsToShift = (segments) => {
+    if (isFullDayShift(selectedShift) || !runTileShiftWindows.length) return segments;
+    return segments.flatMap((segment) =>
+      runTileShiftWindows
+        .map((windowSegment) => {
+          const start = Math.max(num(segment.start), num(windowSegment.start));
+          const end = Math.min(num(segment.end), num(windowSegment.end));
+          return end > start ? { start, end } : null;
+        })
+        .filter(Boolean)
+    );
+  };
   const productionRunTiles = (blocks.source.runRows || [])
     .slice()
     .sort((a, b) => String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || "")))
     .map((row, index) => {
       const productName = String(row.product || "").trim() || `Run ${index + 1}`;
-      const units = Math.max(0, num(row.unitsProduced));
-      const runIntervals = splitAcrossMidnight(parseTimeToMinutes(row.productionStartTime), parseTimeToMinutes(row.finishTime))
+      const units = Math.max(0, num(row.unitsProduced) * timedLogShiftWeight(row, selectedShift));
+      const runIntervals = clipRunTileSegmentsToShift(splitAcrossMidnight(parseTimeToMinutes(row.productionStartTime), parseTimeToMinutes(row.finishTime)))
         .map((segment) => toWindowSegment(segment.start, segment.end))
         .filter(Boolean);
       const grossMins = runIntervals.reduce((sum, interval) => sum + (interval.end - interval.start), 0);
@@ -4760,11 +6221,12 @@ function renderVisualiser() {
   const selectedRunRows = selectedRows(data.runRows);
   const selectedDowntimeRows = selectedRows(data.downtimeRows);
   const selectedShiftRows = selectedRows(data.shiftRows);
+  const selectedShift = state.selectedShift;
 
   const shiftMins = num(selectedShiftRows[0]?.totalShiftTime);
-  const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced), 0);
-  const totalDowntime = selectedDowntimeRows.reduce((sum, row) => sum + num(row.downtimeMins), 0);
-  const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime), 0);
+  const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, selectedShift), 0);
+  const totalDowntime = selectedDowntimeRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
+  const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   let utilAccumulator = 0;
   let utilCount = 0;
@@ -4823,7 +6285,7 @@ function renderVisualiser() {
   getStages().forEach((stage, index) => {
     const stageDowntime = selectedDowntimeRows
       .filter((row) => matchesStage(stage, row.equipment))
-      .reduce((sum, row) => sum + num(row.downtimeMins), 0);
+      .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
 
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
@@ -4918,15 +6380,15 @@ function renderVisualiser() {
 }
 
 function stageDailyMetrics(stage, date, shift, data) {
-  const shiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift);
+  const shiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line: state });
   const shiftMins = shiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
-  const stageDowntime = selectedShiftRowsByDate(data.downtimeRows, date, shift)
+  const stageDowntime = selectedShiftRowsByDate(data.downtimeRows, date, shift, { line: state })
     .filter((row) => matchesStage(stage, row.equipment))
-    .reduce((sum, row) => sum + num(row.downtimeMins), 0);
+    .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
 
-  const runRows = selectedShiftRowsByDate(data.runRows, date, shift);
-  const units = runRows.reduce((sum, row) => sum + num(row.unitsProduced), 0);
-  const totalNetTime = runRows.reduce((sum, row) => sum + num(row.netProductionTime), 0);
+  const runRows = selectedShiftRowsByDate(data.runRows, date, shift, { line: state });
+  const units = runRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, shift), 0);
+  const totalNetTime = runRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
   const stageEtc = netRunRate * uptimeRatio;
@@ -5098,8 +6560,60 @@ function closeTrendModal() {
 function renderTrackingTables() {
   ensureManagerLogRowIds(state);
   const data = derivedData();
-  const actionHtml = (type, row) =>
-    `<button type="button" class="table-edit-pill" data-log-edit="${type}" data-log-id="${row.id || ""}">Edit</button>`;
+  const activeLineId = String(state?.id || "");
+  if (managerLogInlineEdit.lineId && managerLogInlineEdit.lineId !== activeLineId) clearManagerLogInlineEdit();
+
+  const rowExistsForEdit = (() => {
+    if (!managerLogInlineEdit.logId) return true;
+    const rowList =
+      managerLogInlineEdit.type === "shift"
+        ? state.shiftRows
+        : managerLogInlineEdit.type === "run"
+          ? state.runRows
+          : managerLogInlineEdit.type === "downtime"
+            ? state.downtimeRows
+            : [];
+    return (rowList || []).some((row) => String(row.id || "") === managerLogInlineEdit.logId);
+  })();
+  if (!rowExistsForEdit) clearManagerLogInlineEdit();
+
+  const inlineInputHtml = (field, value, { type = "text", min = "", step = "", placeholder = "" } = {}) => {
+    const minAttr = min !== "" ? ` min="${htmlEscape(min)}"` : "";
+    const stepAttr = step !== "" ? ` step="${htmlEscape(step)}"` : "";
+    const placeholderAttr = placeholder ? ` placeholder="${htmlEscape(placeholder)}"` : "";
+    return `<input class="table-inline-input" data-inline-field="${htmlEscape(field)}" type="${htmlEscape(type)}" value="${htmlEscape(
+      value ?? ""
+    )}"${minAttr}${stepAttr}${placeholderAttr} />`;
+  };
+  const isInlineEditing = (type, rowId) => isManagerLogInlineEditRow(activeLineId, type, rowId);
+  const actionHtml = (type, row, { editing = false, pending = false, pendingLabel = "Pending" } = {}) => `
+    <div class="table-action-stack">
+      ${pending ? `<span class="table-pending-pill">${htmlEscape(pendingLabel)}</span>` : ""}
+      <button type="button" class="table-edit-pill${editing ? " is-save" : ""}" data-log-action="${
+        editing ? "save" : "edit"
+      }" data-log-type="${type}" data-log-id="${row.id || ""}">${editing ? "Save" : "Edit"}</button>
+    </div>
+  `;
+
+  const sortNewestFirst = (rows, primaryTimeField) =>
+    (rows || [])
+      .slice()
+      .sort((a, b) => {
+        const tsDiff = rowNewestSortValue(b, primaryTimeField) - rowNewestSortValue(a, primaryTimeField);
+        if (tsDiff !== 0) return tsDiff;
+        const submittedCmp = String(b?.submittedAt || "").localeCompare(String(a?.submittedAt || ""));
+        if (submittedCmp !== 0) return submittedCmp;
+        const dateCmp = String(b?.date || "").localeCompare(String(a?.date || ""));
+        if (dateCmp !== 0) return dateCmp;
+        return String(b?.id || "").localeCompare(String(a?.id || ""));
+      });
+
+  const openBreakByShiftLogId = new Set(
+    (data.breakRows || [])
+      .filter((row) => isPendingBreakLogRow(row))
+      .map((row) => String(row.shiftLogId || ""))
+      .filter(Boolean)
+  );
   const breakSummaryByShift = new Map();
   (data.breakRows || []).forEach((row) => {
     const key = `${row.date}__${row.shift}`;
@@ -5109,14 +6623,23 @@ function renderTrackingTables() {
       mins: prev.mins + Math.max(0, num(row.breakMins))
     });
   });
-  const displayShiftRows = data.shiftRows.map((row) => {
+  const displayShiftRows = sortNewestFirst(data.shiftRows, "startTime").map((row) => {
     const key = `${row.date}__${row.shift}`;
     const summary = breakSummaryByShift.get(key) || { count: 0, mins: 0 };
+    const editing = isInlineEditing("shift", String(row.id || ""));
+    const hasOpenBreak = openBreakByShiftLogId.has(String(row.id || ""));
+    const pending = isPendingShiftLogRow(row) || hasOpenBreak;
+    const pendingLabel = hasOpenBreak ? "Pending | Break Active" : "Pending";
     return {
       ...row,
+      __rowClass: pending ? "table-row-pending" : "",
+      crewOnShift: editing ? inlineInputHtml("crewOnShift", Math.max(0, num(row.crewOnShift)), { type: "number", min: "0", step: "1" }) : row.crewOnShift,
+      startTime: editing ? inlineInputHtml("startTime", String(row.startTime || ""), { placeholder: "HH:MM" }) : row.startTime,
+      finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
       breakCount: summary.count,
       breakTimeMins: summary.mins,
-      action: actionHtml("shift", row)
+      submittedBy: managerLogSubmittedByLabel(row),
+      action: actionHtml("shift", row, { editing, pending, pendingLabel })
     };
   });
 
@@ -5129,16 +6652,30 @@ function renderTrackingTables() {
     "Break Count": "breakCount",
     "Break Time (min)": "breakTimeMins",
     "Total Shift Time": "totalShiftTime",
+    "Submitted By": "submittedBy",
     Action: "action"
   });
 
-  const displayRunRows = data.runRows.map((row) => ({
-    ...row,
-    action: actionHtml("run", row)
-  }));
+  const displayRunRows = sortNewestFirst(data.runRows, "productionStartTime").map((row) => {
+    const editing = isInlineEditing("run", String(row.id || ""));
+    const pending = isPendingRunLogRow(row);
+    return {
+      ...row,
+      __rowClass: pending ? "table-row-pending" : "",
+      assignedShift: resolveTimedLogShiftLabel(row, state, "productionStartTime", "finishTime"),
+      product: editing ? inlineInputHtml("product", String(row.product || "")) : row.product,
+      productionStartTime: editing
+        ? inlineInputHtml("productionStartTime", String(row.productionStartTime || ""), { placeholder: "HH:MM" })
+        : row.productionStartTime,
+      finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
+      unitsProduced: editing ? inlineInputHtml("unitsProduced", Math.max(0, num(row.unitsProduced)), { type: "number", min: "0", step: "1" }) : row.unitsProduced,
+      submittedBy: managerLogSubmittedByLabel(row),
+      action: actionHtml("run", row, { editing, pending })
+    };
+  });
   renderTable("runTable", RUN_COLUMNS, displayRunRows, {
     Date: "date",
-    Shift: "shift",
+    "Assigned Shift": "assignedShift",
     Product: "product",
     "Production Start Time": "productionStartTime",
     "Finish Time": "finishTime",
@@ -5148,22 +6685,34 @@ function renderTrackingTables() {
     "Net Production Time": "netProductionTime",
     "Gross Run Rate": "grossRunRate",
     "Net Run Rate": "netRunRate",
+    "Submitted By": "submittedBy",
     Action: "action"
   });
 
-  const displayDowntimeRows = data.downtimeRows.map((row) => ({
-    ...row,
-    equipment: row.equipment ? stageNameById(row.equipment) : "-",
-    action: actionHtml("downtime", row)
-  }));
+  const displayDowntimeRows = sortNewestFirst(data.downtimeRows, "downtimeStart").map((row) => {
+    const editing = isInlineEditing("downtime", String(row.id || ""));
+    const pending = isPendingDowntimeLogRow(row);
+    return {
+      ...row,
+      __rowClass: pending ? "table-row-pending" : "",
+      assignedShift: resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish"),
+      downtimeStart: editing ? inlineInputHtml("downtimeStart", String(row.downtimeStart || ""), { placeholder: "HH:MM" }) : row.downtimeStart,
+      downtimeFinish: editing ? inlineInputHtml("downtimeFinish", String(row.downtimeFinish || ""), { placeholder: "HH:MM" }) : row.downtimeFinish,
+      equipment: row.equipment ? stageNameById(row.equipment) : "-",
+      reason: editing ? inlineInputHtml("reason", String(row.reason || "")) : row.reason,
+      submittedBy: managerLogSubmittedByLabel(row),
+      action: actionHtml("downtime", row, { editing, pending })
+    };
+  });
   renderTable("downtimeTable", DOWN_COLUMNS, displayDowntimeRows, {
     Date: "date",
-    Shift: "shift",
+    "Assigned Shift": "assignedShift",
     "Downtime Start": "downtimeStart",
     "Downtime Finish": "downtimeFinish",
     "Downtime (mins)": "downtimeMins",
     Equipment: "equipment",
     Reason: "reason",
+    "Submitted By": "submittedBy",
     Action: "action"
   });
 }
@@ -5199,13 +6748,13 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   if (!map) return;
   const stages = line?.stages?.length ? line.stages : STAGES;
   const data = derivedDataForLine(line || {});
-  const selectedRunRows = selectedShiftRowsByDate(data.runRows, selectedDate, selectedShift);
-  const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, selectedDate, selectedShift);
-  const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, selectedDate, selectedShift);
+  const selectedRunRows = selectedShiftRowsByDate(data.runRows, selectedDate, selectedShift, { line });
+  const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, selectedDate, selectedShift, { line });
+  const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, selectedDate, selectedShift, { line });
   const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
-  const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced), 0);
-  const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins), 0);
-  const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime), 0);
+  const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, selectedShift), 0);
+  const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
+  const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   let utilAccumulator = 0;
   let utilCount = 0;
@@ -5264,7 +6813,7 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   stages.forEach((stage, index) => {
     const stageDowntime = selectedDownRows
       .filter((row) => matchesStage(stage, row.equipment))
-      .reduce((sum, row) => sum + num(row.downtimeMins), 0);
+      .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
     const perCrewMax = stageMaxThroughputForLine(line, stage.id);
@@ -5340,6 +6889,10 @@ function renderHome() {
   const sidebarBackdrop = document.getElementById("sidebarBackdrop");
   const homeSidebar = document.getElementById("homeSidebar");
   const headerLogoutBtn = document.getElementById("supervisorLogout");
+  const homeUserChip = document.getElementById("homeUserChip");
+  const homeUserAvatar = document.getElementById("homeUserAvatar");
+  const homeUserRole = document.getElementById("homeUserRole");
+  const homeUserIdentity = document.getElementById("homeUserIdentity");
   const managerHome = document.getElementById("managerHome");
   const supervisorHome = document.getElementById("supervisorHome");
   const modeManagerBtn = document.getElementById("modeManager");
@@ -5350,7 +6903,6 @@ function renderHome() {
   const loginSection = document.getElementById("supervisorLoginSection");
   const appSection = document.getElementById("supervisorAppSection");
   const supervisorMobileModeBtn = document.getElementById("supervisorMobileMode");
-  const welcome = document.getElementById("supervisorWelcome");
   const lineSelect = document.getElementById("supervisorLineSelect");
   const svDateInputs = Array.from(document.querySelectorAll("[data-sv-date]"));
   const svShiftButtons = Array.from(document.querySelectorAll("[data-sv-shift]"));
@@ -5360,6 +6912,7 @@ function renderHome() {
   const shiftOpenBreakIdInput = document.getElementById("superShiftOpenBreakId");
   const shiftBreakStartBtn = document.getElementById("superShiftBreakStart");
   const shiftBreakEndBtn = document.getElementById("superShiftBreakEnd");
+  const shiftOpenList = document.getElementById("superShiftOpenList");
   const runDateInput = document.getElementById("superRunDate");
   const runLogIdInput = document.getElementById("superRunLogId");
   const runOpenList = document.getElementById("superRunOpenList");
@@ -5367,6 +6920,7 @@ function renderHome() {
   const downReasonCategoryInput = document.getElementById("superDownReasonCategory");
   const downReasonDetailInput = document.getElementById("superDownReasonDetail");
   const downLogIdInput = document.getElementById("superDownLogId");
+  const downOpenList = document.getElementById("superDownOpenList");
   const entryList = document.getElementById("supervisorEntryList");
   const entryCards = document.getElementById("supervisorEntryCards");
   const superMainTabBtns = Array.from(document.querySelectorAll("[data-super-main-tab]"));
@@ -5374,12 +6928,28 @@ function renderHome() {
   const session = normalizeSupervisorSession(appState.supervisorSession, appState.supervisors, appState.lines);
   appState.supervisorSession = session;
   const isSupervisor = appState.appMode === "supervisor";
+  const activeSupervisor = session?.username ? supervisorByUsername(session.username) : null;
 
   if (homeTitle) {
     homeTitle.textContent = "Production Line Dashboard";
   }
   if (headerLogoutBtn) {
     headerLogoutBtn.classList.toggle("hidden", !(isSupervisor && session));
+  }
+  if (homeUserChip) {
+    const showSupervisorTile = isSupervisor && Boolean(session);
+    const showManagerTile = !isSupervisor;
+    homeUserChip.classList.toggle("hidden", !(showManagerTile || showSupervisorTile));
+    if (showSupervisorTile) {
+      const supervisorLabel = String(activeSupervisor?.name || "Supervisor").trim() || "Supervisor";
+      if (homeUserRole) homeUserRole.textContent = supervisorLabel;
+      if (homeUserIdentity) homeUserIdentity.textContent = String(session?.username || "").trim();
+      if (homeUserAvatar) homeUserAvatar.textContent = (supervisorLabel.charAt(0) || "S").toUpperCase();
+    } else {
+      if (homeUserRole) homeUserRole.textContent = "Manager";
+      if (homeUserIdentity) homeUserIdentity.textContent = "production@plant.local";
+      if (homeUserAvatar) homeUserAvatar.textContent = "M";
+    }
   }
 
   managerHome.classList.toggle("hidden", isSupervisor);
@@ -5462,9 +7032,9 @@ function renderHome() {
   appSection.classList.toggle("hidden", !session);
   if (!session) return;
 
-  const activeMainTab = ["supervisorVisual", "supervisorDay", "supervisorData"].includes(appState.supervisorMainTab)
+  const activeMainTab = ["supervisorDay", "supervisorData"].includes(appState.supervisorMainTab)
     ? appState.supervisorMainTab
-    : "supervisorVisual";
+    : "supervisorDay";
   superMainTabBtns.forEach((btn) => {
     const active = btn.dataset.superMainTab === activeMainTab;
     btn.classList.toggle("active", active);
@@ -5477,14 +7047,13 @@ function renderHome() {
   if (!assignedIds.includes(appState.supervisorSelectedLineId)) {
     appState.supervisorSelectedLineId = assignedIds[0] || "";
   }
-  const allowedShifts = expandedSupervisorShiftAccess(assignedLineShiftMap[appState.supervisorSelectedLineId]);
+  const entryAllowedShifts = expandedSupervisorShiftAccess(assignedLineShiftMap[appState.supervisorSelectedLineId]);
+  const visualAllowedShifts = SHIFT_OPTIONS.slice();
   if (!appState.supervisorSelectedDate) appState.supervisorSelectedDate = todayISO();
-  if (!allowedShifts.includes(appState.supervisorSelectedShift)) {
-    appState.supervisorSelectedShift = allowedShifts[0] || "Day";
+  if (!visualAllowedShifts.includes(appState.supervisorSelectedShift)) {
+    appState.supervisorSelectedShift = visualAllowedShifts.includes("Full Day") ? "Full Day" : visualAllowedShifts[0] || "Day";
   }
 
-  const activeSupervisor = supervisorByUsername(session.username);
-  welcome.textContent = `Logged in as ${activeSupervisor?.name || session.username}`;
   supervisorMobileModeBtn.classList.toggle("hidden", false);
   appSection.classList.toggle("mobile-mode", Boolean(appState.supervisorMobileMode));
   supervisorMobileModeBtn.classList.toggle("active", Boolean(appState.supervisorMobileMode));
@@ -5499,17 +7068,17 @@ function renderHome() {
   [shiftShiftInput].forEach((shiftInput) => {
     if (!shiftInput) return;
     Array.from(shiftInput.options).forEach((option) => {
-      option.disabled = !allowedShifts.includes(option.value);
+      option.disabled = !entryAllowedShifts.includes(option.value);
     });
-    if (!allowedShifts.includes(shiftInput.value)) {
-      shiftInput.value = allowedShifts[0] || "Day";
+    if (!entryAllowedShifts.includes(shiftInput.value)) {
+      shiftInput.value = entryAllowedShifts[0] || "Day";
     }
-    shiftInput.disabled = !allowedShifts.length;
+    shiftInput.disabled = !entryAllowedShifts.length;
   });
   svShiftButtons.forEach((btn) => {
     const shift = btn.dataset.svShift || "";
     const active = shift === appState.supervisorSelectedShift;
-    const enabled = allowedShifts.includes(shift);
+    const enabled = visualAllowedShifts.includes(shift);
     btn.disabled = !enabled;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
@@ -5556,19 +7125,112 @@ function renderHome() {
   if (activeLine) {
     const shiftKeyDate = shiftDateInput.value || appState.supervisorSelectedDate;
     const shiftKeyShift = shiftShiftInput?.value || appState.supervisorSelectedShift;
-    const shiftOpen = pickLatest((activeLine.shiftRows || []).filter((row) => rowMatchesDateShift(row, shiftKeyDate, shiftKeyShift) && isShiftOpen(row)));
-    if (shiftLogIdInput) shiftLogIdInput.value = shiftOpen?.id || "";
-    const openBreak = pickLatest((activeLine.breakRows || []).filter((row) => row.shiftLogId === shiftOpen?.id && isBreakOpen(row)));
+    const shiftOpenRows = (activeLine.shiftRows || [])
+      .filter((row) => rowMatchesDateShift(row, shiftKeyDate, shiftKeyShift) && isShiftOpen(row))
+      .slice()
+      .sort((a, b) => {
+        const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
+        if (submittedCmp !== 0) return submittedCmp;
+        return String(a.startTime || "").localeCompare(String(b.startTime || ""));
+      });
+    const hasShiftRow = (rowId) => shiftOpenRows.some((row) => String(row.id || "") === String(rowId || ""));
+    if (supervisorShiftTileEditId && !hasShiftRow(supervisorShiftTileEditId)) {
+      supervisorShiftTileEditId = "";
+    }
+    if (shiftLogIdInput && shiftLogIdInput.value && !hasShiftRow(shiftLogIdInput.value)) {
+      shiftLogIdInput.value = "";
+    }
+    const selectedShiftId = hasShiftRow(shiftLogIdInput?.value)
+      ? String(shiftLogIdInput?.value || "")
+      : hasShiftRow(supervisorShiftTileEditId)
+        ? String(supervisorShiftTileEditId || "")
+        : "";
+    if (selectedShiftId) {
+      if (shiftLogIdInput) shiftLogIdInput.value = selectedShiftId;
+      supervisorShiftTileEditId = selectedShiftId;
+    }
+    const activeShiftLog = shiftOpenRows.find((row) => String(row.id || "") === selectedShiftId) || shiftOpenRows[0] || null;
+    const openBreak = pickLatest((activeLine.breakRows || []).filter((row) => row.shiftLogId === activeShiftLog?.id && isBreakOpen(row)));
     if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = openBreak?.id || "";
-    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !shiftOpen?.id || Boolean(openBreak?.id);
-    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !shiftOpen?.id || !openBreak?.id;
+    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !activeShiftLog?.id || Boolean(openBreak?.id);
+    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !activeShiftLog?.id || !openBreak?.id;
+    if (shiftOpenList) {
+      shiftOpenList.innerHTML = shiftOpenRows.length
+        ? `
+          <div class="pending-log-list">
+            ${shiftOpenRows
+              .map((row) => {
+                const isSelected = Boolean(supervisorShiftTileEditId && supervisorShiftTileEditId === row.id);
+                const selectedClass = isSelected ? " active" : "";
+                const rowBreakRows = breakRowsForShift(activeLine, row.id);
+                const rowOpenBreak = pickLatest(rowBreakRows.filter((breakRow) => isBreakOpen(breakRow)));
+                const breakEditorRowsHtml = rowBreakRows
+                  .map(
+                    (breakRow, index) => `
+                      <div class="pending-break-editor-row" data-break-editor-row data-break-id="${htmlEscape(breakRow.id || "")}" data-break-index="${index}">
+                        <span class="pending-break-editor-label">Break ${index + 1}</span>
+                        <input class="pending-break-editor-input" data-break-field="start" value="${htmlEscape(breakRow.breakStart || "")}" placeholder="Start HH:MM" />
+                        <input class="pending-break-editor-input" data-break-field="finish" value="${htmlEscape(breakRow.breakFinish || "")}" placeholder="Finish HH:MM" />
+                      </div>
+                    `
+                  )
+                  .join("");
+                return `
+                  <article class="pending-log-item${selectedClass}">
+                    <div class="pending-log-meta">
+                      <h5>${htmlEscape(row.shift || "Shift")} Shift</h5>
+                      <p>
+                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")} | Crew ${formatNum(Math.max(0, num(row.crewOnShift)), 0)}${rowOpenBreak?.id ? ' <span class="pending-break-active">Break active</span>' : ""}
+                      </p>
+                    </div>
+                    <div class="pending-log-actions">
+                      <button type="button" class="table-edit-pill ghost-btn" data-super-shift-edit="${row.id}">Edit</button>
+                      ${
+                        rowOpenBreak?.id
+                          ? `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-end="${row.id}" data-super-shift-break-id="${rowOpenBreak.id}">End Break</button>`
+                          : `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-start="${row.id}">Start Break</button>`
+                      }
+                      <button type="button" class="table-edit-pill finalise-pill" data-super-shift-complete="${row.id}">Finalise</button>
+                    </div>
+                    ${
+                      isSelected
+                        ? `
+                          <div class="pending-break-editor">
+                            <h6>Shift Breaks</h6>
+                            <div class="pending-break-editor-list">
+                              ${breakEditorRowsHtml || `<p class="pending-break-editor-empty">No breaks logged yet.</p>`}
+                              <div class="pending-break-editor-row pending-break-editor-row-new" data-break-editor-row data-break-id="" data-break-index="-1">
+                                <span class="pending-break-editor-label">New Break</span>
+                                <input class="pending-break-editor-input" data-break-field="start" value="" placeholder="Start HH:MM" />
+                                <input class="pending-break-editor-input" data-break-field="finish" value="" placeholder="Finish HH:MM" />
+                              </div>
+                            </div>
+                            <div class="pending-break-editor-actions">
+                              <button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-save="${row.id}">Save Breaks</button>
+                            </div>
+                          </div>
+                        `
+                        : ""
+                    }
+                  </article>
+                `;
+              })
+              .join("")}
+          </div>
+        `
+        : `<p class="muted pending-log-empty">No open shift logs for this date/shift.</p>`;
+    }
 
     const runKeyDate = runDateInput.value || appState.supervisorSelectedDate;
     const runOpenRows = (activeLine.runRows || [])
       .filter(
         (row) =>
           row.date === runKeyDate &&
-          rowMatchesDateShift(row, runKeyDate, appState.supervisorSelectedShift) &&
+          rowMatchesDateShift(row, runKeyDate, appState.supervisorSelectedShift, {
+            line: activeLine,
+            startField: "productionStartTime",
+            finishField: "finishTime"
+          }) &&
           isRunOpen(row)
       )
       .slice()
@@ -5587,17 +7249,18 @@ function renderHome() {
             ${runOpenRows
               .map((row) => {
                 const selectedClass = runLogIdInput?.value && runLogIdInput.value === row.id ? " active" : "";
+                const shiftLabel = resolveTimedLogShiftLabel(row, activeLine, "productionStartTime", "finishTime");
                 return `
                   <article class="pending-log-item${selectedClass}">
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(row.product || "Run")}</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | ${htmlEscape(row.shift || "-")} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}
+                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}
                       </p>
                     </div>
                     <div class="pending-log-actions">
                       <button type="button" class="table-edit-pill ghost-btn" data-super-run-edit="${row.id}">Edit</button>
-                      <button type="button" class="table-edit-pill ghost-btn pending-complete-pill" data-super-run-complete="${row.id}">Complete</button>
+                      <button type="button" class="table-edit-pill finalise-pill" data-super-run-complete="${row.id}">Finalise</button>
                     </div>
                   </article>
                 `;
@@ -5609,32 +7272,73 @@ function renderHome() {
     }
 
     const downKeyDate = downDateInput.value || appState.supervisorSelectedDate;
-    const downKeyCategory = String(downReasonCategoryInput?.value || "");
-    const downKeyDetail = String(downReasonDetailInput?.value || "");
-    const downOpen = pickLatest(
-      (activeLine.downtimeRows || []).filter(
-        (row) => {
-          const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
-          const rowCategory = row.reasonCategory || parsedReason.reasonCategory;
-          const rowDetail = row.reasonDetail || parsedReason.reasonDetail;
-          return (
-            row.date === downKeyDate &&
-            rowMatchesDateShift(row, downKeyDate, appState.supervisorSelectedShift) &&
-            (!downKeyCategory || rowCategory === downKeyCategory) &&
-            (!downKeyDetail || rowDetail === downKeyDetail) &&
-            isDownOpen(row)
-          );
-        }
+    const downOpenRows = (activeLine.downtimeRows || [])
+      .filter(
+        (row) =>
+          row.date === downKeyDate &&
+          rowMatchesDateShift(row, downKeyDate, appState.supervisorSelectedShift, {
+            line: activeLine,
+            startField: "downtimeStart",
+            finishField: "downtimeFinish"
+          }) &&
+          isDownOpen(row)
       )
-    );
-    if (downLogIdInput) downLogIdInput.value = downOpen?.id || "";
+      .slice()
+      .sort((a, b) => {
+        const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
+        if (submittedCmp !== 0) return submittedCmp;
+        return String(a.downtimeStart || "").localeCompare(String(b.downtimeStart || ""));
+      });
+    if (downLogIdInput && !downOpenRows.some((row) => row.id === downLogIdInput.value)) {
+      downLogIdInput.value = "";
+    }
+    if (downOpenList) {
+      downOpenList.innerHTML = downOpenRows.length
+        ? `
+          <div class="pending-log-list">
+            ${downOpenRows
+              .map((row) => {
+                const selectedClass = downLogIdInput?.value && downLogIdInput.value === row.id ? " active" : "";
+                const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+                const rowCategory = row.reasonCategory || parsedReason.reasonCategory || "Downtime";
+                const rowDetail = row.reasonDetail || parsedReason.reasonDetail || "";
+                const detailLabel = rowCategory === "Equipment"
+                  ? stageNameByIdForLine(activeLine, row.equipment || rowDetail) || "Equipment"
+                  : rowDetail;
+                const shiftLabel = resolveTimedLogShiftLabel(row, activeLine, "downtimeStart", "downtimeFinish");
+                return `
+                  <article class="pending-log-item${selectedClass}">
+                    <div class="pending-log-meta">
+                      <h5>${htmlEscape(rowCategory)}${detailLabel ? ` > ${htmlEscape(detailLabel)}` : ""}</h5>
+                      <p>
+                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.downtimeStart || "-")}
+                      </p>
+                    </div>
+                    <div class="pending-log-actions">
+                      <button type="button" class="table-edit-pill ghost-btn" data-super-down-edit="${row.id}">Edit</button>
+                      <button type="button" class="table-edit-pill finalise-pill" data-super-down-complete="${row.id}">Finalise</button>
+                    </div>
+                  </article>
+                `;
+              })
+              .join("")}
+          </div>
+        `
+        : `<p class="muted pending-log-empty">No open downtime logs for this date/shift.</p>`;
+    }
   } else {
+    supervisorShiftTileEditId = "";
+    if (shiftLogIdInput) shiftLogIdInput.value = "";
     if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = "";
     if (runLogIdInput) runLogIdInput.value = "";
+    if (downLogIdInput) downLogIdInput.value = "";
+    if (shiftOpenList) shiftOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
     if (runOpenList) runOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
+    if (downOpenList) downOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
     if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = true;
     if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = true;
   }
+  updateSupervisorProgressButtonLabels();
 
   const activeTab = ["superShift", "superRun", "superDown"].includes(appState.supervisorTab) ? appState.supervisorTab : "superShift";
   document.querySelectorAll("[data-supervisor-tab]").forEach((btn) => {
@@ -5665,7 +7369,7 @@ function renderHome() {
         .map((row) => ({
           lineName: line.name,
           date: row.date,
-          shift: row.shift,
+          shift: resolveTimedLogShiftLabel(row, line, "productionStartTime", "finishTime"),
           type: "Run",
           summary: `${row.product || "-"} (${formatNum(row.unitsProduced, 0)} units)`,
           supervisor: row.submittedBy || "-",
@@ -5676,7 +7380,7 @@ function renderHome() {
         .map((row) => ({
           lineName: line.name,
           date: row.date,
-          shift: row.shift,
+          shift: resolveTimedLogShiftLabel(row, line, "downtimeStart", "downtimeFinish"),
           type: "Downtime",
           summary: `${stageNameByIdForLine(line, row.equipment) || row.reasonCategory || "Downtime"}: ${row.reason || "-"}`,
           supervisor: row.submittedBy || "-",
@@ -5695,7 +7399,14 @@ function renderHome() {
           ${logs
             .map(
               (log) =>
-                `<tr><td>${log.lineName}</td><td>${log.date}</td><td>${log.shift}</td><td>${log.type}</td><td>${log.summary}</td><td>${log.supervisor}</td></tr>`
+                `<tr>
+                  <td>${htmlEscape(log.lineName)}</td>
+                  <td>${htmlEscape(log.date)}</td>
+                  <td>${htmlEscape(log.shift)}</td>
+                  <td>${htmlEscape(log.type)}</td>
+                  <td>${htmlEscape(log.summary)}</td>
+                  <td>${htmlEscape(log.supervisor)}</td>
+                </tr>`
             )
             .join("")}
         </tbody>
@@ -5708,14 +7419,16 @@ function renderHome() {
         .map(
           (log) => `
           <article class="entry-card">
-            <h4>${log.type} | ${log.lineName}</h4>
-            <p>${log.date} ${log.shift} | ${log.summary}</p>
-            <p>By ${log.supervisor}</p>
+            <h4>${htmlEscape(log.type)} | ${htmlEscape(log.lineName)}</h4>
+            <p>${htmlEscape(log.date)} ${htmlEscape(log.shift)} | ${htmlEscape(log.summary)}</p>
+            <p>By ${htmlEscape(log.supervisor)}</p>
           </article>
         `
         )
         .join("")
     : `<p class="muted">No supervisor submissions yet.</p>`;
+
+  syncAllNowInputPrefixStates();
 }
 
 function renderAll() {
@@ -5730,6 +7443,7 @@ function renderAll() {
   document.getElementById("homeView").classList.toggle("hidden", appState.activeView === "line");
   document.getElementById("lineWorkspace").classList.toggle("hidden", appState.activeView !== "line");
   renderHome();
+  refreshRunCrewingPatternSummaries();
 
   if (appState.activeView !== "line" || !state) return;
   document.getElementById("appTitle").textContent = state.name || "Production Line";
@@ -5801,6 +7515,7 @@ function hideStartupLoading() {
 }
 
 bindTabs();
+bindRunCrewingPatternModal();
 bindHome();
 bindDataSubtabs();
 bindVisualiserControls();

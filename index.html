@@ -40,11 +40,11 @@
               <p>Select a production line or build a new one</p>
             </div>
             <div class="topbar-right">
-              <div class="user-chip">
-                <span class="avatar-dot">M</span>
+              <div id="homeUserChip" class="user-chip">
+                <span id="homeUserAvatar" class="avatar-dot">M</span>
                 <div>
-                  <strong>Manager</strong>
-                  <span>production@plant.local</span>
+                  <strong id="homeUserRole">Manager</strong>
+                  <span id="homeUserIdentity">production@plant.local</span>
                 </div>
               </div>
               <button id="supervisorLogout" class="ghost-btn home-btn hidden" type="button">Logout</button>
@@ -110,19 +110,16 @@
               <form id="supervisorLoginForm" class="form-grid">
                 <input id="supervisorUser" placeholder="Username" required />
                 <input id="supervisorPass" type="password" placeholder="Password" required />
+                <button id="supervisorTestLoginBtn" class="ghost-btn" type="button">Test Login</button>
                 <button type="submit">Log In</button>
               </form>
               <p class="muted">Demo credentials: supervisor / supervisor123</p>
             </section>
 
             <section id="supervisorAppSection" class="panel hidden">
-              <div class="action-row">
-                <h2 id="supervisorWelcome">Supervisor</h2>
-              </div>
               <div class="supervisor-top-controls">
                 <div class="tabs" role="tablist" aria-label="Supervisor app tabs">
-                  <button class="tab-btn supervisor-main-tab-btn active" data-super-main-tab="supervisorVisual" type="button">Visualisation</button>
-                  <button class="tab-btn supervisor-main-tab-btn" data-super-main-tab="supervisorDay" type="button">Day Visualiser</button>
+                  <button class="tab-btn supervisor-main-tab-btn active" data-super-main-tab="supervisorDay" type="button">Day Visualiser</button>
                   <button class="tab-btn supervisor-main-tab-btn" data-super-main-tab="supervisorData" type="button">Data Entry</button>
                 </div>
                 <label class="supervisor-line-select-inline">
@@ -131,7 +128,7 @@
                 </label>
               </div>
 
-            <section id="supervisorVisual" class="supervisor-main-panel active">
+            <section id="supervisorVisual" class="supervisor-main-panel">
               <div class="control-row">
                 <button id="svPrevDay" class="ghost-btn" type="button" data-sv-prev="true">Previous Day</button>
                 <label>
@@ -169,7 +166,7 @@
               <section class="line-map" id="supervisorLineMap" aria-label="Supervisor production line map"></section>
             </section>
 
-            <section id="supervisorDay" class="supervisor-main-panel">
+            <section id="supervisorDay" class="supervisor-main-panel active">
               <div class="control-row">
                 <button id="svDayPrevDay" class="ghost-btn" type="button" data-sv-prev="true">Previous Day</button>
                 <label>
@@ -226,46 +223,42 @@
                   <select id="superShiftShift" required>
                     <option value="Day">Day</option>
                     <option value="Night">Night</option>
-                    <option value="Full Day">Full Day</option>
                   </select>
                   <input id="superShiftCrew" type="number" min="0" step="1" placeholder="Crew On Shift" required />
-                  <label class="input-now-wrap">
-                    <input id="superShiftStart" placeholder="Start Time (HH:MM)" />
+                  <label class="input-now-wrap" data-time-prefix="START">
+                    <input id="superShiftStart" placeholder="Start Time (HH:MM)" aria-label="Shift start time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superShiftStart">Now</button>
                   </label>
-                  <label class="input-now-wrap">
-                    <input id="superShiftBreakTime" placeholder="Break Time (HH:MM)" />
-                    <button type="button" class="ghost-btn input-now-btn" data-now-target="superShiftBreakTime">Now</button>
-                  </label>
-                  <label class="input-now-wrap">
-                    <input id="superShiftFinish" placeholder="Finish Time (HH:MM)" />
+                  <label class="input-now-wrap" data-time-prefix="FINISH">
+                    <input id="superShiftFinish" placeholder="Finish Time (HH:MM)" aria-label="Shift finish time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superShiftFinish">Now</button>
                   </label>
                   <div class="form-submit-actions">
-                    <button id="superShiftSaveProgress" type="button">Start / Save Progress</button>
-                    <button id="superShiftBreakStart" type="button" class="ghost-btn">Start Break</button>
-                    <button id="superShiftBreakEnd" type="button" class="ghost-btn">End Break</button>
-                    <button id="superShiftComplete" type="button" class="ghost-btn">Complete Shift</button>
+                    <button id="superShiftSaveProgress" type="button">Start</button>
                   </div>
                 </form>
+                <div id="superShiftOpenList" class="pending-log-wrap"></div>
               </section>
 
               <section id="superRun" class="data-section">
                 <form id="supervisorRunForm" class="form-grid">
                   <input id="superRunLogId" type="hidden" />
+                  <input id="superRunCrewingPattern" type="hidden" />
                   <input id="superRunDate" type="date" required />
                   <input id="superRunProduct" placeholder="Product" required />
-                  <label class="input-now-wrap">
-                    <input id="superRunProdStart" placeholder="Production Start Time (HH:MM)" />
+                  <label class="input-now-wrap" data-time-prefix="START">
+                    <input id="superRunProdStart" placeholder="Production Start Time (HH:MM)" aria-label="Production start time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superRunProdStart">Now</button>
                   </label>
-                  <label class="input-now-wrap">
-                    <input id="superRunFinish" placeholder="Finish Time (HH:MM)" />
+                  <label class="input-now-wrap" data-time-prefix="FINISH">
+                    <input id="superRunFinish" placeholder="Finish Time (HH:MM)" aria-label="Production finish time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superRunFinish">Now</button>
                   </label>
                   <input id="superRunUnits" type="number" min="0" step="1" placeholder="Units Produced" />
+                  <button id="superRunCrewingPatternBtn" class="ghost-btn" type="button">Set Crewing Pattern</button>
+                  <p id="superRunCrewingPatternSummary" class="run-crewing-summary">No crewing pattern set.</p>
                   <div class="form-submit-actions">
-                    <button id="superRunSaveProgress" type="button">Start / Save Progress</button>
+                    <button id="superRunSaveProgress" type="button">Start</button>
                   </div>
                 </form>
                 <div id="superRunOpenList" class="pending-log-wrap"></div>
@@ -275,12 +268,12 @@
                 <form id="supervisorDownForm" class="form-grid">
                   <input id="superDownLogId" type="hidden" />
                   <input id="superDownDate" type="date" required />
-                  <label class="input-now-wrap">
-                    <input id="superDownStart" placeholder="Downtime Start (HH:MM)" />
+                  <label class="input-now-wrap" data-time-prefix="START">
+                    <input id="superDownStart" placeholder="Downtime Start (HH:MM)" aria-label="Downtime start time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superDownStart">Now</button>
                   </label>
-                  <label class="input-now-wrap">
-                    <input id="superDownFinish" placeholder="Downtime Finish (HH:MM)" />
+                  <label class="input-now-wrap" data-time-prefix="FINISH">
+                    <input id="superDownFinish" placeholder="Downtime Finish (HH:MM)" aria-label="Downtime finish time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superDownFinish">Now</button>
                   </label>
                   <select id="superDownReasonCategory" required>
@@ -294,10 +287,10 @@
                   <select id="superDownReasonDetail" required></select>
                   <input id="superDownReasonNote" placeholder="Reason Notes (optional)" />
                   <div class="form-submit-actions">
-                    <button id="superDownSaveProgress" type="button">Start / Save Progress</button>
-                    <button id="superDownComplete" type="button" class="ghost-btn">Complete Downtime</button>
+                    <button id="superDownSaveProgress" type="button">Start</button>
                   </div>
                 </form>
+                <div id="superDownOpenList" class="pending-log-wrap"></div>
               </section>
               <div id="supervisorEntryList" class="table-wrap"></div>
               <div id="supervisorEntryCards" class="entry-cards hidden"></div>
@@ -313,7 +306,7 @@
         <div class="modal-head">
           <div class="modal-title-block">
             <h2 id="manageSupervisorsTitle">Manage Supervisors</h2>
-            <p class="muted">Assign production lines and day/night shift access, then update or delete supervisors.</p>
+            <p class="muted">Review line access, toggle day/night permissions, and save each supervisor.</p>
           </div>
           <button id="closeManageSupervisorsModal" class="ghost-btn" type="button">Close</button>
         </div>
@@ -330,17 +323,38 @@
           </div>
           <button id="closeAddSupervisorModal" class="ghost-btn" type="button">Close</button>
         </div>
-        <form id="addSupervisorForm" class="form-grid">
-          <input id="newSupervisorName" placeholder="Name" required />
-          <input id="newSupervisorUsername" placeholder="Username" required />
-          <input id="newSupervisorPassword" type="password" placeholder="Password" required />
-          <div class="supervisor-assignment-sections">
+        <form id="addSupervisorForm" class="form-grid add-supervisor-form">
+          <section class="add-supervisor-section">
+            <h3 class="supervisor-assignment-title">Account Details</h3>
+            <div class="add-supervisor-fields">
+              <label class="add-supervisor-field" for="newSupervisorName">
+                <span>Name</span>
+                <input id="newSupervisorName" placeholder="e.g. Jeff" required />
+              </label>
+              <label class="add-supervisor-field" for="newSupervisorUsername">
+                <span>Username</span>
+                <input id="newSupervisorUsername" placeholder="e.g. daylead" required />
+              </label>
+              <label class="add-supervisor-field" for="newSupervisorPassword">
+                <span>Password</span>
+                <input id="newSupervisorPassword" type="password" placeholder="Create password" required />
+              </label>
+            </div>
+          </section>
+
+          <div class="supervisor-assignment-sections add-supervisor-access">
             <section class="supervisor-assignment-group">
-              <h3 class="supervisor-assignment-title">Line and Shift Access</h3>
+              <div class="add-supervisor-section-head">
+                <h3 class="supervisor-assignment-title">Line and Shift Access</h3>
+                <p class="muted">Choose day and/or night access for each production line.</p>
+              </div>
               <div id="newSupervisorLines" class="supervisor-access-grid"></div>
             </section>
           </div>
-          <button type="submit">Create Supervisor</button>
+
+          <div class="add-supervisor-actions">
+            <button type="submit">Create Supervisor</button>
+          </div>
         </form>
       </div>
     </div>
@@ -514,11 +528,14 @@
             <section id="dataRun" class="panel data-section">
               <h2>Product Run Tracking</h2>
               <form id="runForm" class="form-grid">
+                <input id="runCrewingPattern" name="runCrewingPattern" type="hidden" />
                 <input name="date" type="date" required />
                 <input name="product" placeholder="Product" required />
                 <input name="productionStartTime" placeholder="Production Start Time" />
                 <input name="finishTime" placeholder="Finish Time" />
                 <input name="unitsProduced" type="number" step="1" placeholder="Units Produced" />
+                <button id="runCrewingPatternBtn" class="ghost-btn" type="button">Set Crewing Pattern</button>
+                <p id="runCrewingPatternSummary" class="run-crewing-summary">No crewing pattern set.</p>
                 <button type="submit">Add Product Row</button>
               </form>
               <div class="table-wrap"><table id="runTable"></table></div>
@@ -656,6 +673,22 @@
           </label>
           <button id="saveStageSettings" type="submit">Save Stage</button>
         </form>
+      </div>
+    </div>
+
+    <div id="runCrewingPatternModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="runCrewingPatternTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="runCrewingPatternTitle">Set Crewing Pattern</h2>
+            <p id="runCrewingPatternMeta" class="muted">Set crew values for each non-transfer stage on this run.</p>
+          </div>
+          <button id="closeRunCrewingPatternModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <div id="runCrewingPatternList" class="run-crewing-stage-list"></div>
+        <div class="run-crewing-actions">
+          <button id="saveRunCrewingPattern" type="button">Save Crewing Pattern</button>
+        </div>
       </div>
     </div>
 

@@ -102,7 +102,8 @@ const runLogSchema = z.object({
   setUpStartTime: optionalTime,
   productionStartTime: z.string().regex(timeRegex),
   finishTime: z.string().regex(timeRegex),
-  unitsProduced: z.number().nonnegative()
+  unitsProduced: z.number().nonnegative(),
+  runCrewingPattern: z.record(z.number().int().min(0)).optional().default({})
 });
 
 const downtimeLogSchema = z.object({
@@ -127,16 +128,18 @@ const shiftBreakStartSchema = z.object({
   breakStart: z.string().regex(timeRegex)
 });
 
-const shiftBreakEndSchema = z.object({
-  breakFinish: z.string().regex(timeRegex)
-});
+const shiftBreakUpdateSchema = z.object({
+  breakStart: z.string().regex(timeRegex).optional(),
+  breakFinish: z.string().regex(timeRegex).optional()
+}).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const runLogUpdateSchema = z.object({
   product: z.string().min(1).max(120).optional(),
   setUpStartTime: optionalTime.optional(),
   productionStartTime: optionalTime.optional(),
   finishTime: optionalTime.optional(),
-  unitsProduced: z.number().nonnegative().optional()
+  unitsProduced: z.number().nonnegative().optional(),
+  runCrewingPattern: z.record(z.number().int().min(0)).optional()
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const downtimeLogUpdateSchema = z.object({
@@ -461,6 +464,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
          units_produced AS "unitsProduced",
+         COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM run_logs
@@ -568,6 +572,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       productionStartTime: row.productionStartTime,
       finishTime: row.finishTime,
       unitsProduced: row.unitsProduced,
+      runCrewingPattern: row.runCrewingPattern || {},
       submittedBy: row.submittedBy,
       submittedAt: row.submittedAt
     });
@@ -899,6 +904,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
          units_produced AS "unitsProduced",
+         COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM run_logs
@@ -1183,8 +1189,8 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
   const breakId = req.params.breakId;
   if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
   if (!z.string().uuid().safeParse(breakId).success) return res.status(400).json({ error: 'Invalid break log id' });
-  const parsed = shiftBreakEndSchema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid break finish payload' });
+  const parsed = shiftBreakUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid break update payload' });
 
   const breakResult = await dbQuery(
     `SELECT
@@ -1193,6 +1199,7 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
        b.line_id AS "lineId",
        b.date::TEXT AS date,
        b.shift,
+       b.break_start AS "breakStartRaw",
        b.break_finish AS "breakFinishRaw",
        b.submitted_by_user_id AS "submittedByUserId",
        (s.start_time = s.finish_time) AS "shiftOpen"
@@ -1210,13 +1217,17 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
     return res.status(403).json({ error: 'Cannot update another user\'s break log' });
   }
   if (!breakLog.shiftOpen) return res.status(400).json({ error: 'Shift is already complete' });
-  if (breakLog.breakFinishRaw) return res.status(400).json({ error: 'Break has already been ended' });
+
+  if (parsed.data.breakFinish === undefined && parsed.data.breakStart === undefined) {
+    return res.status(400).json({ error: 'At least one break field must be provided' });
+  }
 
   const result = await dbQuery(
     `UPDATE shift_break_logs
      SET
-       break_finish = $2,
-       submitted_by_user_id = $3,
+       break_start = COALESCE($2::time, break_start),
+       break_finish = COALESCE($3::time, break_finish),
+       submitted_by_user_id = $4,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -1228,16 +1239,21 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
        to_char(break_start, 'HH24:MI') AS "breakStart",
        COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
        submitted_at AS "submittedAt"`,
-    [breakId, parsed.data.breakFinish, req.user.id]
+    [breakId, parsed.data.breakStart || null, parsed.data.breakFinish || null, req.user.id]
   );
+
+  const changedFields = [];
+  if (parsed.data.breakStart !== undefined) changedFields.push(`start ${parsed.data.breakStart}`);
+  if (parsed.data.breakFinish !== undefined) changedFields.push(`finish ${parsed.data.breakFinish}`);
+  const isSimpleEnd = parsed.data.breakStart === undefined && parsed.data.breakFinish !== undefined && !breakLog.breakFinishRaw;
 
   await writeAudit({
     lineId: breakLog.lineId,
     actorUserId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
-    action: 'END_SHIFT_BREAK',
-    details: `${breakLog.shift} ${breakLog.date} break ended ${parsed.data.breakFinish}`
+    action: isSimpleEnd ? 'END_SHIFT_BREAK' : 'UPDATE_SHIFT_BREAK',
+    details: `${breakLog.shift} ${breakLog.date} break updated (${changedFields.join(', ')})`
   });
 
   return res.json({ breakLog: result.rows[0] });
@@ -1249,9 +1265,22 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
-    `INSERT INTO run_logs(line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id)
-     VALUES ($1, $2, $3, $4, NULLIF($5, '')::time, $6, $7, $8, $9)
-     RETURNING id, line_id AS "lineId", date, shift, product, units_produced AS "unitsProduced", submitted_at AS "submittedAt"`,
+    `INSERT INTO run_logs(
+       line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, submitted_by_user_id
+     )
+     VALUES ($1, $2, $3, $4, NULLIF($5, '')::time, $6, $7, $8, $9::jsonb, $10)
+     RETURNING
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       product,
+       COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+       to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+       to_char(finish_time, 'HH24:MI') AS "finishTime",
+       units_produced AS "unitsProduced",
+       COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+       submitted_at AS "submittedAt"`,
     [
       parsed.data.lineId,
       parsed.data.date,
@@ -1261,6 +1290,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.productionStartTime,
       parsed.data.finishTime,
       parsed.data.unitsProduced,
+      JSON.stringify(parsed.data.runCrewingPattern || {}),
       req.user.id
     ]
   );
@@ -1399,7 +1429,8 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        production_start_time = COALESCE(NULLIF($4, '')::time, production_start_time),
        finish_time = COALESCE(NULLIF($5, '')::time, finish_time),
        units_produced = COALESCE($6, units_produced),
-       submitted_by_user_id = $7,
+       run_crewing_pattern = COALESCE($7::jsonb, run_crewing_pattern),
+       submitted_by_user_id = $8,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -1412,6 +1443,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
        to_char(finish_time, 'HH24:MI') AS "finishTime",
        units_produced AS "unitsProduced",
+       COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
        submitted_at AS "submittedAt"`,
     [
       logId,
@@ -1420,6 +1452,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
       data.productionStartTime ?? null,
       data.finishTime ?? null,
       data.unitsProduced,
+      data.runCrewingPattern === undefined ? null : JSON.stringify(data.runCrewingPattern || {}),
       req.user.id
     ]
   );
