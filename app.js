@@ -62,7 +62,7 @@ const DEFAULT_SUPERVISORS = [
 ];
 
 let appState = loadState();
-let state = appState.lines[appState.activeLineId];
+let state = appState.lines[appState.activeLineId] || null;
 let visualiserDragMoved = false;
 let managerLogInlineEdit = { lineId: "", type: "", logId: "" };
 let supervisorShiftTileEditId = "";
@@ -70,15 +70,19 @@ let runCrewingPatternModalState = null;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 let lineModelSyncTimer = null;
 let hostedRefreshErrorShown = false;
+let hostedDatabaseAvailable = true;
+let dbLoadingRequestCount = 0;
+let dbLoadingHideTimer = null;
 let managerBackendSession = {
   backendToken: "",
   backendLineMap: {},
   backendStageMap: {},
   role: "manager"
 };
+clearLegacyStateStorage();
 restoreAuthSessionsFromStorage();
 restoreRouteFromHash();
-state = appState.lines[appState.activeLineId];
+state = appState.lines[appState.activeLineId] || null;
 
 function setManagerLogInlineEdit(lineId = "", type = "", logId = "") {
   managerLogInlineEdit = {
@@ -701,7 +705,6 @@ function downloadTextFile(fileName, text, mimeType = "text/plain;charset=utf-8")
 }
 
 function loadState() {
-  const defaultLine = makeDefaultLine("line-1", "Production Line 1", { seedSample: true });
   return {
     activeView: "home",
     appMode: "manager",
@@ -710,13 +713,13 @@ function loadState() {
     supervisorMobileMode: false,
     supervisorMainTab: "supervisorDay",
     supervisorTab: "superShift",
-    supervisorSelectedLineId: defaultLine.id,
+    supervisorSelectedLineId: "",
     supervisorSelectedDate: todayISO(),
     supervisorSelectedShift: "Full Day",
     supervisorSession: null,
     supervisors: [],
-    activeLineId: defaultLine.id,
-    lines: { [defaultLine.id]: defaultLine }
+    activeLineId: "",
+    lines: {}
   };
 }
 
@@ -738,6 +741,15 @@ function writeAuthStorage(value) {
     } else {
       window.localStorage.removeItem(AUTH_STORAGE_KEY);
     }
+  } catch {
+    // Ignore storage failures (private mode, quota, disabled storage).
+  }
+}
+
+function clearLegacyStateStorage() {
+  try {
+    window.localStorage.removeItem(STORAGE_KEY);
+    window.localStorage.removeItem(STORAGE_BACKUP_KEY);
   } catch {
     // Ignore storage failures (private mode, quota, disabled storage).
   }
@@ -1342,25 +1354,32 @@ function rowIsValidDateShift(date, shift) {
 }
 
 async function apiRequest(path, { method = "GET", token = "", body } = {}) {
-  const headers = {};
-  if (token) headers.Authorization = `Bearer ${token}`;
-  if (body !== undefined) headers["Content-Type"] = "application/json";
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    method,
-    headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined
-  });
-  const text = await response.text();
-  let payload = null;
+  dbLoadingRequestCount += 1;
+  showStartupLoading("Loading production data...");
   try {
-    payload = text ? JSON.parse(text) : null;
-  } catch {
-    payload = text ? { raw: text } : null;
+    const headers = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
+    if (body !== undefined) headers["Content-Type"] = "application/json";
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      method,
+      headers,
+      body: body !== undefined ? JSON.stringify(body) : undefined
+    });
+    const text = await response.text();
+    let payload = null;
+    try {
+      payload = text ? JSON.parse(text) : null;
+    } catch {
+      payload = text ? { raw: text } : null;
+    }
+    if (!response.ok) {
+      throw new Error(payload?.error || payload?.message || `API ${response.status}`);
+    }
+    return payload;
+  } finally {
+    dbLoadingRequestCount = Math.max(0, dbLoadingRequestCount - 1);
+    hideStartupLoading();
   }
-  if (!response.ok) {
-    throw new Error(payload?.error || payload?.message || `API ${response.status}`);
-  }
-  return payload;
 }
 
 function findLocalLineIdByName(name) {
@@ -1545,13 +1564,6 @@ async function refreshHostedState(preferredSession = null) {
       });
     });
 
-    if (!Object.keys(hostedLines).length && activeSession.role !== "supervisor") {
-      const fallback = makeDefaultLine("line-1", "Production Line 1", { seedSample: true });
-      hostedLines[fallback.id] = fallback;
-    }
-
-    ensurePermanentSampleData(hostedLines, appState.activeLineId);
-
     appState.lines = hostedLines;
     const ids = Object.keys(hostedLines);
     appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0] || "";
@@ -1608,12 +1620,14 @@ async function refreshHostedState(preferredSession = null) {
       }
     }
 
+    hostedDatabaseAvailable = true;
     hostedRefreshErrorShown = false;
     saveState();
     renderAll();
     return true;
   } catch (error) {
     console.warn("Hosted state refresh failed:", error);
+    hostedDatabaseAvailable = false;
     const message = String(error?.message || "").toLowerCase();
     const authFailure = message.includes("invalid or expired token") || message.includes("user inactive or not found");
     if (authFailure) {
@@ -2080,16 +2094,6 @@ function formatMonthLabel(month) {
   return new Date(y, m - 1, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
 }
 
-function lineHasTrackingData(line) {
-  return (
-    Math.max(0, line?.shiftRows?.length || 0) +
-      Math.max(0, line?.breakRows?.length || 0) +
-      Math.max(0, line?.runRows?.length || 0) +
-      Math.max(0, line?.downtimeRows?.length || 0) >
-    0
-  );
-}
-
 function capSampleRunRatesForUtilisation(sample, line, maxRatio = 0.95) {
   if (!sample || !line) return;
   const stages = line?.stages?.length ? line.stages : STAGES;
@@ -2322,15 +2326,6 @@ function loadSampleDataIntoLine(line) {
   line.downtimeRows = sample.downtimeRows;
   ensureManagerLogRowIds(line);
   return true;
-}
-
-function ensurePermanentSampleData(lines, preferredLineId = "") {
-  if (!lines || typeof lines !== "object") return false;
-  const ids = Object.keys(lines);
-  if (!ids.length) return false;
-  if (ids.some((lineId) => lineHasTrackingData(lines[lineId]))) return false;
-  const targetId = preferredLineId && lines[preferredLineId] ? preferredLineId : ids[0];
-  return loadSampleDataIntoLine(lines[targetId]);
 }
 
 function parseTimeToDayFraction(value) {
@@ -4817,12 +4812,8 @@ function bindHome() {
             Object.entries(appState.supervisorSession.assignedLineShifts || {}).filter(([lineId]) => lineId !== id)
           );
         }
-        if (!Object.keys(appState.lines).length) {
-          const fallback = makeDefaultLine("line-1", "Production Line 1", { seedSample: true });
-          appState.lines[fallback.id] = fallback;
-        }
-        appState.activeLineId = Object.keys(appState.lines)[0];
-        state = appState.lines[appState.activeLineId];
+        appState.activeLineId = Object.keys(appState.lines)[0] || "";
+        state = appState.lines[appState.activeLineId] || null;
         appState.activeView = "home";
         saveState();
         await refreshHostedState();
@@ -7574,7 +7565,7 @@ function renderHome() {
   }
 
   const cards = document.getElementById("lineCards");
-  const lineList = Object.values(appState.lines || {});
+  const lineList = hostedDatabaseAvailable ? Object.values(appState.lines || {}) : [];
   const statTotalLines = document.getElementById("statTotalLines");
   const statSupervisors = document.getElementById("statSupervisors");
   const statShiftRecords = document.getElementById("statShiftRecords");
@@ -7607,24 +7598,40 @@ function renderHome() {
     Bottleneck: "bottleneckStageName",
     Staffing: "staffing"
   });
-  cards.innerHTML = lineList
-    .map((line) => {
-      const stages = line.stages?.length || STAGES.length;
-      const shifts = line.shiftRows?.length || 0;
-      const assignedSupCount = (appState.supervisors || []).filter((sup) => (sup.assignedLineIds || []).includes(line.id)).length;
-      return `
-        <article class="line-card">
-          <h3>${line.name}</h3>
-          <p>${stages} stages | ${shifts} shift records | ${assignedSupCount} supervisors assigned</p>
-          <div class="line-card-actions">
-            <button type="button" data-open-line="${line.id}">Open Line</button>
-            <button type="button" class="ghost-btn" data-edit-line="${line.id}">Edit</button>
-            <button type="button" class="danger" data-delete-line="${line.id}">Delete</button>
-          </div>
-        </article>
-      `;
-    })
-    .join("");
+  if (!hostedDatabaseAvailable) {
+    cards.innerHTML = `
+      <article class="line-card line-card-unavailable" role="status">
+        <h3>Data base not avaiable</h3>
+        <p>We could not load production lines because the database is currently unavailable.</p>
+      </article>
+    `;
+  } else if (!lineList.length) {
+    cards.innerHTML = `
+      <article class="line-card line-card-empty" role="status">
+        <h3>No Production Lines</h3>
+        <p>No production lines are currently available.</p>
+      </article>
+    `;
+  } else {
+    cards.innerHTML = lineList
+      .map((line) => {
+        const stages = line.stages?.length || STAGES.length;
+        const shifts = line.shiftRows?.length || 0;
+        const assignedSupCount = (appState.supervisors || []).filter((sup) => (sup.assignedLineIds || []).includes(line.id)).length;
+        return `
+          <article class="line-card">
+            <h3>${line.name}</h3>
+            <p>${stages} stages | ${shifts} shift records | ${assignedSupCount} supervisors assigned</p>
+            <div class="line-card-actions">
+              <button type="button" data-open-line="${line.id}">Open Line</button>
+              <button type="button" class="ghost-btn" data-edit-line="${line.id}">Edit</button>
+              <button type="button" class="danger" data-delete-line="${line.id}">Delete</button>
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+  }
   if (statTotalLines) statTotalLines.textContent = formatNum(lineList.length, 0);
   if (statSupervisors) statSupervisors.textContent = formatNum((appState.supervisors || []).length, 0);
   if (statShiftRecords) statShiftRecords.textContent = formatNum(lineList.reduce((sum, line) => sum + (line.shiftRows?.length || 0), 0), 0);
@@ -8125,7 +8132,30 @@ function setActiveDataSubtab() {
 function hideStartupLoading() {
   const loader = document.getElementById("startupLoading");
   if (!loader || loader.classList.contains("hidden")) return;
-  loader.classList.add("hidden");
+  if (dbLoadingRequestCount > 0) return;
+  if (dbLoadingHideTimer) {
+    clearTimeout(dbLoadingHideTimer);
+    dbLoadingHideTimer = null;
+  }
+  dbLoadingHideTimer = window.setTimeout(() => {
+    if (dbLoadingRequestCount > 0) return;
+    loader.classList.add("hidden");
+    dbLoadingHideTimer = null;
+  }, 120);
+}
+
+function showStartupLoading(message = "") {
+  const loader = document.getElementById("startupLoading");
+  if (!loader) return;
+  if (dbLoadingHideTimer) {
+    clearTimeout(dbLoadingHideTimer);
+    dbLoadingHideTimer = null;
+  }
+  if (message) {
+    const label = loader.querySelector("p");
+    if (label) label.textContent = message;
+  }
+  loader.classList.remove("hidden");
 }
 
 async function bootstrapApp() {
@@ -8154,7 +8184,7 @@ bootstrapApp();
 
 window.addEventListener("hashchange", () => {
   restoreRouteFromHash();
-  state = appState.lines[appState.activeLineId] || appState.lines[Object.keys(appState.lines)[0]];
+  state = appState.lines[appState.activeLineId] || appState.lines[Object.keys(appState.lines)[0]] || null;
   if (state) appState.activeLineId = state.id;
   renderAll();
 });

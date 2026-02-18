@@ -1584,6 +1584,19 @@ button {
   min-height: 168px;
 }
 
+.line-card.line-card-unavailable {
+  border-color: #e6b8b8;
+  background: #fff4f4;
+}
+
+.line-card.line-card-unavailable h3 {
+  color: #8d2323;
+}
+
+.line-card.line-card-empty {
+  border-style: dashed;
+}
+
 .line-card h3 {
   margin: 0 0 0.3rem;
   font-size: 1.02rem;
