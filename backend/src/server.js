@@ -256,15 +256,33 @@ async function hasLineAccess(user, lineId) {
   return result.rowCount > 0;
 }
 
-async function hasLineShiftAccess(user, lineId, shift) {
-  if (user.role === 'manager') return true;
-  if (!shiftValues.includes(shift)) return false;
+async function isActiveLine(lineId) {
   const result = await dbQuery(
     `SELECT 1
-     FROM supervisor_line_shift_assignments
-     WHERE supervisor_user_id = $1
-       AND line_id = $2
-       AND shift = $3
+     FROM production_lines
+     WHERE id = $1
+       AND is_active = TRUE
+     LIMIT 1`,
+    [lineId]
+  );
+  return result.rowCount > 0;
+}
+
+async function hasLineShiftAccess(user, lineId, shift) {
+  if (!shiftValues.includes(shift)) return false;
+  if (user.role === 'manager') return isActiveLine(lineId);
+  const result = await dbQuery(
+    `SELECT 1
+     FROM supervisor_line_shift_assignments a
+     INNER JOIN production_lines l
+       ON l.id = a.line_id
+     WHERE a.supervisor_user_id = $1
+       AND a.line_id = $2
+       AND l.is_active = TRUE
+       AND (
+         ($3 = 'Full Day' AND a.shift IN ('Day', 'Night'))
+         OR a.shift = $3
+       )
      LIMIT 1`,
     [user.id, lineId, shift]
   );
@@ -280,6 +298,22 @@ async function isLineStage(lineId, stageId) {
     [stageId, lineId]
   );
   return result.rowCount > 0;
+}
+
+async function findMissingActiveLineIds(lineIds) {
+  const uniqueLineIds = Array.from(
+    new Set((Array.isArray(lineIds) ? lineIds : []).filter((lineId) => z.string().uuid().safeParse(lineId).success))
+  );
+  if (!uniqueLineIds.length) return [];
+  const result = await dbQuery(
+    `SELECT id::TEXT AS id
+     FROM production_lines
+     WHERE is_active = TRUE
+       AND id = ANY($1::UUID[])`,
+    [uniqueLineIds]
+  );
+  const foundIds = new Set(result.rows.map((row) => row.id));
+  return uniqueLineIds.filter((lineId) => !foundIds.has(lineId));
 }
 
 async function writeAudit({ lineId = null, actorUserId = null, actorName = null, actorRole = null, action, details = '' }) {
@@ -339,7 +373,7 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
   const supervisorBaseFields = `
     l.id,
     l.name,
-    l.secret_key AS "secretKey",
+    NULL::TEXT AS "secretKey",
     l.created_at AS "createdAt",
     (
       SELECT COUNT(*)::INT FROM line_stages s WHERE s.line_id = l.id
@@ -396,7 +430,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     : `SELECT
          l.id,
          l.name,
-         l.secret_key AS "secretKey",
+         NULL::TEXT AS "secretKey",
          l.created_at AS "createdAt",
          (
            SELECT COUNT(*)::INT FROM line_stages s WHERE s.line_id = l.id
@@ -812,6 +846,10 @@ app.post('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(
   const assignedLineShifts = normalizeAssignedLineShifts(parsed.data.assignedLineShifts, parsed.data.assignedLineIds || []);
   const assignedLineIds = Object.keys(assignedLineShifts);
   const assignedPairs = flattenAssignedLineShifts(assignedLineShifts);
+  const missingLineIds = await findMissingActiveLineIds(assignedLineIds);
+  if (missingLineIds.length) {
+    return res.status(400).json({ error: 'One or more assigned lines are invalid or inactive', lineIds: missingLineIds });
+  }
 
   const client = await pool.connect();
   try {
@@ -862,6 +900,10 @@ app.patch('/api/supervisors/:supervisorId/assignments', authMiddleware, requireR
   if (!parsed.success) return res.status(400).json({ error: 'Invalid assignments payload' });
   const assignedLineShifts = normalizeAssignedLineShifts(parsed.data.assignedLineShifts, parsed.data.assignedLineIds || []);
   const assignedPairs = flattenAssignedLineShifts(assignedLineShifts);
+  const missingLineIds = await findMissingActiveLineIds(Object.keys(assignedLineShifts));
+  if (missingLineIds.length) {
+    return res.status(400).json({ error: 'One or more assigned lines are invalid or inactive', lineIds: missingLineIds });
+  }
 
   const userCheck = await dbQuery(
     `SELECT id FROM users WHERE id = $1 AND role = 'supervisor'`,
@@ -980,9 +1022,13 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
 
   const lineResult = await dbQuery(
-    `SELECT id, name, secret_key AS "secretKey", created_at AS "createdAt", updated_at AS "updatedAt"
-     FROM production_lines
-     WHERE id = $1 AND is_active = TRUE`,
+    req.user.role === 'manager'
+      ? `SELECT id, name, secret_key AS "secretKey", created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM production_lines
+         WHERE id = $1 AND is_active = TRUE`
+      : `SELECT id, name, NULL::TEXT AS "secretKey", created_at AS "createdAt", updated_at AS "updatedAt"
+         FROM production_lines
+         WHERE id = $1 AND is_active = TRUE`,
     [lineId]
   );
   if (!lineResult.rowCount) return res.status(404).json({ error: 'Line not found' });
@@ -1312,7 +1358,7 @@ app.post('/api/lines/:lineId/clear-data', authMiddleware, requireRole('manager')
   );
   if (!lineRes.rowCount) return res.status(404).json({ error: 'Line not found' });
   const line = lineRes.rows[0];
-  if (parsed.data.secretKey !== 'admin' && parsed.data.secretKey !== line.secretKey) {
+  if (parsed.data.secretKey !== line.secretKey) {
     return res.status(403).json({ error: 'Invalid key/password. Data was not cleared.' });
   }
 
@@ -1346,6 +1392,7 @@ app.post('/api/lines/:lineId/clear-data', authMiddleware, requireRole('manager')
 app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = shiftLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid shift log payload' });
+  if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
@@ -1517,6 +1564,7 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
 app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = runLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid run log payload' });
+  if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
@@ -1565,6 +1613,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
 app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = downtimeLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log payload' });
+  if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
   if (parsed.data.equipmentStageId && !(await isLineStage(parsed.data.lineId, parsed.data.equipmentStageId))) {
     return res.status(400).json({ error: 'Equipment stage does not belong to this line' });
