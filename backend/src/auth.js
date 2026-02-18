@@ -42,17 +42,29 @@ export async function authMiddleware(req, res, next) {
     const parsed = authHeaderSchema.safeParse(req.headers.authorization || '');
     if (!parsed.success) return res.status(401).json({ error: 'Missing or invalid authorization header' });
     const token = parsed.data.replace(/^Bearer\s+/i, '').trim();
-    const payload = jwt.verify(token, config.jwtSecret);
-    const userResult = await dbQuery(
-      `SELECT id, name, username, role, is_active FROM users WHERE id = $1`,
-      [payload.sub]
-    );
+    let payload;
+    try {
+      payload = jwt.verify(token, config.jwtSecret);
+    } catch {
+      return res.status(401).json({ error: 'Invalid or expired token' });
+    }
+    let userResult;
+    try {
+      userResult = await dbQuery(
+        `SELECT id, name, username, role, is_active FROM users WHERE id = $1`,
+        [payload.sub]
+      );
+    } catch (error) {
+      console.error('[auth] User lookup failed:', error);
+      return res.status(503).json({ error: 'Database unavailable' });
+    }
     const user = userResult.rows[0];
     if (!user || !user.is_active) return res.status(401).json({ error: 'User inactive or not found' });
     req.user = user;
     return next();
-  } catch {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (error) {
+    console.error('[auth] Unexpected auth middleware error:', error);
+    return res.status(500).json({ error: 'Authentication service unavailable' });
   }
 }
 

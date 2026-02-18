@@ -1391,7 +1391,10 @@ async function apiRequest(path, { method = "GET", token = "", body } = {}) {
       payload = text ? { raw: text } : null;
     }
     if (!response.ok) {
-      throw new Error(payload?.error || payload?.message || `API ${response.status}`);
+      const error = new Error(payload?.error || payload?.message || `API ${response.status}`);
+      error.status = response.status;
+      error.payload = payload;
+      throw error;
     }
     return payload;
   } finally {
@@ -1646,8 +1649,13 @@ async function refreshHostedState(preferredSession = null) {
   } catch (error) {
     console.warn("Hosted state refresh failed:", error);
     hostedDatabaseAvailable = false;
+    const status = Number(error?.status || 0);
     const message = String(error?.message || "").toLowerCase();
-    const authFailure = message.includes("invalid or expired token") || message.includes("user inactive or not found");
+    const authFailure =
+      status === 401 &&
+      (message.includes("invalid or expired token") ||
+        message.includes("user inactive or not found") ||
+        message.includes("missing or invalid authorization header"));
     if (authFailure) {
       if (preferredSession === appState.supervisorSession || appState.appMode === "supervisor") {
         appState.supervisorSession = null;
