@@ -73,7 +73,7 @@ let lineModelSyncTimer = null;
 let hostedRefreshErrorShown = false;
 let hostedDatabaseAvailable = true;
 let dbLoadingRequestCount = 0;
-let dbLoadingHideTimer = null;
+let dbLoadingFailsafeTimer = null;
 let managerBackendSession = {
   backendToken: "",
   backendLineMap: {},
@@ -8148,54 +8148,65 @@ function setActiveDataSubtab() {
   });
 }
 
-function hideStartupLoading() {
-  const loader = document.getElementById("startupLoading");
-  if (!loader || loader.classList.contains("hidden")) return;
-  if (dbLoadingRequestCount > 0) return;
-  if (dbLoadingHideTimer) {
-    clearTimeout(dbLoadingHideTimer);
-    dbLoadingHideTimer = null;
+function armDbLoadingFailsafe() {
+  if (dbLoadingFailsafeTimer) {
+    clearTimeout(dbLoadingFailsafeTimer);
+    dbLoadingFailsafeTimer = null;
   }
-  dbLoadingHideTimer = window.setTimeout(() => {
-    if (dbLoadingRequestCount > 0) return;
-    loader.classList.add("hidden");
-    dbLoadingHideTimer = null;
-  }, 120);
+  if (dbLoadingRequestCount <= 0) return;
+  dbLoadingFailsafeTimer = window.setTimeout(() => {
+    if (dbLoadingRequestCount <= 0) {
+      dbLoadingFailsafeTimer = null;
+      return;
+    }
+    console.warn("DB loading watchdog reset: forcing loader hide after timeout.");
+    dbLoadingRequestCount = 0;
+    hideStartupLoading({ force: true });
+    dbLoadingFailsafeTimer = null;
+  }, API_REQUEST_TIMEOUT_MS + 2000);
+}
+
+function hideStartupLoading({ force = false } = {}) {
+  const loader = document.getElementById("startupLoading");
+  if (!loader) return;
+  if (!force && dbLoadingRequestCount > 0) return;
+  loader.classList.add("hidden");
+  if (dbLoadingFailsafeTimer && dbLoadingRequestCount <= 0) {
+    clearTimeout(dbLoadingFailsafeTimer);
+    dbLoadingFailsafeTimer = null;
+  }
 }
 
 function showStartupLoading(message = "") {
   const loader = document.getElementById("startupLoading");
   if (!loader) return;
-  if (dbLoadingHideTimer) {
-    clearTimeout(dbLoadingHideTimer);
-    dbLoadingHideTimer = null;
-  }
   if (message) {
     const label = loader.querySelector("p");
     if (label) label.textContent = message;
   }
   loader.classList.remove("hidden");
+  armDbLoadingFailsafe();
 }
 
 async function bootstrapApp() {
-  bindTabs();
-  bindRunCrewingPatternModal();
-  bindHome();
-  bindDataSubtabs();
-  bindVisualiserControls();
-  bindTrendModal();
-  bindStageSettingsModal();
-  bindForms();
-  bindDataControls();
-  renderAll();
   try {
+    bindTabs();
+    bindRunCrewingPatternModal();
+    bindHome();
+    bindDataSubtabs();
+    bindVisualiserControls();
+    bindTrendModal();
+    bindStageSettingsModal();
+    bindForms();
+    bindDataControls();
+    renderAll();
     if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToken) {
       await refreshHostedState(appState.supervisorSession);
     } else if ((appState.appMode === "manager" || appState.activeView === "line") && managerBackendSession.backendToken) {
       await refreshHostedState();
     }
   } finally {
-    hideStartupLoading();
+    hideStartupLoading({ force: true });
   }
 }
 
