@@ -5093,15 +5093,23 @@ function bindVisualiserControls() {
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
   const setLayoutEditButtonUI = () => {
-    const active = Boolean(state.visualEditMode);
-    editBtn.classList.toggle("active", active);
-    editBtn.textContent = active ? "Done Editing" : "Edit Layout";
-    addLineBtn.disabled = !active;
-    addArrowBtn.disabled = !active;
-    uploadShapeBtn.disabled = !active;
-    addLineBtn.classList.toggle("hidden", !active);
-    addArrowBtn.classList.toggle("hidden", !active);
-    uploadShapeBtn.classList.toggle("hidden", !active);
+    const active = Boolean(state?.visualEditMode);
+    if (editBtn) {
+      editBtn.classList.toggle("active", active);
+      editBtn.textContent = active ? "Done Editing" : "Edit Layout";
+    }
+    if (addLineBtn) {
+      addLineBtn.disabled = !active;
+      addLineBtn.classList.toggle("hidden", !active);
+    }
+    if (addArrowBtn) {
+      addArrowBtn.disabled = !active;
+      addArrowBtn.classList.toggle("hidden", !active);
+    }
+    if (uploadShapeBtn) {
+      uploadShapeBtn.disabled = !active;
+      uploadShapeBtn.classList.toggle("hidden", !active);
+    }
   };
 
   const createGuide = (type) => ({
@@ -5115,13 +5123,14 @@ function bindVisualiserControls() {
   });
 
   dateInputs.forEach((dateInput) => {
-    dateInput.value = state.selectedDate;
+    dateInput.value = state?.selectedDate || todayISO();
   });
   setShiftToggleUI();
   setLayoutEditButtonUI();
 
   dateInputs.forEach((dateInput) => {
     dateInput.addEventListener("change", () => {
+      if (!state) return;
       state.selectedDate = dateInput.value || todayISO();
       dateInputs.forEach((input) => {
         input.value = state.selectedDate;
@@ -5133,6 +5142,7 @@ function bindVisualiserControls() {
 
   shiftButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (!state) return;
       const nextShift = btn.dataset.shift || btn.dataset.dayShift;
       if (!nextShift || nextShift === state.selectedShift) return;
       state.selectedShift = nextShift;
@@ -5149,6 +5159,7 @@ function bindVisualiserControls() {
   if (lineTrendNextBtn) lineTrendNextBtn.addEventListener("click", () => moveLineTrendPeriod(1));
   lineTrendRangeButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
+      if (!state) return;
       const range = String(btn.dataset.lineTrendRange || "").toLowerCase();
       if (!LINE_TREND_RANGES.includes(range) || range === state.lineTrendRange) return;
       state.lineTrendRange = range;
@@ -5157,161 +5168,174 @@ function bindVisualiserControls() {
     });
   });
 
-  editBtn.addEventListener("click", () => {
-    state.visualEditMode = !state.visualEditMode;
-    setLayoutEditButtonUI();
-    saveState();
-    renderVisualiser();
-  });
+  if (editBtn) {
+    editBtn.addEventListener("click", () => {
+      if (!state) return;
+      state.visualEditMode = !state.visualEditMode;
+      setLayoutEditButtonUI();
+      saveState();
+      renderVisualiser();
+    });
+  }
 
-  addLineBtn.addEventListener("click", () => {
-    if (!state.visualEditMode) return;
-    state.flowGuides = Array.isArray(state.flowGuides) ? state.flowGuides : [];
-    state.flowGuides.push(createGuide("line"));
-    addAudit(state, "LAYOUT_ADD_LINE", "Flow line guide added");
-    saveState({ syncModel: true });
-    renderVisualiser();
-  });
-
-  addArrowBtn.addEventListener("click", () => {
-    if (!state.visualEditMode) return;
-    state.flowGuides = Array.isArray(state.flowGuides) ? state.flowGuides : [];
-    state.flowGuides.push(createGuide("arrow"));
-    addAudit(state, "LAYOUT_ADD_ARROW", "Flow arrow guide added");
-    saveState({ syncModel: true });
-    renderVisualiser();
-  });
-
-  uploadShapeBtn.addEventListener("click", () => {
-    if (!state.visualEditMode) return;
-    uploadShapeInput.click();
-  });
-
-  uploadShapeInput.addEventListener("change", async (event) => {
-    if (!state.visualEditMode) return;
-    const file = event.target.files?.[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      alert("Please upload an image file.");
-      event.target.value = "";
-      return;
-    }
-
-    try {
-      const dataUrl = await new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result || ""));
-        reader.onerror = reject;
-        reader.readAsDataURL(file);
-      });
+  if (addLineBtn) {
+    addLineBtn.addEventListener("click", () => {
+      if (!state || !state.visualEditMode) return;
       state.flowGuides = Array.isArray(state.flowGuides) ? state.flowGuides : [];
-      state.flowGuides.push({
-        id: `fg-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-        type: "shape",
-        x: 10,
-        y: 24,
-        w: 18,
-        h: 18,
-        angle: 0,
-        src: dataUrl
-      });
-      addAudit(state, "LAYOUT_ADD_SHAPE", "Custom background shape uploaded");
+      state.flowGuides.push(createGuide("line"));
+      addAudit(state, "LAYOUT_ADD_LINE", "Flow line guide added");
       saveState({ syncModel: true });
       renderVisualiser();
-    } catch {
-      alert("Could not load shape.");
-    }
-    event.target.value = "";
-  });
+    });
+  }
 
-  map.addEventListener("mousedown", (event) => {
-    if (!state.visualEditMode) return;
-    visualiserDragMoved = false;
-    const deleteGuide = event.target.closest("[data-guide-delete]");
-    if (deleteGuide) {
-      const guideId = deleteGuide.getAttribute("data-guide-delete");
-      state.flowGuides = (state.flowGuides || []).filter((guide) => guide.id !== guideId);
-      addAudit(state, "LAYOUT_DELETE_GUIDE", "Flow guide deleted");
+  if (addArrowBtn) {
+    addArrowBtn.addEventListener("click", () => {
+      if (!state || !state.visualEditMode) return;
+      state.flowGuides = Array.isArray(state.flowGuides) ? state.flowGuides : [];
+      state.flowGuides.push(createGuide("arrow"));
+      addAudit(state, "LAYOUT_ADD_ARROW", "Flow arrow guide added");
       saveState({ syncModel: true });
       renderVisualiser();
-      event.preventDefault();
-      return;
-    }
+    });
+  }
 
-    const guideNode = event.target.closest("[data-guide-id]");
-    const guideResizeNode = event.target.closest("[data-guide-resize]");
-    const guideRotateNode = event.target.closest("[data-guide-rotate]");
-    if (guideNode) {
-      const guideId = guideNode.getAttribute("data-guide-id");
-      const guide = (state.flowGuides || []).find((item) => item.id === guideId);
-      if (!guide) return;
+  if (uploadShapeBtn && uploadShapeInput) {
+    uploadShapeBtn.addEventListener("click", () => {
+      if (!state || !state.visualEditMode) return;
+      uploadShapeInput.click();
+    });
+  }
+
+  if (uploadShapeInput) {
+    uploadShapeInput.addEventListener("change", async (event) => {
+      if (!state || !state.visualEditMode) return;
+      const file = event.target.files?.[0];
+      if (!file) return;
+      if (!file.type.startsWith("image/")) {
+        alert("Please upload an image file.");
+        event.target.value = "";
+        return;
+      }
+
+      try {
+        const dataUrl = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = () => resolve(String(reader.result || ""));
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+        state.flowGuides = Array.isArray(state.flowGuides) ? state.flowGuides : [];
+        state.flowGuides.push({
+          id: `fg-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          type: "shape",
+          x: 10,
+          y: 24,
+          w: 18,
+          h: 18,
+          angle: 0,
+          src: dataUrl
+        });
+        addAudit(state, "LAYOUT_ADD_SHAPE", "Custom background shape uploaded");
+        saveState({ syncModel: true });
+        renderVisualiser();
+      } catch {
+        alert("Could not load shape.");
+      }
+      event.target.value = "";
+    });
+  }
+
+  if (map) {
+    map.addEventListener("mousedown", (event) => {
+      if (!state || !state.visualEditMode) return;
+      visualiserDragMoved = false;
+      const deleteGuide = event.target.closest("[data-guide-delete]");
+      if (deleteGuide) {
+        const guideId = deleteGuide.getAttribute("data-guide-delete");
+        state.flowGuides = (state.flowGuides || []).filter((guide) => guide.id !== guideId);
+        addAudit(state, "LAYOUT_DELETE_GUIDE", "Flow guide deleted");
+        saveState({ syncModel: true });
+        renderVisualiser();
+        event.preventDefault();
+        return;
+      }
+
+      const guideNode = event.target.closest("[data-guide-id]");
+      const guideResizeNode = event.target.closest("[data-guide-resize]");
+      const guideRotateNode = event.target.closest("[data-guide-rotate]");
+      if (guideNode) {
+        const guideId = guideNode.getAttribute("data-guide-id");
+        const guide = (state.flowGuides || []).find((item) => item.id === guideId);
+        if (!guide) return;
+        const rect = map.getBoundingClientRect();
+        if (guideRotateNode) {
+          layoutDragState = {
+            target: "guide",
+            mode: "rotate",
+            guideId
+          };
+        } else if (guideResizeNode) {
+          layoutDragState = {
+            target: "guide",
+            mode: "resize",
+            guideId,
+            startX: event.clientX,
+            startY: event.clientY,
+            startW: guide.w,
+            startH: guide.h,
+            canvasW: rect.width,
+            canvasH: rect.height
+          };
+        } else {
+          layoutDragState = {
+            target: "guide",
+            mode: "move",
+            guideId,
+            offsetX: event.clientX - rect.left - (guide.x / 100) * rect.width,
+            offsetY: event.clientY - rect.top - (guide.y / 100) * rect.height
+          };
+        }
+        event.preventDefault();
+        return;
+      }
+
+      const resizeNode = event.target.closest("[data-stage-resize]");
+      const cardNode = event.target.closest("[data-stage-id]");
+      if (!cardNode) return;
+      const stage = getStages().find((item) => item.id === cardNode.getAttribute("data-stage-id"));
+      if (!stage) return;
       const rect = map.getBoundingClientRect();
-      if (guideRotateNode) {
+
+      if (resizeNode) {
         layoutDragState = {
-          target: "guide",
-          mode: "rotate",
-          guideId
-        };
-      } else if (guideResizeNode) {
-        layoutDragState = {
-          target: "guide",
+          target: "stage",
           mode: "resize",
-          guideId,
+          stageId: stage.id,
           startX: event.clientX,
           startY: event.clientY,
-          startW: guide.w,
-          startH: guide.h,
+          startW: stage.w,
+          startH: stage.h,
           canvasW: rect.width,
           canvasH: rect.height
         };
-      } else {
-        layoutDragState = {
-          target: "guide",
-          mode: "move",
-          guideId,
-          offsetX: event.clientX - rect.left - (guide.x / 100) * rect.width,
-          offsetY: event.clientY - rect.top - (guide.y / 100) * rect.height
-        };
+        event.preventDefault();
+        return;
       }
-      event.preventDefault();
-      return;
-    }
 
-    const resizeNode = event.target.closest("[data-stage-resize]");
-    const cardNode = event.target.closest("[data-stage-id]");
-    if (!cardNode) return;
-    const stage = getStages().find((item) => item.id === cardNode.getAttribute("data-stage-id"));
-    if (!stage) return;
-    const rect = map.getBoundingClientRect();
-
-    if (resizeNode) {
       layoutDragState = {
         target: "stage",
-        mode: "resize",
+        mode: "move",
         stageId: stage.id,
-        startX: event.clientX,
-        startY: event.clientY,
-        startW: stage.w,
-        startH: stage.h,
-        canvasW: rect.width,
-        canvasH: rect.height
+        offsetX: event.clientX - rect.left - (stage.x / 100) * rect.width,
+        offsetY: event.clientY - rect.top - (stage.y / 100) * rect.height
       };
       event.preventDefault();
-      return;
-    }
-
-    layoutDragState = {
-      target: "stage",
-      mode: "move",
-      stageId: stage.id,
-      offsetX: event.clientX - rect.left - (stage.x / 100) * rect.width,
-      offsetY: event.clientY - rect.top - (stage.y / 100) * rect.height
-    };
-    event.preventDefault();
-  });
+    });
+  }
 
   window.addEventListener("mousemove", (event) => {
-    if (!state.visualEditMode || !layoutDragState) return;
+    if (!state || !map || !state.visualEditMode || !layoutDragState) return;
     visualiserDragMoved = true;
     const rect = map.getBoundingClientRect();
 
@@ -5354,7 +5378,7 @@ function bindVisualiserControls() {
   });
 
   window.addEventListener("mouseup", () => {
-    if (layoutDragState) {
+    if (state && layoutDragState) {
       addAudit(state, "LAYOUT_EDIT", `Layout ${layoutDragState.target} ${layoutDragState.mode}`);
       layoutDragState = null;
       saveState({ syncModel: true });
@@ -5489,6 +5513,7 @@ function bindTrendModal() {
 }
 
 function moveShift(direction) {
+  if (!state) return;
   const date = parseDateLocal(state.selectedDate || todayISO());
 
   if (direction < 0) {
@@ -5506,6 +5531,7 @@ function moveShift(direction) {
 }
 
 function moveLineTrendPeriod(direction) {
+  if (!state) return;
   const date = parseDateLocal(state.selectedDate || todayISO());
   const range = LINE_TREND_RANGES.includes(String(state.lineTrendRange || "").toLowerCase()) ? String(state.lineTrendRange).toLowerCase() : "day";
   if (range === "quarter") {
@@ -5527,7 +5553,7 @@ function moveLineTrendPeriod(direction) {
 
 function setShiftToggleUI() {
   document.querySelectorAll(".shift-option[data-shift], .shift-option[data-day-shift]").forEach((btn) => {
-    const active = (btn.dataset.shift || btn.dataset.dayShift) === state.selectedShift;
+    const active = Boolean(state) && (btn.dataset.shift || btn.dataset.dayShift) === state.selectedShift;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
@@ -8359,20 +8385,23 @@ async function bootstrapApp() {
   const shouldRefreshSupervisor = appState.appMode === "supervisor" && Boolean(appState.supervisorSession?.backendToken);
   const shouldRefreshManager =
     !shouldRefreshSupervisor && (appState.appMode === "manager" || appState.activeView === "line") && Boolean(managerBackendSession.backendToken);
-  try {
+  const bindStep = (name, fn) => {
     try {
-      bindTabs();
-      bindRunCrewingPatternModal();
-      bindHome();
-      bindDataSubtabs();
-      bindVisualiserControls();
-      bindTrendModal();
-      bindStageSettingsModal();
-      bindForms();
-      bindDataControls();
-    } catch (bindError) {
-      console.error("Bootstrap UI bind failed:", bindError);
+      fn();
+    } catch (error) {
+      console.error(`Bootstrap step failed: ${name}`, error);
     }
+  };
+  try {
+    bindStep("bindTabs", bindTabs);
+    bindStep("bindRunCrewingPatternModal", bindRunCrewingPatternModal);
+    bindStep("bindHome", bindHome);
+    bindStep("bindDataSubtabs", bindDataSubtabs);
+    bindStep("bindVisualiserControls", bindVisualiserControls);
+    bindStep("bindTrendModal", bindTrendModal);
+    bindStep("bindStageSettingsModal", bindStageSettingsModal);
+    bindStep("bindForms", bindForms);
+    bindStep("bindDataControls", bindDataControls);
     renderAll();
     if (shouldRefreshSupervisor) {
       await refreshHostedState(appState.supervisorSession);
