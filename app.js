@@ -45,6 +45,7 @@ const DOWN_COLUMNS = ["Date", "Assigned Shift", "Downtime Start", "Downtime Fini
 const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
 const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "Utilisation (%)", "Net Run Rate (u/min)", "Bottleneck", "Staffing"];
 const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
+const LINE_TREND_RANGES = ["day", "week", "month", "quarter"];
 const LOG_ASSIGNABLE_SHIFTS = ["Day", "Night"];
 const SUPERVISOR_SHIFT_OPTIONS = ["Day", "Night"];
 const DOWNTIME_REASON_PRESETS = {
@@ -754,6 +755,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     activeDataTab: "dataShift",
     trendGranularity: "daily",
     trendMonth: todayISO().slice(0, 7),
+    lineTrendRange: "day",
     crewsByShift: defaultCrewByShift(stages),
     stageSettings: defaultStageSettings(stages),
     stages,
@@ -2368,6 +2370,8 @@ function bindHome() {
   const goHomeBtn = document.getElementById("goHome");
   const modeManagerBtn = document.getElementById("modeManager");
   const modeSupervisorBtn = document.getElementById("modeSupervisor");
+  const lineModeManagerBtn = document.getElementById("lineModeManager");
+  const lineModeSupervisorBtn = document.getElementById("lineModeSupervisor");
   const sidebarToggleBtn = document.getElementById("sidebarToggle");
   const sidebarBackdrop = document.getElementById("sidebarBackdrop");
   const homeSidebar = document.getElementById("homeSidebar");
@@ -2723,17 +2727,31 @@ function bindHome() {
     renderAll();
   });
 
-  modeManagerBtn.addEventListener("click", () => {
-    appState.appMode = "manager";
+  const switchAppMode = (mode, { goHome = false } = {}) => {
+    appState.appMode = mode;
+    if (goHome) appState.activeView = "home";
     saveState();
     renderAll();
+  };
+
+  modeManagerBtn.addEventListener("click", () => {
+    switchAppMode("manager");
   });
 
   modeSupervisorBtn.addEventListener("click", () => {
-    appState.appMode = "supervisor";
-    saveState();
-    renderAll();
+    switchAppMode("supervisor");
   });
+
+  if (lineModeManagerBtn) {
+    lineModeManagerBtn.addEventListener("click", () => {
+      switchAppMode("manager");
+    });
+  }
+  if (lineModeSupervisorBtn) {
+    lineModeSupervisorBtn.addEventListener("click", () => {
+      switchAppMode("supervisor", { goHome: true });
+    });
+  }
 
   if (sidebarToggleBtn && sidebarBackdrop && homeSidebar) {
     sidebarToggleBtn.addEventListener("click", () => {
@@ -3304,6 +3322,11 @@ function bindHome() {
     }
 
     const selectedShiftId = selectedSupervisorShiftLogId({ line });
+    const selectedShiftTileNode = selectedShiftId && superShiftOpenList
+      ? superShiftOpenList
+          .querySelector(`[data-super-shift-edit="${selectedShiftId}"]`)
+          ?.closest(".pending-log-item") || null
+      : null;
     let existing = null;
     if (selectedShiftId) {
       existing = (line.shiftRows || []).find((row) => row.id === selectedShiftId) || null;
@@ -3354,6 +3377,12 @@ function bindHome() {
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.shiftRows, savedRow);
+      if (existing?.id && selectedShiftTileNode) {
+        await saveSupervisorShiftBreakEdits(existing.id, selectedShiftTileNode, {
+          suppressNoChangesAlert: true,
+          skipPersist: true
+        });
+      }
       if (complete) {
         superShiftLogIdInput.value = "";
         if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
@@ -3537,7 +3566,11 @@ function bindHome() {
     }
   };
 
-  const saveSupervisorShiftBreakEdits = async (shiftId, tileNode) => {
+  const saveSupervisorShiftBreakEdits = async (
+    shiftId,
+    tileNode,
+    { suppressNoChangesAlert = false, skipPersist = false } = {}
+  ) => {
     const session = appState.supervisorSession;
     if (!session) return;
     const lineId = selectedSupervisorLineId();
@@ -3682,7 +3715,7 @@ function bindHome() {
 
       if (warnings.size) alert(Array.from(warnings).join("\n"));
       if (!changed) {
-        if (!warnings.size) alert("No break changes to save.");
+        if (!warnings.size && !suppressNoChangesAlert) alert("No break changes to save.");
         return;
       }
       addAudit(
@@ -3690,8 +3723,10 @@ function bindHome() {
         "SUPERVISOR_BREAK_EDIT",
         `${supervisorActorName(session)} updated break logs (${shiftLog.shift || "Shift"} ${shiftLog.date || todayISO()})`
       );
-      saveState();
-      renderAll();
+      if (!skipPersist) {
+        saveState();
+        renderAll();
+      }
     } catch (error) {
       alert(`Could not save break edits.\n${error?.message || "Please try again."}`);
     }
@@ -3855,8 +3890,13 @@ function bindHome() {
     const lineId = selectedSupervisorLineId();
     const line = appState.lines[lineId];
     if (!line || !session.assignedLineIds.includes(lineId)) return;
-    const row = (line.shiftRows || []).find((item) => item.id === shiftId);
-    if (!row) return;
+    const targetShiftId = String(shiftId || "");
+    const row = (line.shiftRows || []).find((item) => String(item?.id || "") === targetShiftId);
+    if (!row) {
+      renderHome();
+      updateSupervisorProgressButtonLabels();
+      return;
+    }
 
     const openBreak = latestBySubmittedAt((line.breakRows || []).filter((breakRow) => breakRow.shiftLogId === row.id && isOpenBreakRow(breakRow)));
     suppressSupervisorSelectionReset = true;
@@ -4325,6 +4365,10 @@ function bindHome() {
         if (shiftId) {
           if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
           supervisorShiftTileEditId = shiftId;
+          appState.supervisorMainTab = "supervisorData";
+          appState.supervisorTab = "superShift";
+          // Force the tile expansion immediately so Edit behaves deterministically.
+          renderHome();
           updateSupervisorProgressButtonLabels();
           loadSupervisorShiftForEdit(shiftId);
         }
@@ -4334,8 +4378,6 @@ function bindHome() {
       if (breakStartBtn) {
         const shiftId = breakStartBtn.getAttribute("data-super-shift-break-start");
         if (shiftId) {
-          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
-          supervisorShiftTileEditId = shiftId;
           updateSupervisorProgressButtonLabels();
           submitSupervisorBreakStart({ shiftId });
         }
@@ -4346,22 +4388,8 @@ function bindHome() {
         const shiftId = breakEndBtn.getAttribute("data-super-shift-break-end");
         const breakId = breakEndBtn.getAttribute("data-super-shift-break-id") || "";
         if (shiftId) {
-          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
-          supervisorShiftTileEditId = shiftId;
           updateSupervisorProgressButtonLabels();
           submitSupervisorBreakEnd({ shiftId, breakId });
-        }
-        return;
-      }
-      const breakSaveBtn = event.target.closest("[data-super-shift-break-save]");
-      if (breakSaveBtn) {
-        const shiftId = breakSaveBtn.getAttribute("data-super-shift-break-save");
-        const tileNode = breakSaveBtn.closest(".pending-log-item");
-        if (shiftId && tileNode) {
-          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
-          supervisorShiftTileEditId = shiftId;
-          updateSupervisorProgressButtonLabels();
-          saveSupervisorShiftBreakEdits(shiftId, tileNode);
         }
         return;
       }
@@ -4717,6 +4745,9 @@ function bindVisualiserControls() {
   const uploadShapeInput = document.getElementById("uploadFlowShapeInput");
   const prevButtons = [document.getElementById("prevShift"), document.getElementById("dayPrevShift")].filter(Boolean);
   const nextButtons = [document.getElementById("nextShift"), document.getElementById("dayNextShift")].filter(Boolean);
+  const lineTrendPrevBtn = document.getElementById("lineTrendPrevPeriod");
+  const lineTrendNextBtn = document.getElementById("lineTrendNextPeriod");
+  const lineTrendRangeButtons = Array.from(document.querySelectorAll("[data-line-trend-range]"));
   let layoutDragState = null;
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -4772,6 +4803,19 @@ function bindVisualiserControls() {
 
   prevButtons.forEach((btn) => btn.addEventListener("click", () => moveShift(-1)));
   nextButtons.forEach((btn) => btn.addEventListener("click", () => moveShift(1)));
+
+  if (lineTrendPrevBtn) lineTrendPrevBtn.addEventListener("click", () => moveLineTrendPeriod(-1));
+  if (lineTrendNextBtn) lineTrendNextBtn.addEventListener("click", () => moveLineTrendPeriod(1));
+  lineTrendRangeButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const range = String(btn.dataset.lineTrendRange || "").toLowerCase();
+      if (!LINE_TREND_RANGES.includes(range) || range === state.lineTrendRange) return;
+      state.lineTrendRange = range;
+      saveState();
+      renderLineTrends();
+    });
+  });
+
   editBtn.addEventListener("click", () => {
     state.visualEditMode = !state.visualEditMode;
     setLayoutEditButtonUI();
@@ -5113,6 +5157,26 @@ function moveShift(direction) {
   }
   state.selectedDate = formatDateLocal(date);
 
+  document.querySelectorAll("[data-manager-date]").forEach((input) => {
+    input.value = state.selectedDate;
+  });
+  saveState();
+  renderAll();
+}
+
+function moveLineTrendPeriod(direction) {
+  const date = parseDateLocal(state.selectedDate || todayISO());
+  const range = LINE_TREND_RANGES.includes(String(state.lineTrendRange || "").toLowerCase()) ? String(state.lineTrendRange).toLowerCase() : "day";
+  if (range === "quarter") {
+    date.setMonth(date.getMonth() + direction * 3);
+  } else if (range === "month") {
+    date.setMonth(date.getMonth() + direction);
+  } else if (range === "week") {
+    date.setDate(date.getDate() + direction * 7);
+  } else {
+    date.setDate(date.getDate() + direction);
+  }
+  state.selectedDate = formatDateLocal(date);
   document.querySelectorAll("[data-manager-date]").forEach((input) => {
     input.value = state.selectedDate;
   });
@@ -5540,6 +5604,9 @@ function bindDataControls() {
       state.activeDataTab = parsed.activeDataTab || state.activeDataTab;
       state.trendGranularity = parsed.trendGranularity || state.trendGranularity;
       state.trendMonth = parsed.trendMonth || state.trendMonth;
+      state.lineTrendRange = LINE_TREND_RANGES.includes(String(parsed.lineTrendRange || "").toLowerCase())
+        ? String(parsed.lineTrendRange).toLowerCase()
+        : state.lineTrendRange;
       state.crewsByShift = normalizeCrewByShift(parsed);
       state.stageSettings = normalizeStageSettings(parsed);
       state.shiftRows = parsed.shiftRows || [];
@@ -6199,6 +6266,369 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
 
 function renderDayVisualiser() {
   renderDayVisualiserTo("dayVisualiserCanvas", derivedData(), state.selectedDate, state.selectedShift, stageNameById);
+}
+
+function lineTrendRangeKey() {
+  const value = String(state?.lineTrendRange || "").toLowerCase();
+  return LINE_TREND_RANGES.includes(value) ? value : "day";
+}
+
+function formatIsoDateLabel(isoDate, options = { month: "short", day: "numeric" }) {
+  const date = parseDateLocal(isoDate || todayISO());
+  return date.toLocaleDateString(undefined, options);
+}
+
+function startOfIsoWeek(date) {
+  const base = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  const day = (base.getDay() + 6) % 7;
+  base.setDate(base.getDate() - day);
+  return base;
+}
+
+function datesBetweenInclusive(startDate, endDate) {
+  const dates = [];
+  const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
+  const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
+  while (cursor <= end) {
+    dates.push(formatDateLocal(cursor));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return dates;
+}
+
+function buildLineTrendBuckets(anchorIsoDate, range = "day") {
+  const safeRange = LINE_TREND_RANGES.includes(String(range || "").toLowerCase()) ? String(range).toLowerCase() : "day";
+  const anchor = parseDateLocal(anchorIsoDate || todayISO());
+  const buckets = [];
+  const pushBucket = (start, end, label) => {
+    const startIso = formatDateLocal(start);
+    const endIso = formatDateLocal(end);
+    buckets.push({
+      key: `${startIso}__${endIso}`,
+      label,
+      startIso,
+      endIso,
+      dates: datesBetweenInclusive(start, end)
+    });
+  };
+
+  if (safeRange === "day") {
+    for (let offset = 13; offset >= 0; offset -= 1) {
+      const current = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - offset);
+      pushBucket(current, current, formatIsoDateLabel(formatDateLocal(current), { month: "short", day: "numeric" }));
+    }
+    return buckets;
+  }
+
+  if (safeRange === "week") {
+    const anchorWeek = startOfIsoWeek(anchor);
+    for (let offset = 11; offset >= 0; offset -= 1) {
+      const start = new Date(anchorWeek.getFullYear(), anchorWeek.getMonth(), anchorWeek.getDate() - offset * 7);
+      const end = new Date(start.getFullYear(), start.getMonth(), start.getDate() + 6);
+      pushBucket(start, end, `Wk ${formatIsoDateLabel(formatDateLocal(start), { month: "short", day: "numeric" })}`);
+    }
+    return buckets;
+  }
+
+  if (safeRange === "month") {
+    const anchorMonth = new Date(anchor.getFullYear(), anchor.getMonth(), 1);
+    for (let offset = 11; offset >= 0; offset -= 1) {
+      const start = new Date(anchorMonth.getFullYear(), anchorMonth.getMonth() - offset, 1);
+      const end = new Date(start.getFullYear(), start.getMonth() + 1, 0);
+      pushBucket(start, end, start.toLocaleDateString(undefined, { month: "short", year: "2-digit" }));
+    }
+    return buckets;
+  }
+
+  const anchorQuarter = new Date(anchor.getFullYear(), Math.floor(anchor.getMonth() / 3) * 3, 1);
+  for (let offset = 7; offset >= 0; offset -= 1) {
+    const start = new Date(anchorQuarter.getFullYear(), anchorQuarter.getMonth() - offset * 3, 1);
+    const end = new Date(start.getFullYear(), start.getMonth() + 3, 0);
+    const qNum = Math.floor(start.getMonth() / 3) + 1;
+    pushBucket(start, end, `Q${qNum} '${String(start.getFullYear()).slice(-2)}`);
+  }
+  return buckets;
+}
+
+function aggregateLineTrendPoints(line, buckets, shift) {
+  return buckets.map((bucket) => {
+    let units = 0;
+    let downtime = 0;
+    let utilSum = 0;
+    let utilCount = 0;
+    let runRateSum = 0;
+    let runRateCount = 0;
+
+    bucket.dates.forEach((date) => {
+      const daily = computeLineMetrics(line, date, shift);
+      units += Math.max(0, num(daily.units));
+      downtime += Math.max(0, num(daily.totalDowntime));
+      const util = Math.max(0, num(daily.lineUtil));
+      if (Number.isFinite(util)) {
+        utilSum += util;
+        utilCount += 1;
+      }
+      const runRate = Math.max(0, num(daily.netRunRate));
+      if (runRate > 0) {
+        runRateSum += runRate;
+        runRateCount += 1;
+      }
+    });
+
+    return {
+      ...bucket,
+      units,
+      downtime,
+      lineUtil: utilCount > 0 ? utilSum / utilCount : 0,
+      netRunRate: runRateCount > 0 ? runRateSum / runRateCount : 0
+    };
+  });
+}
+
+function lineTrendTopDowntimeReasons(line, buckets, shift, maxItems = 5) {
+  const dateSet = new Set(buckets.flatMap((bucket) => bucket.dates));
+  const totals = new Map();
+  const downRows = derivedDataForLine(line || {}).downtimeRows || [];
+  downRows.forEach((row) => {
+    if (!dateSet.has(row.date)) return;
+    if (!rowMatchesDateShift(row, row.date, shift, { line, startField: "downtimeStart", finishField: "downtimeFinish" })) return;
+    const weightedMins = Math.max(0, num(row.downtimeMins) * timedLogShiftWeight(row, shift));
+    if (weightedMins <= 0) return;
+    const parsed = parseDowntimeReasonParts(row.reason, row.equipment);
+    const category = row.reasonCategory || parsed.reasonCategory || "";
+    const detail = row.reasonDetail || parsed.reasonDetail || "";
+    const detailLabel = detail ? downtimeDetailLabel(line, category, detail) : "";
+    const label = category ? `${category}${detailLabel ? ` > ${detailLabel}` : ""}` : String(row.reason || "").trim() || "Unspecified";
+    totals.set(label, (totals.get(label) || 0) + weightedMins);
+  });
+  return Array.from(totals.entries())
+    .map(([label, minutes]) => ({ label, minutes }))
+    .sort((a, b) => b.minutes - a.minutes)
+    .slice(0, maxItems);
+}
+
+function renderLineTrendUnitsChart(points) {
+  const root = document.getElementById("lineTrendUnitsChart");
+  if (!root) return;
+  if (!points.length) {
+    root.innerHTML = `<div class="empty-chart">No trend data available.</div>`;
+    return;
+  }
+
+  const width = 1280;
+  const height = 430;
+  const pad = { top: 34, right: 110, bottom: 78, left: 76 };
+  const chartW = width - pad.left - pad.right;
+  const chartH = height - pad.top - pad.bottom;
+  const maxUnits = Math.max(1, ...points.map((point) => point.units));
+  const avgUnits = Math.round(points.reduce((sum, point) => sum + point.units, 0) / points.length);
+  const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
+  const x = (index) => pad.left + stepX * index;
+  const yUnits = (value) => pad.top + chartH - (Math.max(0, value) / maxUnits) * chartH;
+
+  const barWidth = Math.max(14, Math.min(36, stepX * 0.58));
+  const bars = points
+    .map((point, index) => {
+      const y = yUnits(point.units);
+      const h = pad.top + chartH - y;
+      return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(1, h)}" rx="3" class="bar-units"><title>${point.label}: ${formatNum(point.units, 0)} units</title></rect>`;
+    })
+    .join("");
+
+  const averageY = yUnits(avgUnits);
+  const avgUnitsLabel = `Avg ${formatNum(avgUnits, 0)} units`;
+  const avgUnitsCalloutWidth = Math.max(128, avgUnitsLabel.length * 8 + 22);
+  const avgUnitsCalloutHeight = 28;
+  const avgUnitsCalloutX = pad.left + chartW - avgUnitsCalloutWidth - 10;
+  const avgUnitsCalloutY = Math.max(
+    pad.top + 6,
+    Math.min(averageY - avgUnitsCalloutHeight / 2, pad.top + chartH - avgUnitsCalloutHeight - 6)
+  );
+
+  const ticks = [0, 0.25, 0.5, 0.75, 1]
+    .map((fraction) => Math.round(maxUnits * fraction))
+    .map((tick) => {
+      const y = yUnits(tick);
+      return `<g><line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/><text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${tick}</text></g>`;
+    })
+    .join("");
+
+  const labelSkip = points.length > 14 ? Math.ceil(points.length / 10) : 1;
+  const labels = points
+    .map((point, index) => {
+      const label = index % labelSkip === 0 || index === points.length - 1 ? point.label : "";
+      return `<text x="${x(index)}" y="${height - 24}" text-anchor="middle" class="axis">${htmlEscape(label)}</text>`;
+    })
+    .join("");
+
+  root.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Line units trend with average line">
+      ${ticks}
+      <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
+      <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
+      ${bars}
+      <line x1="${pad.left}" y1="${averageY}" x2="${pad.left + chartW}" y2="${averageY}" class="line-rate"><title>Average units: ${formatNum(
+        avgUnits,
+        0
+      )}</title></line>
+      <g transform="translate(${avgUnitsCalloutX},${avgUnitsCalloutY})">
+        <rect width="${avgUnitsCalloutWidth}" height="${avgUnitsCalloutHeight}" rx="${avgUnitsCalloutHeight / 2}" class="trend-avg-callout-bg units" />
+        <text x="${avgUnitsCalloutWidth / 2}" y="${avgUnitsCalloutHeight / 2}" text-anchor="middle" dominant-baseline="middle" class="trend-avg-callout-text units">${htmlEscape(
+          avgUnitsLabel
+        )}</text>
+      </g>
+      ${labels}
+      <text x="${pad.left}" y="${20}" class="legend units">Units (bars)</text>
+      <text x="${pad.left + 152}" y="${20}" class="legend rate">Average units (line)</text>
+      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Average ${formatNum(avgUnits, 0)} units</text>
+    </svg>
+  `;
+}
+
+function renderLineTrendUtilDownChart(points) {
+  const root = document.getElementById("lineTrendUtilDownChart");
+  if (!root) return;
+  if (!points.length) {
+    root.innerHTML = `<div class="empty-chart">No trend data available.</div>`;
+    return;
+  }
+
+  const width = 1280;
+  const height = 430;
+  const pad = { top: 34, right: 110, bottom: 78, left: 76 };
+  const chartW = width - pad.left - pad.right;
+  const chartH = height - pad.top - pad.bottom;
+  const maxDown = Math.max(1, ...points.map((point) => point.downtime));
+  const avgDown = Math.round(points.reduce((sum, point) => sum + point.downtime, 0) / points.length);
+  const maxUtil = Math.max(100, ...points.map((point) => point.lineUtil));
+  const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
+  const x = (index) => pad.left + stepX * index;
+  const yDown = (value) => pad.top + chartH - (Math.max(0, value) / maxDown) * chartH;
+  const yUtil = (value) => pad.top + chartH - (Math.max(0, value) / maxUtil) * chartH;
+  const avgDownY = yDown(avgDown);
+  const avgDownLabel = `Avg ${formatNum(avgDown, 0)} min`;
+  const avgDownCalloutWidth = Math.max(120, avgDownLabel.length * 8 + 22);
+  const avgDownCalloutHeight = 28;
+  const avgDownCalloutX = pad.left + chartW - avgDownCalloutWidth - 10;
+  const avgDownCalloutY = Math.max(
+    pad.top + 6,
+    Math.min(avgDownY - avgDownCalloutHeight / 2, pad.top + chartH - avgDownCalloutHeight - 6)
+  );
+
+  const barWidth = Math.max(14, Math.min(34, stepX * 0.54));
+  const bars = points
+    .map((point, index) => {
+      const y = yDown(point.downtime);
+      const h = pad.top + chartH - y;
+      return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(1, h)}" rx="3" class="bar-down"><title>${point.label}: ${formatNum(point.downtime, 1)} min downtime</title></rect>`;
+    })
+    .join("");
+
+  const utilPath = points.map((point, index) => `${index === 0 ? "M" : "L"}${x(index)},${yUtil(point.lineUtil)}`).join(" ");
+  const utilDots = points
+    .map(
+      (point, index) => `<circle cx="${x(index)}" cy="${yUtil(point.lineUtil)}" r="4.4" class="dot-util"><title>${point.label}: ${formatNum(
+        point.lineUtil,
+        1
+      )}% utilisation</title></circle>`
+    )
+    .join("");
+
+  const ticks = [0, 0.25, 0.5, 0.75, 1]
+    .map((fraction) => Math.round(maxUtil * fraction))
+    .map((tick) => {
+      const y = yUtil(tick);
+      return `<g><line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/><text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${tick}%</text></g>`;
+    })
+    .join("");
+
+  const labelSkip = points.length > 14 ? Math.ceil(points.length / 10) : 1;
+  const labels = points
+    .map((point, index) => {
+      const label = index % labelSkip === 0 || index === points.length - 1 ? point.label : "";
+      return `<text x="${x(index)}" y="${height - 24}" text-anchor="middle" class="axis">${htmlEscape(label)}</text>`;
+    })
+    .join("");
+
+  root.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Line utilisation and downtime trend">
+      ${ticks}
+      <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
+      <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
+      ${bars}
+      <path d="${utilPath}" class="line-util" />
+      <line x1="${pad.left}" y1="${avgDownY}" x2="${pad.left + chartW}" y2="${avgDownY}" class="line-down-avg"><title>Average downtime: ${formatNum(
+        avgDown,
+        0
+      )} min</title></line>
+      <g transform="translate(${avgDownCalloutX},${avgDownCalloutY})">
+        <rect width="${avgDownCalloutWidth}" height="${avgDownCalloutHeight}" rx="${avgDownCalloutHeight / 2}" class="trend-avg-callout-bg down" />
+        <text x="${avgDownCalloutWidth / 2}" y="${avgDownCalloutHeight / 2}" text-anchor="middle" dominant-baseline="middle" class="trend-avg-callout-text down">${htmlEscape(
+          avgDownLabel
+        )}</text>
+      </g>
+      ${utilDots}
+      ${labels}
+      <text x="${pad.left}" y="${20}" class="legend util">Utilisation % (line)</text>
+      <text x="${pad.left + 178}" y="${20}" class="legend down">Downtime min (bars)</text>
+      <text x="${pad.left + 364}" y="${20}" class="legend down-avg">Average downtime (line)</text>
+      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Max downtime ${formatNum(maxDown, 1)} min</text>
+    </svg>
+  `;
+}
+
+function renderLineTrendReasons(reasons) {
+  const root = document.getElementById("lineTrendTopReasons");
+  if (!root) return;
+  if (!Array.isArray(reasons) || !reasons.length) {
+    root.innerHTML = `<p class="muted line-trend-empty">No downtime reasons recorded in this time window.</p>`;
+    return;
+  }
+  root.innerHTML = reasons
+    .map(
+      (entry) => `
+        <article class="line-trend-reason-item">
+          <span>${htmlEscape(entry.label)}</span>
+          <strong>${formatNum(entry.minutes, 1)} min</strong>
+        </article>
+      `
+    )
+    .join("");
+}
+
+function renderLineTrends() {
+  const range = lineTrendRangeKey();
+  if (state.lineTrendRange !== range) state.lineTrendRange = range;
+  document.querySelectorAll("[data-line-trend-range]").forEach((btn) => {
+    const active = String(btn.dataset.lineTrendRange || "").toLowerCase() === range;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", String(active));
+  });
+
+  const rangeMeta = document.getElementById("lineTrendRangeMeta");
+  const setText = (id, value) => {
+    const node = document.getElementById(id);
+    if (node) node.textContent = value;
+  };
+
+  const buckets = buildLineTrendBuckets(state.selectedDate || todayISO(), range);
+  const points = aggregateLineTrendPoints(state, buckets, state.selectedShift || "Day");
+  const current = points[points.length - 1] || { units: 0, downtime: 0, lineUtil: 0, netRunRate: 0 };
+  const startIso = points[0]?.startIso || state.selectedDate || todayISO();
+  const endIso = points[points.length - 1]?.endIso || state.selectedDate || todayISO();
+  const rangeLabel = range === "day" ? "Daily" : range === "week" ? "Weekly" : range === "month" ? "Monthly" : "Quarterly";
+  if (rangeMeta) {
+    rangeMeta.textContent = `${rangeLabel} view | ${state.selectedShift} shift | ${formatIsoDateLabel(startIso)} to ${formatIsoDateLabel(endIso)}`;
+  }
+
+  setText("lineTrendKpiUnits", formatNum(current.units, 0));
+  setText("lineTrendKpiDowntime", `${formatNum(current.downtime, 1)} min`);
+  setText("lineTrendKpiUtilisation", `${formatNum(current.lineUtil, 1)}%`);
+  setText("lineTrendKpiRunRate", `${formatNum(current.netRunRate, 2)} u/min`);
+
+  renderLineTrendUnitsChart(points);
+  renderLineTrendUtilDownChart(points);
+  renderLineTrendReasons(lineTrendTopDowntimeReasons(state, buckets, state.selectedShift || "Day"));
 }
 
 function renderSupervisorDayVisualiser(line, selectedDate) {
@@ -6897,6 +7327,8 @@ function renderHome() {
   const supervisorHome = document.getElementById("supervisorHome");
   const modeManagerBtn = document.getElementById("modeManager");
   const modeSupervisorBtn = document.getElementById("modeSupervisor");
+  const lineModeManagerBtn = document.getElementById("lineModeManager");
+  const lineModeSupervisorBtn = document.getElementById("lineModeSupervisor");
   const dashboardDateInput = document.getElementById("dashboardDate");
   const dashboardShiftButtons = Array.from(document.querySelectorAll("[data-dash-shift]"));
   const dashboardTable = document.getElementById("dashboardTable");
@@ -6956,6 +7388,12 @@ function renderHome() {
   supervisorHome.classList.toggle("hidden", !isSupervisor);
   modeManagerBtn.classList.toggle("active", !isSupervisor);
   modeSupervisorBtn.classList.toggle("active", isSupervisor);
+  modeManagerBtn.setAttribute("aria-pressed", String(!isSupervisor));
+  modeSupervisorBtn.setAttribute("aria-pressed", String(isSupervisor));
+  if (lineModeManagerBtn) lineModeManagerBtn.classList.toggle("active", !isSupervisor);
+  if (lineModeSupervisorBtn) lineModeSupervisorBtn.classList.toggle("active", isSupervisor);
+  if (lineModeManagerBtn) lineModeManagerBtn.setAttribute("aria-pressed", String(!isSupervisor));
+  if (lineModeSupervisorBtn) lineModeSupervisorBtn.setAttribute("aria-pressed", String(isSupervisor));
   supervisorMobileModeBtn.classList.toggle("hidden", true);
 
   const cards = document.getElementById("lineCards");
@@ -7149,7 +7587,8 @@ function renderHome() {
       if (shiftLogIdInput) shiftLogIdInput.value = selectedShiftId;
       supervisorShiftTileEditId = selectedShiftId;
     }
-    const activeShiftLog = shiftOpenRows.find((row) => String(row.id || "") === selectedShiftId) || shiftOpenRows[0] || null;
+    const activeShiftId = selectedShiftId;
+    const activeShiftLog = shiftOpenRows.find((row) => String(row.id || "") === activeShiftId) || shiftOpenRows[0] || null;
     const openBreak = pickLatest((activeLine.breakRows || []).filter((row) => row.shiftLogId === activeShiftLog?.id && isBreakOpen(row)));
     if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = openBreak?.id || "";
     if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !activeShiftLog?.id || Boolean(openBreak?.id);
@@ -7160,7 +7599,7 @@ function renderHome() {
           <div class="pending-log-list">
             ${shiftOpenRows
               .map((row) => {
-                const isSelected = Boolean(supervisorShiftTileEditId && supervisorShiftTileEditId === row.id);
+                const isSelected = Boolean(supervisorShiftTileEditId) && String(supervisorShiftTileEditId) === String(row.id || "");
                 const selectedClass = isSelected ? " active" : "";
                 const rowBreakRows = breakRowsForShift(activeLine, row.id);
                 const rowOpenBreak = pickLatest(rowBreakRows.filter((breakRow) => isBreakOpen(breakRow)));
@@ -7204,9 +7643,6 @@ function renderHome() {
                                 <input class="pending-break-editor-input" data-break-field="start" value="" placeholder="Start HH:MM" />
                                 <input class="pending-break-editor-input" data-break-field="finish" value="" placeholder="Finish HH:MM" />
                               </div>
-                            </div>
-                            <div class="pending-break-editor-actions">
-                              <button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-save="${row.id}">Save Breaks</button>
                             </div>
                           </div>
                         `
@@ -7489,6 +7925,7 @@ function renderAll() {
   renderAuditTrail();
   renderVisualiser();
   renderDayVisualiser();
+  renderLineTrends();
 }
 
 function setActiveDataSubtab() {

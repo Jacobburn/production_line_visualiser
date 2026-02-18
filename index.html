@@ -9,10 +9,11 @@
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
     <script>
-      window.PRODUCTION_LINE_API_BASE =
-        window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
-          ? "http://localhost:4000"
-          : "https://production-line-api-staging.onrender.com";
+      (function applyApiBase() {
+        const stored = String(window.localStorage.getItem("production-line-api-base") || "").trim().replace(/\/+$/, "");
+        const isLocalhost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+        window.PRODUCTION_LINE_API_BASE = stored || (isLocalhost ? "http://localhost:4000" : "https://production-line-api-staging.onrender.com");
+      })();
     </script>
   </head>
   <body>
@@ -394,19 +395,44 @@
     </div>
 
     <div id="lineWorkspace" class="app-shell hidden">
-      <header class="topbar">
-        <button id="goHome" class="ghost-btn home-btn" type="button" aria-label="Home">Home</button>
-        <div>
+      <header class="dashboard-topbar manager-workspace-topbar">
+        <div class="home-title-block">
+          <div class="home-brand-row">
+            <img
+              class="cordina-logo"
+              src="assets/cordina-logo.png"
+              alt="The Cordina Group logo"
+              loading="lazy"
+              decoding="async"
+            />
+          </div>
           <h1 id="appTitle">Kebab Packing Line</h1>
           <p>Shift-based production visualiser</p>
         </div>
+        <div class="topbar-right manager-workspace-actions">
+          <div id="lineWorkspaceUserChip" class="user-chip">
+            <span class="avatar-dot">M</span>
+            <div>
+              <strong>Manager</strong>
+              <span>production@plant.local</span>
+            </div>
+          </div>
+          <div class="shift-toggle" role="group" aria-label="Line workspace app mode">
+            <button id="lineModeManager" type="button" class="shift-option">Manager App</button>
+            <button id="lineModeSupervisor" type="button" class="shift-option">Supervisor App</button>
+          </div>
+          <button id="goHome" class="ghost-btn home-btn" type="button" aria-label="Home">Home</button>
+        </div>
+      </header>
+      <div class="manager-workspace-top-controls">
         <div class="tabs" role="tablist" aria-label="Primary tabs">
           <button class="tab-btn active" data-tab="visualiser" role="tab" aria-selected="true">Line Visualiser</button>
           <button class="tab-btn" data-tab="dayVisualiser" role="tab" aria-selected="false">Day Visualiser</button>
+          <button class="tab-btn" data-tab="lineTrends" role="tab" aria-selected="false">Line Trends</button>
           <button class="tab-btn" data-tab="data" role="tab" aria-selected="false">Data Input</button>
           <button class="tab-btn" data-tab="settings" role="tab" aria-selected="false">Line Settings</button>
         </div>
-      </header>
+      </div>
 
       <main>
         <section id="visualiser" class="tab-panel active" role="tabpanel">
@@ -496,6 +522,72 @@
             <h2>Day Visualiser</h2>
             <p class="muted">Horizontal timeline with swimlanes for shift, breaks, production and downtime.</p>
             <div id="dayVisualiserCanvas" class="day-viz-canvas"></div>
+          </section>
+        </section>
+
+        <section id="lineTrends" class="tab-panel" role="tabpanel">
+          <div class="control-row">
+            <button id="lineTrendPrevPeriod" class="ghost-btn" type="button">Previous Period</button>
+            <label>
+              Date
+              <input id="lineTrendSelectedDate" type="date" data-manager-date="true" />
+            </label>
+            <label>
+              Shift
+              <div id="lineTrendShiftToggle" class="shift-toggle" role="group" aria-label="Line trends shift selector">
+                <button type="button" class="shift-option" data-day-shift="Day">Day</button>
+                <button type="button" class="shift-option" data-day-shift="Night">Night</button>
+                <button type="button" class="shift-option" data-day-shift="Full Day">Full Day</button>
+              </div>
+            </label>
+            <button id="lineTrendNextPeriod" class="ghost-btn" type="button">Next Period</button>
+          </div>
+
+          <section class="panel line-trend-shell">
+            <div class="line-trend-toolbar">
+              <div class="line-trend-range" role="group" aria-label="Line trend range">
+                <button type="button" class="ghost-btn" data-line-trend-range="day">Day</button>
+                <button type="button" class="ghost-btn" data-line-trend-range="week">Week</button>
+                <button type="button" class="ghost-btn" data-line-trend-range="month">Month</button>
+                <button type="button" class="ghost-btn" data-line-trend-range="quarter">Quarter</button>
+              </div>
+              <p id="lineTrendRangeMeta" class="muted"></p>
+            </div>
+
+            <div class="line-trend-kpis">
+              <article>
+                <h3>Units (Current)</h3>
+                <p id="lineTrendKpiUnits">0</p>
+              </article>
+              <article>
+                <h3>Downtime (Current)</h3>
+                <p id="lineTrendKpiDowntime">0 min</p>
+              </article>
+              <article>
+                <h3>Utilisation (Current)</h3>
+                <p id="lineTrendKpiUtilisation">0%</p>
+              </article>
+              <article>
+                <h3>Net Run Rate (Current)</h3>
+                <p id="lineTrendKpiRunRate">0 u/min</p>
+              </article>
+            </div>
+
+            <div class="line-trend-grid">
+              <section class="line-trend-panel">
+                <h3>Units By Period</h3>
+                <div id="lineTrendUnitsChart" class="trend-chart line-trend-chart"></div>
+              </section>
+              <section class="line-trend-panel">
+                <h3>Utilisation and Downtime</h3>
+                <div id="lineTrendUtilDownChart" class="trend-chart line-trend-chart"></div>
+              </section>
+            </div>
+
+            <section class="line-trend-panel">
+              <h3>Top Downtime Reasons In Window</h3>
+              <div id="lineTrendTopReasons" class="line-trend-reasons"></div>
+            </section>
           </section>
         </section>
 

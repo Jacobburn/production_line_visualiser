@@ -5,7 +5,9 @@
 2. Set env vars:
    - `NODE_ENV=production`
    - `API_PORT=4000`
-   - `DATABASE_URL=<staging postgres url>`
+   - `SUPABASE_DB_URL=<supabase postgres url>`
+   - `DB_SSL=true`
+   - `DB_SSL_REJECT_UNAUTHORIZED=false`
    - `JWT_SECRET=<strong secret>`
    - `JWT_EXPIRES_IN=12h`
    - `FRONTEND_ORIGIN=<staging frontend url>`

@@ -3,14 +3,23 @@
 ## 1) Prerequisites
 - Node.js 20+
 - npm 10+
-- Docker Desktop (recommended for local Postgres)
+- Docker Desktop (optional, for local Postgres)
+- Supabase project (recommended for staging/production)
 
-## 2) Start local infrastructure
+## 2) Choose database mode
+
+### Option A: Local Postgres (docker)
 From the project root:
 
 ```bash
 docker compose up -d postgres
 ```
+
+### Option B: Supabase Postgres
+1. Create a Supabase project.
+2. In Supabase, open Project Settings -> Database.
+3. Copy a Postgres connection string (direct or session pooler).
+4. Use that value as `SUPABASE_DB_URL` in `backend/.env`.
 
 ## 3) Configure backend env
 Copy env template:
@@ -19,7 +28,12 @@ Copy env template:
 cp backend/.env.example backend/.env
 ```
 
-Default local DB is already set to `postgresql://postgres:postgres@localhost:5432/production_line`.
+For local docker Postgres, `DATABASE_URL` already points to:
+`postgresql://postgres:postgres@localhost:5432/production_line`.
+
+For Supabase, set:
+- `SUPABASE_DB_URL=<your supabase postgres connection string>`
+- `DB_SSL=true`
 
 ## 4) Install backend dependencies
 
