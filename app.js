@@ -72,7 +72,8 @@ let hostedRefreshErrorShown = false;
 let managerBackendSession = {
   backendToken: "",
   backendLineMap: {},
-  backendStageMap: {}
+  backendStageMap: {},
+  role: "manager"
 };
 restoreRouteFromHash();
 state = appState.lines[appState.activeLineId];
@@ -1318,16 +1319,18 @@ function persistManagerBackendSession() {
   // No browser persistence for hosted data/session state.
 }
 
+function clearManagerBackendSession() {
+  managerBackendSession.backendToken = "";
+  managerBackendSession.backendLineMap = {};
+  managerBackendSession.backendStageMap = {};
+  managerBackendSession.role = "manager";
+}
+
 async function ensureManagerBackendSession() {
   managerBackendSession.role = "manager";
-  if (managerBackendSession.backendToken) return managerBackendSession;
-  const loginPayload = await apiRequest("/api/auth/login", {
-    method: "POST",
-    body: { username: "manager", password: "manager123" }
-  });
-  if (!loginPayload?.token) throw new Error("Manager API login failed");
-  managerBackendSession.backendToken = loginPayload.token;
-  persistManagerBackendSession();
+  if (!managerBackendSession.backendToken) {
+    throw new Error("Manager login required.");
+  }
   return managerBackendSession;
 }
 
@@ -2378,6 +2381,10 @@ function bindHome() {
   const dashboardDate = document.getElementById("dashboardDate");
   const dashboardShiftButtons = Array.from(document.querySelectorAll("[data-dash-shift]"));
   const exportDashboardCsvBtn = document.getElementById("exportDashboardCsv");
+  const managerLoginForm = document.getElementById("managerLoginForm");
+  const managerUserInput = document.getElementById("managerUser");
+  const managerPassInput = document.getElementById("managerPass");
+  const managerTestLoginBtn = document.getElementById("managerTestLoginBtn");
   const supervisorLoginForm = document.getElementById("supervisorLoginForm");
   const supervisorUserInput = document.getElementById("supervisorUser");
   const supervisorPassInput = document.getElementById("supervisorPass");
@@ -2798,6 +2805,51 @@ function bindHome() {
     downloadTextFile(`line-dashboard-${appState.dashboardDate || todayISO()}-${appState.dashboardShift || "Day"}.csv`, toCsv(csvRows, DASHBOARD_COLUMNS), "text/csv;charset=utf-8");
   });
 
+  if (managerTestLoginBtn && managerUserInput && managerPassInput) {
+    managerTestLoginBtn.addEventListener("click", () => {
+      managerUserInput.value = "manager";
+      managerPassInput.value = "manager123";
+      if (typeof managerLoginForm.requestSubmit === "function") {
+        managerLoginForm.requestSubmit();
+      } else {
+        managerLoginForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+      }
+    });
+  }
+
+  managerLoginForm.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const username = String(managerUserInput.value || "").trim().toLowerCase();
+    const password = String(managerPassInput.value || "");
+    try {
+      const loginPayload = await apiRequest("/api/auth/login", {
+        method: "POST",
+        body: { username, password }
+      });
+      if (loginPayload?.user?.role !== "manager" || !loginPayload?.token) {
+        alert("Invalid manager credentials.");
+        return;
+      }
+      managerBackendSession.backendToken = loginPayload.token;
+      managerBackendSession.backendLineMap = {};
+      managerBackendSession.backendStageMap = {};
+      managerBackendSession.role = "manager";
+      persistManagerBackendSession();
+      appState.appMode = "manager";
+      appState.activeView = "home";
+      saveState();
+      await refreshHostedState(managerBackendSession);
+      renderAll();
+    } catch (error) {
+      const message = String(error?.message || "");
+      if (message.toLowerCase().includes("invalid")) {
+        alert("Invalid manager credentials.");
+      } else {
+        alert(`Could not connect to login service.\n${message || "Please try again."}`);
+      }
+    }
+  });
+
   if (supervisorTestLoginBtn && supervisorUserInput && supervisorPassInput) {
     supervisorTestLoginBtn.addEventListener("click", () => {
       supervisorUserInput.value = "supervisor";
@@ -2846,7 +2898,12 @@ function bindHome() {
   });
 
   supervisorLogoutBtn.addEventListener("click", () => {
-    appState.supervisorSession = null;
+    if (appState.appMode === "supervisor") {
+      appState.supervisorSession = null;
+    } else {
+      clearManagerBackendSession();
+      appState.activeView = "home";
+    }
     saveState();
     renderAll();
   });
@@ -7329,6 +7386,8 @@ function renderHome() {
   const modeSupervisorBtn = document.getElementById("modeSupervisor");
   const lineModeManagerBtn = document.getElementById("lineModeManager");
   const lineModeSupervisorBtn = document.getElementById("lineModeSupervisor");
+  const managerLoginSection = document.getElementById("managerLoginSection");
+  const managerAppSection = document.getElementById("managerAppSection");
   const dashboardDateInput = document.getElementById("dashboardDate");
   const dashboardShiftButtons = Array.from(document.querySelectorAll("[data-dash-shift]"));
   const dashboardTable = document.getElementById("dashboardTable");
@@ -7360,17 +7419,20 @@ function renderHome() {
   const session = normalizeSupervisorSession(appState.supervisorSession, appState.supervisors, appState.lines);
   appState.supervisorSession = session;
   const isSupervisor = appState.appMode === "supervisor";
+  const managerSessionActive = Boolean(managerBackendSession.backendToken);
   const activeSupervisor = session?.username ? supervisorByUsername(session.username) : null;
 
   if (homeTitle) {
     homeTitle.textContent = "Production Line Dashboard";
   }
   if (headerLogoutBtn) {
-    headerLogoutBtn.classList.toggle("hidden", !(isSupervisor && session));
+    const showLogout = isSupervisor ? Boolean(session) : managerSessionActive;
+    headerLogoutBtn.classList.toggle("hidden", !showLogout);
+    headerLogoutBtn.textContent = "Logout";
   }
   if (homeUserChip) {
     const showSupervisorTile = isSupervisor && Boolean(session);
-    const showManagerTile = !isSupervisor;
+    const showManagerTile = !isSupervisor && managerSessionActive;
     homeUserChip.classList.toggle("hidden", !(showManagerTile || showSupervisorTile));
     if (showSupervisorTile) {
       const supervisorLabel = String(activeSupervisor?.name || "Supervisor").trim() || "Supervisor";
@@ -7386,6 +7448,8 @@ function renderHome() {
 
   managerHome.classList.toggle("hidden", isSupervisor);
   supervisorHome.classList.toggle("hidden", !isSupervisor);
+  if (managerLoginSection) managerLoginSection.classList.toggle("hidden", isSupervisor || managerSessionActive);
+  if (managerAppSection) managerAppSection.classList.toggle("hidden", isSupervisor || !managerSessionActive);
   modeManagerBtn.classList.toggle("active", !isSupervisor);
   modeSupervisorBtn.classList.toggle("active", isSupervisor);
   modeManagerBtn.setAttribute("aria-pressed", String(!isSupervisor));
@@ -7395,6 +7459,12 @@ function renderHome() {
   if (lineModeManagerBtn) lineModeManagerBtn.setAttribute("aria-pressed", String(!isSupervisor));
   if (lineModeSupervisorBtn) lineModeSupervisorBtn.setAttribute("aria-pressed", String(isSupervisor));
   supervisorMobileModeBtn.classList.toggle("hidden", true);
+
+  if (!isSupervisor && !managerSessionActive) {
+    if (homeSidebar) homeSidebar.classList.remove("open");
+    if (sidebarBackdrop) sidebarBackdrop.classList.add("hidden");
+    return;
+  }
 
   const cards = document.getElementById("lineCards");
   const lineList = Object.values(appState.lines || {});
@@ -7868,6 +7938,11 @@ function renderHome() {
 }
 
 function renderAll() {
+  const managerSessionActive = Boolean(managerBackendSession.backendToken);
+  if (appState.activeView === "line" && (appState.appMode !== "manager" || !managerSessionActive)) {
+    appState.activeView = "home";
+  }
+
   if (!state || !appState.lines[appState.activeLineId]) {
     const first = Object.keys(appState.lines)[0];
     if (first) {
@@ -7963,7 +8038,7 @@ bindDataControls();
 renderAll();
 if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToken) {
   refreshHostedState(appState.supervisorSession);
-} else if (appState.appMode === "manager" || appState.activeView === "line") {
+} else if ((appState.appMode === "manager" || appState.activeView === "line") && managerBackendSession.backendToken) {
   refreshHostedState();
 }
 hideStartupLoading();

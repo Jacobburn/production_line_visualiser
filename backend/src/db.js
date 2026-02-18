@@ -22,7 +22,7 @@ function shouldRejectUnauthorized() {
   const raw = String(process.env.DB_SSL_REJECT_UNAUTHORIZED || '').trim().toLowerCase();
   if (raw === 'true') return true;
   if (raw === 'false') return false;
-  return false;
+  return true;
 }
 
 export const pool = new Pool({

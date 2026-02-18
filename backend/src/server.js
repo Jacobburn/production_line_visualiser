@@ -271,6 +271,17 @@ async function hasLineShiftAccess(user, lineId, shift) {
   return result.rowCount > 0;
 }
 
+async function isLineStage(lineId, stageId) {
+  const result = await dbQuery(
+    `SELECT 1
+     FROM line_stages
+     WHERE id = $1 AND line_id = $2
+     LIMIT 1`,
+    [stageId, lineId]
+  );
+  return result.rowCount > 0;
+}
+
 async function writeAudit({ lineId = null, actorUserId = null, actorName = null, actorRole = null, action, details = '' }) {
   await dbQuery(
     `INSERT INTO audit_events(line_id, actor_user_id, actor_name, actor_role, action, details)
@@ -313,7 +324,7 @@ app.get('/api/me', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
-  const baseFields = `
+  const managerBaseFields = `
     l.id,
     l.name,
     l.secret_key AS "secretKey",
@@ -325,10 +336,34 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
       SELECT COUNT(*)::INT FROM shift_logs sl WHERE sl.line_id = l.id
     ) AS "shiftCount"
   `;
+  const supervisorBaseFields = `
+    l.id,
+    l.name,
+    l.secret_key AS "secretKey",
+    l.created_at AS "createdAt",
+    (
+      SELECT COUNT(*)::INT FROM line_stages s WHERE s.line_id = l.id
+    ) AS "stageCount",
+    (
+      SELECT COUNT(*)::INT
+      FROM shift_logs sl
+      WHERE sl.line_id = l.id
+        AND EXISTS (
+          SELECT 1
+          FROM supervisor_line_shift_assignments a_count
+          WHERE a_count.supervisor_user_id = $1
+            AND a_count.line_id = sl.line_id
+            AND (
+              a_count.shift = sl.shift
+              OR (sl.shift = 'Full Day' AND a_count.shift IN ('Day', 'Night'))
+            )
+        )
+    ) AS "shiftCount"
+  `;
 
   const query = req.user.role === 'manager'
-    ? `SELECT ${baseFields} FROM production_lines l WHERE l.is_active = TRUE ORDER BY l.created_at DESC`
-    : `SELECT ${baseFields}
+    ? `SELECT ${managerBaseFields} FROM production_lines l WHERE l.is_active = TRUE ORDER BY l.created_at DESC`
+    : `SELECT ${supervisorBaseFields}
        FROM production_lines l
        INNER JOIN (
          SELECT DISTINCT line_id
@@ -367,7 +402,19 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
            SELECT COUNT(*)::INT FROM line_stages s WHERE s.line_id = l.id
          ) AS "stageCount",
          (
-           SELECT COUNT(*)::INT FROM shift_logs sl WHERE sl.line_id = l.id
+           SELECT COUNT(*)::INT
+           FROM shift_logs sl
+           WHERE sl.line_id = l.id
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a_count
+               WHERE a_count.supervisor_user_id = $1
+                 AND a_count.line_id = sl.line_id
+                 AND (
+                   a_count.shift = sl.shift
+                   OR (sl.shift = 'Full Day' AND a_count.shift IN ('Day', 'Night'))
+                 )
+             )
          ) AS "shiftCount"
        FROM production_lines l
        INNER JOIN (
@@ -378,7 +425,8 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
        WHERE l.is_active = TRUE
        ORDER BY l.created_at DESC`;
 
-  const linesResult = await dbQuery(linesQuery, req.user.role === 'manager' ? [] : [req.user.id]);
+  const isManager = req.user.role === 'manager';
+  const linesResult = await dbQuery(linesQuery, isManager ? [] : [req.user.id]);
   const lineRows = linesResult.rows;
   const lineIds = lineRows.map((line) => line.id);
   if (!lineIds.length) {
@@ -391,6 +439,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     return res.json(payload);
   }
 
+  const snapshotScopedParams = isManager ? [lineIds] : [req.user.id, lineIds];
   const [stagesResult, guidesResult, shiftLogsResult, breakLogsResult, runLogsResult, downtimeLogsResult] = await Promise.all([
     dbQuery(
       `SELECT
@@ -420,76 +469,180 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       [lineIds]
     ),
     dbQuery(
-      `SELECT
-         line_id AS "lineId",
-         shift_logs.id,
-         date::TEXT AS date,
-         shift,
-         crew_on_shift AS "crewOnShift",
-         to_char(start_time, 'HH24:MI') AS "startTime",
-         to_char(finish_time, 'HH24:MI') AS "finishTime",
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM shift_logs
-       LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
-       WHERE line_id = ANY($1::UUID[])
-       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
-      [lineIds]
+      isManager
+        ? `SELECT
+             line_id AS "lineId",
+             shift_logs.id,
+             date::TEXT AS date,
+             shift,
+             crew_on_shift AS "crewOnShift",
+             to_char(start_time, 'HH24:MI') AS "startTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_logs
+           LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
+           WHERE line_id = ANY($1::UUID[])
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             line_id AS "lineId",
+             shift_logs.id,
+             date::TEXT AS date,
+             shift,
+             crew_on_shift AS "crewOnShift",
+             to_char(start_time, 'HH24:MI') AS "startTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_logs
+           LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
+           WHERE line_id = ANY($2::UUID[])
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = shift_logs.line_id
+                 AND (
+                   a.shift = shift_logs.shift
+                   OR (shift_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      snapshotScopedParams
     ),
     dbQuery(
-      `SELECT
-         line_id AS "lineId",
-         shift_break_logs.id,
-         shift_log_id AS "shiftLogId",
-         date::TEXT AS date,
-         shift,
-         to_char(break_start, 'HH24:MI') AS "breakStart",
-         COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM shift_break_logs
-       LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
-       WHERE line_id = ANY($1::UUID[])
-       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
-      [lineIds]
+      isManager
+        ? `SELECT
+             line_id AS "lineId",
+             shift_break_logs.id,
+             shift_log_id AS "shiftLogId",
+             date::TEXT AS date,
+             shift,
+             to_char(break_start, 'HH24:MI') AS "breakStart",
+             COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_break_logs
+           LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
+           WHERE line_id = ANY($1::UUID[])
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             line_id AS "lineId",
+             shift_break_logs.id,
+             shift_log_id AS "shiftLogId",
+             date::TEXT AS date,
+             shift,
+             to_char(break_start, 'HH24:MI') AS "breakStart",
+             COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_break_logs
+           LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
+           WHERE line_id = ANY($2::UUID[])
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = shift_break_logs.line_id
+                 AND (
+                   a.shift = shift_break_logs.shift
+                   OR (shift_break_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      snapshotScopedParams
     ),
     dbQuery(
-      `SELECT
-         line_id AS "lineId",
-         run_logs.id,
-         date::TEXT AS date,
-         shift,
-         product,
-         COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
-         to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-         to_char(finish_time, 'HH24:MI') AS "finishTime",
-         units_produced AS "unitsProduced",
-         COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM run_logs
-       LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-       WHERE line_id = ANY($1::UUID[])
-       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
-      [lineIds]
+      isManager
+        ? `SELECT
+             line_id AS "lineId",
+             run_logs.id,
+             date::TEXT AS date,
+             shift,
+             product,
+             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             units_produced AS "unitsProduced",
+             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM run_logs
+           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
+           WHERE line_id = ANY($1::UUID[])
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             line_id AS "lineId",
+             run_logs.id,
+             date::TEXT AS date,
+             shift,
+             product,
+             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             units_produced AS "unitsProduced",
+             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM run_logs
+           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
+           WHERE line_id = ANY($2::UUID[])
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = run_logs.line_id
+                 AND (
+                   a.shift = run_logs.shift
+                   OR (run_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      snapshotScopedParams
     ),
     dbQuery(
-      `SELECT
-         line_id AS "lineId",
-         downtime_logs.id,
-         date::TEXT AS date,
-         shift,
-         to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
-         to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
-         COALESCE(equipment_stage_id::TEXT, '') AS equipment,
-         COALESCE(reason, '') AS reason,
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM downtime_logs
-       LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-       WHERE line_id = ANY($1::UUID[])
-       ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
-      [lineIds]
+      isManager
+        ? `SELECT
+             line_id AS "lineId",
+             downtime_logs.id,
+             date::TEXT AS date,
+             shift,
+             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+             COALESCE(reason, '') AS reason,
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM downtime_logs
+           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
+           WHERE line_id = ANY($1::UUID[])
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             line_id AS "lineId",
+             downtime_logs.id,
+             date::TEXT AS date,
+             shift,
+             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+             COALESCE(reason, '') AS reason,
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM downtime_logs
+           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
+           WHERE line_id = ANY($2::UUID[])
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = downtime_logs.line_id
+                 AND (
+                   a.shift = downtime_logs.shift
+                   OR (downtime_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      snapshotScopedParams
     )
   ]);
 
@@ -861,74 +1014,176 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
 
+  const isManager = req.user.role === 'manager';
+  const lineLogsParams = isManager ? [lineId] : [req.user.id, lineId];
   const [shiftRows, breakRows, runRows, downtimeRows] = await Promise.all([
     dbQuery(
-      `SELECT
-         shift_logs.id,
-         date::TEXT AS date,
-         shift,
-         crew_on_shift AS "crewOnShift",
-         to_char(start_time, 'HH24:MI') AS "startTime",
-         to_char(finish_time, 'HH24:MI') AS "finishTime",
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM shift_logs
-       LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
-       WHERE line_id = $1
-       ORDER BY date ASC, shift ASC, submitted_at ASC`,
-      [lineId]
+      isManager
+        ? `SELECT
+             shift_logs.id,
+             date::TEXT AS date,
+             shift,
+             crew_on_shift AS "crewOnShift",
+             to_char(start_time, 'HH24:MI') AS "startTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_logs
+           LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
+           WHERE line_id = $1
+           ORDER BY date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             shift_logs.id,
+             date::TEXT AS date,
+             shift,
+             crew_on_shift AS "crewOnShift",
+             to_char(start_time, 'HH24:MI') AS "startTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_logs
+           LEFT JOIN users u ON u.id = shift_logs.submitted_by_user_id
+           WHERE line_id = $2
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = shift_logs.line_id
+                 AND (
+                   a.shift = shift_logs.shift
+                   OR (shift_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      lineLogsParams
     ),
     dbQuery(
-      `SELECT
-         shift_break_logs.id,
-         shift_log_id AS "shiftLogId",
-         date::TEXT AS date,
-         shift,
-         to_char(break_start, 'HH24:MI') AS "breakStart",
-         COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM shift_break_logs
-       LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
-       WHERE line_id = $1
-       ORDER BY date ASC, shift ASC, submitted_at ASC`,
-      [lineId]
+      isManager
+        ? `SELECT
+             shift_break_logs.id,
+             shift_log_id AS "shiftLogId",
+             date::TEXT AS date,
+             shift,
+             to_char(break_start, 'HH24:MI') AS "breakStart",
+             COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_break_logs
+           LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
+           WHERE line_id = $1
+           ORDER BY date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             shift_break_logs.id,
+             shift_log_id AS "shiftLogId",
+             date::TEXT AS date,
+             shift,
+             to_char(break_start, 'HH24:MI') AS "breakStart",
+             COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM shift_break_logs
+           LEFT JOIN users u ON u.id = shift_break_logs.submitted_by_user_id
+           WHERE line_id = $2
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = shift_break_logs.line_id
+                 AND (
+                   a.shift = shift_break_logs.shift
+                   OR (shift_break_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      lineLogsParams
     ),
     dbQuery(
-      `SELECT
-         run_logs.id,
-         date::TEXT AS date,
-         shift,
-         product,
-         COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
-         to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-         to_char(finish_time, 'HH24:MI') AS "finishTime",
-         units_produced AS "unitsProduced",
-         COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM run_logs
-       LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-       WHERE line_id = $1
-       ORDER BY date ASC, shift ASC, submitted_at ASC`,
-      [lineId]
+      isManager
+        ? `SELECT
+             run_logs.id,
+             date::TEXT AS date,
+             shift,
+             product,
+             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             units_produced AS "unitsProduced",
+             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM run_logs
+           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
+           WHERE line_id = $1
+           ORDER BY date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             run_logs.id,
+             date::TEXT AS date,
+             shift,
+             product,
+             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             units_produced AS "unitsProduced",
+             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM run_logs
+           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
+           WHERE line_id = $2
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = run_logs.line_id
+                 AND (
+                   a.shift = run_logs.shift
+                   OR (run_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      lineLogsParams
     ),
     dbQuery(
-      `SELECT
-         downtime_logs.id,
-         date::TEXT AS date,
-         shift,
-         to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
-         to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
-         COALESCE(equipment_stage_id::TEXT, '') AS equipment,
-         COALESCE(reason, '') AS reason,
-         COALESCE(u.name, u.username, '') AS "submittedBy",
-         submitted_at AS "submittedAt"
-       FROM downtime_logs
-       LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-       WHERE line_id = $1
-       ORDER BY date ASC, shift ASC, submitted_at ASC`,
-      [lineId]
+      isManager
+        ? `SELECT
+             downtime_logs.id,
+             date::TEXT AS date,
+             shift,
+             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+             COALESCE(reason, '') AS reason,
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM downtime_logs
+           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
+           WHERE line_id = $1
+           ORDER BY date ASC, shift ASC, submitted_at ASC`
+        : `SELECT
+             downtime_logs.id,
+             date::TEXT AS date,
+             shift,
+             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+             COALESCE(reason, '') AS reason,
+             COALESCE(u.name, u.username, '') AS "submittedBy",
+             submitted_at AS "submittedAt"
+           FROM downtime_logs
+           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
+           WHERE line_id = $2
+             AND EXISTS (
+               SELECT 1
+               FROM supervisor_line_shift_assignments a
+               WHERE a.supervisor_user_id = $1
+                 AND a.line_id = downtime_logs.line_id
+                 AND (
+                   a.shift = downtime_logs.shift
+                   OR (downtime_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                 )
+             )
+           ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      lineLogsParams
     )
   ]);
 
@@ -1311,6 +1566,9 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = downtimeLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log payload' });
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (parsed.data.equipmentStageId && !(await isLineStage(parsed.data.lineId, parsed.data.equipmentStageId))) {
+    return res.status(400).json({ error: 'Equipment stage does not belong to this line' });
+  }
 
   const result = await dbQuery(
     `INSERT INTO downtime_logs(line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id)
@@ -1490,14 +1748,28 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   }
 
   const data = parsed.data;
+  const equipmentStageProvided = Object.prototype.hasOwnProperty.call(data, 'equipmentStageId');
+  const equipmentStageValue = equipmentStageProvided ? String(data.equipmentStageId || '').trim() : '';
+  if (equipmentStageValue && !(await isLineStage(existing.lineId, equipmentStageValue))) {
+    return res.status(400).json({ error: 'Equipment stage does not belong to this line' });
+  }
+  const reasonProvided = Object.prototype.hasOwnProperty.call(data, 'reason');
+  const reasonValue = reasonProvided ? String(data.reason ?? '').trim() : '';
   const result = await dbQuery(
     `UPDATE downtime_logs
      SET
        downtime_start = COALESCE(NULLIF($2, '')::time, downtime_start),
        downtime_finish = COALESCE(NULLIF($3, '')::time, downtime_finish),
-       equipment_stage_id = CASE WHEN $4::text IS NULL THEN equipment_stage_id ELSE NULLIF($4, '')::uuid END,
-       reason = CASE WHEN $5::text IS NULL THEN reason ELSE NULLIF($5, '') END,
-       submitted_by_user_id = $6,
+       equipment_stage_id = CASE
+         WHEN $4::boolean IS FALSE THEN equipment_stage_id
+         WHEN NULLIF($5, '')::uuid IS NULL THEN NULL
+         ELSE NULLIF($5, '')::uuid
+       END,
+       reason = CASE
+         WHEN $6::boolean IS FALSE THEN reason
+         ELSE NULLIF($7, '')
+       END,
+       submitted_by_user_id = $8,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -1514,8 +1786,10 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
       logId,
       data.downtimeStart ?? null,
       data.downtimeFinish ?? null,
-      data.equipmentStageId ?? null,
-      data.reason ?? null,
+      equipmentStageProvided,
+      equipmentStageValue,
+      reasonProvided,
+      reasonValue,
       req.user.id
     ]
   );

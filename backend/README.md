@@ -34,6 +34,10 @@ For local docker Postgres, `DATABASE_URL` already points to:
 For Supabase, set:
 - `SUPABASE_DB_URL=<your supabase postgres connection string>`
 - `DB_SSL=true`
+- `DB_SSL_REJECT_UNAUTHORIZED=true`
+
+Always set a strong JWT secret in `backend/.env`:
+- `JWT_SECRET=<random 32+ character secret>`
 
 ## 4) Install backend dependencies
 

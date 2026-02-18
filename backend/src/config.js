@@ -37,6 +37,17 @@ function inferDatabaseProvider(connectionString) {
   return 'postgres';
 }
 
+function validatedJwtSecret() {
+  const secret = requireEnv('JWT_SECRET').trim();
+  if (secret === 'change-me-in-staging-and-prod' || secret === 'replace-with-a-32-plus-char-random-secret') {
+    throw new Error('JWT_SECRET must be changed from the default placeholder value.');
+  }
+  if (secret.length < 32) {
+    throw new Error('JWT_SECRET must be at least 32 characters long.');
+  }
+  return secret;
+}
+
 const defaultLocalDatabaseUrl = 'postgresql://postgres:postgres@localhost:5432/production_line';
 const databaseUrl = firstNonEmptyEnv(['SUPABASE_DB_URL', 'DATABASE_URL'], defaultLocalDatabaseUrl);
 const rawProvider = String(process.env.DATABASE_PROVIDER || '').trim().toLowerCase();
@@ -50,7 +61,7 @@ export const config = {
   port: Number(process.env.API_PORT || process.env.PORT || 4000),
   databaseProvider,
   databaseUrl,
-  jwtSecret: requireEnv('JWT_SECRET', 'change-me-in-staging-and-prod'),
+  jwtSecret: validatedJwtSecret(),
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '12h',
   frontendOrigin: process.env.FRONTEND_ORIGIN || '*',
   dbPoolMax: parseNumberEnv('DB_POOL_MAX', 10, { min: 1 }),

@@ -57,52 +57,65 @@
             </div>
           </header>
 
-          <div id="managerHome" class="dashboard-grid">
-            <section class="dash-card analytics-card">
-              <h2>Multi-Line Dashboard</h2>
-              <div class="dashboard-toolbar">
-                <div class="dashboard-filter-group">
-                  <label>
-                    Date
-                    <input id="dashboardDate" type="date" />
-                  </label>
-                  <label>
-                    Shift
-                    <div id="dashboardShiftToggle" class="shift-toggle" role="group" aria-label="Dashboard shift selector">
-                      <button type="button" class="shift-option" data-dash-shift="Day">Day</button>
-                      <button type="button" class="shift-option" data-dash-shift="Night">Night</button>
-                      <button type="button" class="shift-option" data-dash-shift="Full Day">Full Day</button>
-                    </div>
-                  </label>
+          <div id="managerHome">
+            <section id="managerLoginSection" class="panel">
+              <h2>Manager Login</h2>
+              <form id="managerLoginForm" class="form-grid">
+                <input id="managerUser" placeholder="Username" required />
+                <input id="managerPass" type="password" placeholder="Password" required />
+                <button id="managerTestLoginBtn" class="ghost-btn" type="button">Test Login</button>
+                <button type="submit">Log In</button>
+              </form>
+              <p class="muted">Demo credentials: manager / manager123</p>
+            </section>
+
+            <div id="managerAppSection" class="dashboard-grid hidden">
+              <section class="dash-card analytics-card">
+                <h2>Multi-Line Dashboard</h2>
+                <div class="dashboard-toolbar">
+                  <div class="dashboard-filter-group">
+                    <label>
+                      Date
+                      <input id="dashboardDate" type="date" />
+                    </label>
+                    <label>
+                      Shift
+                      <div id="dashboardShiftToggle" class="shift-toggle" role="group" aria-label="Dashboard shift selector">
+                        <button type="button" class="shift-option" data-dash-shift="Day">Day</button>
+                        <button type="button" class="shift-option" data-dash-shift="Night">Night</button>
+                        <button type="button" class="shift-option" data-dash-shift="Full Day">Full Day</button>
+                      </div>
+                    </label>
+                  </div>
+                  <button id="exportDashboardCsv" class="ghost-btn" type="button">Export Dashboard CSV</button>
                 </div>
-                <button id="exportDashboardCsv" class="ghost-btn" type="button">Export Dashboard CSV</button>
-              </div>
-              <div class="table-wrap dashboard-table-wrap">
-                <table id="dashboardTable"></table>
-              </div>
-            </section>
+                <div class="table-wrap dashboard-table-wrap">
+                  <table id="dashboardTable"></table>
+                </div>
+              </section>
 
-            <section class="dash-card project-list-card">
-              <div class="dash-card-head">
-                <h2>Production Lines</h2>
-              </div>
-              <div id="lineCards" class="line-cards"></div>
-            </section>
+              <section class="dash-card project-list-card">
+                <div class="dash-card-head">
+                  <h2>Production Lines</h2>
+                </div>
+                <div id="lineCards" class="line-cards"></div>
+              </section>
 
-            <section class="dash-card manage-super-card">
-              <h2>Manage Supervisors</h2>
-              <div class="action-row">
-                <button id="manageSupervisorsBtn" type="button">Manage Supervisors</button>
-                <button id="addSupervisorBtn" class="ghost-btn" type="button">Add Supervisor</button>
-              </div>
-              <p class="muted">Assign lines, update access, and remove supervisor accounts.</p>
-            </section>
+              <section class="dash-card manage-super-card">
+                <h2>Manage Supervisors</h2>
+                <div class="action-row">
+                  <button id="manageSupervisorsBtn" type="button">Manage Supervisors</button>
+                  <button id="addSupervisorBtn" class="ghost-btn" type="button">Add Supervisor</button>
+                </div>
+                <p class="muted">Assign lines, update access, and remove supervisor accounts.</p>
+              </section>
 
-            <section class="dash-card add-line-card">
-              <h2>Line Builder</h2>
-              <button id="openBuilder" type="button">+ Add Line</button>
-              <p class="muted">Use the popup drag-and-drop builder to define stages and layout.</p>
-            </section>
+              <section class="dash-card add-line-card">
+                <h2>Line Builder</h2>
+                <button id="openBuilder" type="button">+ Add Line</button>
+                <p class="muted">Use the popup drag-and-drop builder to define stages and layout.</p>
+              </section>
+            </div>
           </div>
 
           <div id="supervisorHome" class="hidden">
