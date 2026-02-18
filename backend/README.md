@@ -39,6 +39,16 @@ For Supabase, set:
 Always set a strong JWT secret in `backend/.env`:
 - `JWT_SECRET=<random 32+ character secret>`
 
+Optional resilience/timeouts:
+- `DB_CONNECTION_TIMEOUT_MS=10000`
+- `DB_QUERY_TIMEOUT_MS=15000`
+- `DB_STATEMENT_TIMEOUT_MS=20000`
+- `DB_MAX_RETRIES=1` (read-only query retries)
+- `DB_RETRY_DELAY_MS=250`
+- `HTTP_REQUEST_TIMEOUT_MS=30000`
+- `HTTP_HEADERS_TIMEOUT_MS=35000`
+- `HTTP_KEEP_ALIVE_TIMEOUT_MS=5000`
+
 ## 4) Install backend dependencies
 
 ```bash

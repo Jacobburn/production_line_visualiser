@@ -1855,9 +1855,30 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   return res.json({ downtimeLog: result.rows[0] });
 }));
 
+function isTransientDatabaseError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const message = String(error?.message || '').toLowerCase();
+  if (code.startsWith('08')) return true;
+  if (['57P01', '57P02', '57P03', '53300', '53400'].includes(code)) return true;
+  if (['ETIMEDOUT', 'ECONNRESET', 'EPIPE', 'ECONNREFUSED', 'ENOTFOUND', 'EAI_AGAIN'].includes(code)) return true;
+  return message.includes('could not connect')
+    || message.includes('connection terminated unexpectedly')
+    || message.includes('timeout');
+}
+
 app.use((error, _req, res, _next) => {
   console.error(error);
-  res.status(500).json({ error: 'Internal server error' });
+  if (res.headersSent) return;
+  if (isTransientDatabaseError(error)) {
+    return res.status(503).json({ error: 'Database temporarily unavailable. Please retry shortly.' });
+  }
+  if (error?.code === '23503') {
+    return res.status(400).json({ error: 'Invalid related resource reference.' });
+  }
+  if (error?.code === '23505') {
+    return res.status(409).json({ error: 'Duplicate value violates unique constraint.' });
+  }
+  return res.status(500).json({ error: 'Internal server error' });
 });
 
 const server = app.listen(config.port, () => {
@@ -1865,12 +1886,43 @@ const server = app.listen(config.port, () => {
   console.log(`Database provider: ${config.databaseProvider}`);
 });
 
+server.requestTimeout = config.httpRequestTimeoutMs;
+server.keepAliveTimeout = config.httpKeepAliveTimeoutMs;
+server.headersTimeout = Math.max(config.httpHeadersTimeoutMs, config.httpKeepAliveTimeoutMs + 1000);
+server.on('error', (error) => {
+  console.error('[server] HTTP server error:', error);
+});
+
+let shuttingDown = false;
 async function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log('[server] Shutting down gracefully...');
+  const forceExitTimer = setTimeout(() => {
+    console.error('[server] Graceful shutdown timed out; forcing exit.');
+    process.exit(1);
+  }, 10000);
+  forceExitTimer.unref();
+
   server.close(async () => {
-    await pool.end();
-    process.exit(0);
+    try {
+      await pool.end();
+    } catch (error) {
+      console.error('[server] Error while closing DB pool:', error);
+    } finally {
+      clearTimeout(forceExitTimer);
+      process.exit(0);
+    }
   });
 }
+
+process.on('uncaughtException', (error) => {
+  console.error('[process] Uncaught exception:', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] Unhandled rejection:', reason);
+});
 
 process.on('SIGINT', shutdown);
 process.on('SIGTERM', shutdown);

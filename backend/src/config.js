@@ -65,5 +65,13 @@ export const config = {
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '12h',
   frontendOrigin: process.env.FRONTEND_ORIGIN || '*',
   dbPoolMax: parseNumberEnv('DB_POOL_MAX', 10, { min: 1 }),
-  dbIdleTimeoutMs: parseNumberEnv('DB_IDLE_TIMEOUT_MS', 30000, { min: 0 })
+  dbIdleTimeoutMs: parseNumberEnv('DB_IDLE_TIMEOUT_MS', 30000, { min: 0 }),
+  dbConnectionTimeoutMs: parseNumberEnv('DB_CONNECTION_TIMEOUT_MS', 10000, { min: 1000 }),
+  dbQueryTimeoutMs: parseNumberEnv('DB_QUERY_TIMEOUT_MS', 15000, { min: 1000 }),
+  dbStatementTimeoutMs: parseNumberEnv('DB_STATEMENT_TIMEOUT_MS', 20000, { min: 1000 }),
+  dbMaxRetries: parseNumberEnv('DB_MAX_RETRIES', 1, { min: 0 }),
+  dbRetryDelayMs: parseNumberEnv('DB_RETRY_DELAY_MS', 250, { min: 0 }),
+  httpRequestTimeoutMs: parseNumberEnv('HTTP_REQUEST_TIMEOUT_MS', 30000, { min: 1000 }),
+  httpHeadersTimeoutMs: parseNumberEnv('HTTP_HEADERS_TIMEOUT_MS', 35000, { min: 1000 }),
+  httpKeepAliveTimeoutMs: parseNumberEnv('HTTP_KEEP_ALIVE_TIMEOUT_MS', 5000, { min: 1000 })
 };
