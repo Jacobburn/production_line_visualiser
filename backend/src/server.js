@@ -422,7 +422,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT
          line_id AS "lineId",
-         id,
+         shift_logs.id,
          date::TEXT AS date,
          shift,
          crew_on_shift AS "crewOnShift",
@@ -439,7 +439,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT
          line_id AS "lineId",
-         id,
+         shift_break_logs.id,
          shift_log_id AS "shiftLogId",
          date::TEXT AS date,
          shift,
@@ -456,7 +456,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT
          line_id AS "lineId",
-         id,
+         run_logs.id,
          date::TEXT AS date,
          shift,
          product,
@@ -476,7 +476,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT
          line_id AS "lineId",
-         id,
+         downtime_logs.id,
          date::TEXT AS date,
          shift,
          to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
@@ -864,7 +864,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
   const [shiftRows, breakRows, runRows, downtimeRows] = await Promise.all([
     dbQuery(
       `SELECT
-         id,
+         shift_logs.id,
          date::TEXT AS date,
          shift,
          crew_on_shift AS "crewOnShift",
@@ -880,7 +880,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
     ),
     dbQuery(
       `SELECT
-         id,
+         shift_break_logs.id,
          shift_log_id AS "shiftLogId",
          date::TEXT AS date,
          shift,
@@ -896,7 +896,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
     ),
     dbQuery(
       `SELECT
-         id,
+         run_logs.id,
          date::TEXT AS date,
          shift,
          product,
@@ -915,7 +915,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
     ),
     dbQuery(
       `SELECT
-         id,
+         downtime_logs.id,
          date::TEXT AS date,
          shift,
          to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
