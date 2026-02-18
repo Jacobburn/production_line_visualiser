@@ -1,6 +1,7 @@
 const STORAGE_KEY = "kebab-line-data-v2";
 const STORAGE_BACKUP_KEY = "kebab-line-data-v2-backup";
 const AUTH_STORAGE_KEY = "kebab-line-auth-v1";
+const ROUTE_STORAGE_KEY = "kebab-line-route-v1";
 const API_BASE_URL = `${
   window.PRODUCTION_LINE_API_BASE ||
   "http://localhost:4000"
@@ -109,25 +110,112 @@ function clone(value) {
   return JSON.parse(JSON.stringify(value));
 }
 
+function readRouteStorage() {
+  try {
+    const raw = window.localStorage.getItem(ROUTE_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeRouteStorage(value) {
+  try {
+    if (value && typeof value === "object") {
+      window.localStorage.setItem(ROUTE_STORAGE_KEY, JSON.stringify(value));
+    } else {
+      window.localStorage.removeItem(ROUTE_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures (private mode, quota, disabled storage).
+  }
+}
+
+function applyRouteSnapshot(route) {
+  if (!route || typeof route !== "object") return;
+  const mode = route.mode;
+  if (mode === "manager" || mode === "supervisor") appState.appMode = mode;
+  const view = route.view;
+  if (view === "home" || view === "line") appState.activeView = view;
+  const lineId = String(route.lineId || "");
+  if (lineId) appState.activeLineId = lineId;
+
+  if (route.supervisorMainTab === "supervisorDay" || route.supervisorMainTab === "supervisorData") {
+    appState.supervisorMainTab = route.supervisorMainTab;
+  }
+  const supervisorTab = String(route.supervisorTab || "");
+  if (["superShift", "superRun", "superDown", "superVisual"].includes(supervisorTab)) {
+    appState.supervisorTab = supervisorTab;
+  }
+  const supervisorSelectedLineId = String(route.supervisorSelectedLineId || "");
+  if (supervisorSelectedLineId) appState.supervisorSelectedLineId = supervisorSelectedLineId;
+  const supervisorSelectedDate = String(route.supervisorSelectedDate || "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(supervisorSelectedDate)) appState.supervisorSelectedDate = supervisorSelectedDate;
+  const supervisorSelectedShift = String(route.supervisorSelectedShift || "");
+  if (SHIFT_OPTIONS.includes(supervisorSelectedShift)) appState.supervisorSelectedShift = supervisorSelectedShift;
+  const dashboardDate = String(route.dashboardDate || "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(dashboardDate)) appState.dashboardDate = dashboardDate;
+  const dashboardShift = String(route.dashboardShift || "");
+  if (SHIFT_OPTIONS.includes(dashboardShift)) appState.dashboardShift = dashboardShift;
+}
+
+function currentRouteSnapshot() {
+  return {
+    mode: appState.appMode === "supervisor" ? "supervisor" : "manager",
+    view: appState.activeView === "line" ? "line" : "home",
+    lineId: appState.activeView === "line" ? String(appState.activeLineId || "") : "",
+    supervisorMainTab: appState.supervisorMainTab || "supervisorDay",
+    supervisorTab: appState.supervisorTab || "superShift",
+    supervisorSelectedLineId: String(appState.supervisorSelectedLineId || ""),
+    supervisorSelectedDate: appState.supervisorSelectedDate || todayISO(),
+    supervisorSelectedShift: appState.supervisorSelectedShift || "Full Day",
+    dashboardDate: appState.dashboardDate || todayISO(),
+    dashboardShift: appState.dashboardShift || "Day"
+  };
+}
+
 function restoreRouteFromHash() {
   const raw = String(window.location.hash || "").replace(/^#/, "");
-  if (!raw) return;
+  if (!raw) {
+    applyRouteSnapshot(readRouteStorage());
+    return;
+  }
   const params = new URLSearchParams(raw);
-  const mode = params.get("mode");
-  if (mode === "manager" || mode === "supervisor") appState.appMode = mode;
-  const view = params.get("view");
-  if (view === "home" || view === "line") appState.activeView = view;
-  const lineId = params.get("line");
-  if (lineId) appState.activeLineId = lineId;
+  applyRouteSnapshot({
+    mode: params.get("mode"),
+    view: params.get("view"),
+    lineId: params.get("line"),
+    supervisorMainTab: params.get("smt"),
+    supervisorTab: params.get("st"),
+    supervisorSelectedLineId: params.get("sl"),
+    supervisorSelectedDate: params.get("sd"),
+    supervisorSelectedShift: params.get("ss"),
+    dashboardDate: params.get("dd"),
+    dashboardShift: params.get("ds")
+  });
 }
 
 function syncRouteToHash() {
+  const route = currentRouteSnapshot();
   const params = new URLSearchParams();
-  params.set("mode", appState.appMode === "supervisor" ? "supervisor" : "manager");
-  params.set("view", appState.activeView === "line" ? "line" : "home");
-  if (appState.activeView === "line" && appState.activeLineId) params.set("line", appState.activeLineId);
+  params.set("mode", route.mode);
+  params.set("view", route.view);
+  if (route.view === "line" && route.lineId) params.set("line", route.lineId);
+  if (route.mode === "supervisor") {
+    params.set("smt", route.supervisorMainTab);
+    params.set("st", route.supervisorTab);
+    if (route.supervisorSelectedLineId) params.set("sl", route.supervisorSelectedLineId);
+    if (route.supervisorSelectedDate) params.set("sd", route.supervisorSelectedDate);
+    if (route.supervisorSelectedShift) params.set("ss", route.supervisorSelectedShift);
+  } else {
+    if (route.dashboardDate) params.set("dd", route.dashboardDate);
+    if (route.dashboardShift) params.set("ds", route.dashboardShift);
+  }
   const nextHash = `#${params.toString()}`;
   if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
+  writeRouteStorage(route);
 }
 
 function generateSecretKey() {
@@ -1653,9 +1741,7 @@ async function refreshHostedState(preferredSession = null) {
     const message = String(error?.message || "").toLowerCase();
     const authFailure =
       status === 401 &&
-      (message.includes("invalid or expired token") ||
-        message.includes("user inactive or not found") ||
-        message.includes("missing or invalid authorization header"));
+      (message.includes("missing or invalid authorization header") || message.includes("not authenticated"));
     if (authFailure) {
       if (preferredSession === appState.supervisorSession || appState.appMode === "supervisor") {
         appState.supervisorSession = null;
