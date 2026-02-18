@@ -1,5 +1,6 @@
 const STORAGE_KEY = "kebab-line-data-v2";
 const STORAGE_BACKUP_KEY = "kebab-line-data-v2-backup";
+const AUTH_STORAGE_KEY = "kebab-line-auth-v1";
 const API_BASE_URL = `${
   window.PRODUCTION_LINE_API_BASE ||
   "http://localhost:4000"
@@ -75,6 +76,7 @@ let managerBackendSession = {
   backendStageMap: {},
   role: "manager"
 };
+restoreAuthSessionsFromStorage();
 restoreRouteFromHash();
 state = appState.lines[appState.activeLineId];
 
@@ -718,6 +720,98 @@ function loadState() {
   };
 }
 
+function readAuthStorage() {
+  try {
+    const raw = window.localStorage.getItem(AUTH_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAuthStorage(value) {
+  try {
+    if (value && typeof value === "object") {
+      window.localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(value));
+    } else {
+      window.localStorage.removeItem(AUTH_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures (private mode, quota, disabled storage).
+  }
+}
+
+function persistAuthSessions() {
+  const managerToken = String(managerBackendSession?.backendToken || "").trim();
+  const supervisorSession = appState?.supervisorSession;
+  const supervisorToken = String(supervisorSession?.backendToken || "").trim();
+  const supervisorUsername = String(supervisorSession?.username || "").trim().toLowerCase();
+  if (!managerToken && !(supervisorToken && supervisorUsername)) {
+    writeAuthStorage(null);
+    return;
+  }
+  writeAuthStorage({
+    manager: managerToken ? { backendToken: managerToken } : null,
+    supervisor:
+      supervisorToken && supervisorUsername
+        ? {
+            username: supervisorUsername,
+            backendToken: supervisorToken,
+            assignedLineIds: Array.isArray(supervisorSession?.assignedLineIds) ? supervisorSession.assignedLineIds : [],
+            assignedLineShifts:
+              supervisorSession?.assignedLineShifts && typeof supervisorSession.assignedLineShifts === "object"
+                ? supervisorSession.assignedLineShifts
+                : {},
+            backendLineMap:
+              supervisorSession?.backendLineMap && typeof supervisorSession.backendLineMap === "object"
+                ? supervisorSession.backendLineMap
+                : {}
+          }
+        : null
+  });
+}
+
+function restoreAuthSessionsFromStorage() {
+  const stored = readAuthStorage();
+  if (!stored) return;
+  const managerToken = String(stored?.manager?.backendToken || "").trim();
+  if (managerToken) {
+    managerBackendSession.backendToken = managerToken;
+    managerBackendSession.role = "manager";
+  }
+  const supervisorToken = String(stored?.supervisor?.backendToken || "").trim();
+  const supervisorUsername = String(stored?.supervisor?.username || "").trim().toLowerCase();
+  if (!supervisorToken || !supervisorUsername) return;
+  const supervisorSession = normalizeSupervisorSession(
+    {
+      username: supervisorUsername,
+      assignedLineIds: Array.isArray(stored?.supervisor?.assignedLineIds) ? stored.supervisor.assignedLineIds : [],
+      assignedLineShifts:
+        stored?.supervisor?.assignedLineShifts && typeof stored.supervisor.assignedLineShifts === "object"
+          ? stored.supervisor.assignedLineShifts
+          : {},
+      backendToken: supervisorToken,
+      backendLineMap:
+        stored?.supervisor?.backendLineMap && typeof stored.supervisor.backendLineMap === "object"
+          ? stored.supervisor.backendLineMap
+          : {},
+      role: "supervisor"
+    },
+    appState.supervisors,
+    appState.lines
+  );
+  appState.supervisorSession = supervisorSession || {
+    username: supervisorUsername,
+    assignedLineIds: [],
+    assignedLineShifts: {},
+    backendToken: supervisorToken,
+    backendLineMap: {},
+    role: "supervisor"
+  };
+}
+
 function queueLineModelSync(lineId) {
   if (!lineId || !UUID_RE.test(String(lineId))) return;
   if (lineModelSyncTimer) clearTimeout(lineModelSyncTimer);
@@ -739,6 +833,7 @@ function saveState(options = {}) {
     appState.activeLineId = state.id;
     if (options.syncModel) queueLineModelSync(state.id);
   }
+  persistAuthSessions();
   syncRouteToHash();
 }
 
@@ -1316,7 +1411,7 @@ async function ensureBackendLineId(localLineId, session) {
 }
 
 function persistManagerBackendSession() {
-  // No browser persistence for hosted data/session state.
+  persistAuthSessions();
 }
 
 function clearManagerBackendSession() {
@@ -1324,6 +1419,7 @@ function clearManagerBackendSession() {
   managerBackendSession.backendLineMap = {};
   managerBackendSession.backendStageMap = {};
   managerBackendSession.role = "manager";
+  persistAuthSessions();
 }
 
 async function ensureManagerBackendSession() {
@@ -1518,6 +1614,17 @@ async function refreshHostedState(preferredSession = null) {
     return true;
   } catch (error) {
     console.warn("Hosted state refresh failed:", error);
+    const message = String(error?.message || "").toLowerCase();
+    const authFailure = message.includes("invalid or expired token") || message.includes("user inactive or not found");
+    if (authFailure) {
+      if (preferredSession === appState.supervisorSession || appState.appMode === "supervisor") {
+        appState.supervisorSession = null;
+      } else {
+        clearManagerBackendSession();
+      }
+      saveState();
+      renderAll();
+    }
     if (!hostedRefreshErrorShown) {
       hostedRefreshErrorShown = true;
       alert(`Could not refresh data from server.\n${error?.message || "Please try again."}`);
