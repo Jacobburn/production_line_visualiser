@@ -5,6 +5,7 @@ const API_BASE_URL = `${
   window.PRODUCTION_LINE_API_BASE ||
   "http://localhost:4000"
 }`.replace(/\/+$/, "");
+const API_REQUEST_TIMEOUT_MS = 15000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const STAGES = [
@@ -1360,12 +1361,29 @@ async function apiRequest(path, { method = "GET", token = "", body } = {}) {
     const headers = {};
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) headers["Content-Type"] = "application/json";
-    const response = await fetch(`${API_BASE_URL}${path}`, {
-      method,
-      headers,
-      body: body !== undefined ? JSON.stringify(body) : undefined
-    });
-    const text = await response.text();
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+    const timeoutId =
+      controller && typeof window !== "undefined"
+        ? window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+        : null;
+    let response;
+    let text = "";
+    try {
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+        signal: controller ? controller.signal : undefined
+      });
+      text = await response.text();
+    } catch (error) {
+      if (error?.name === "AbortError") {
+        throw new Error(`Request timed out after ${Math.round(API_REQUEST_TIMEOUT_MS / 1000)}s.`);
+      }
+      throw error;
+    } finally {
+      if (timeoutId && typeof window !== "undefined") window.clearTimeout(timeoutId);
+    }
     let payload = null;
     try {
       payload = text ? JSON.parse(text) : null;
@@ -1639,6 +1657,7 @@ async function refreshHostedState(preferredSession = null) {
       saveState();
       renderAll();
     }
+    renderAll();
     if (!hostedRefreshErrorShown) {
       hostedRefreshErrorShown = true;
       alert(`Could not refresh data from server.\n${error?.message || "Please try again."}`);
