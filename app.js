@@ -8122,33 +8122,35 @@ function setActiveDataSubtab() {
   });
 }
 
-const startupLoadingStart = Date.now();
 function hideStartupLoading() {
   const loader = document.getElementById("startupLoading");
   if (!loader || loader.classList.contains("hidden")) return;
-  const elapsed = Date.now() - startupLoadingStart;
-  const remaining = Math.max(0, 3000 - elapsed);
-  window.setTimeout(() => {
-    loader.classList.add("hidden");
-  }, remaining);
+  loader.classList.add("hidden");
 }
 
-bindTabs();
-bindRunCrewingPatternModal();
-bindHome();
-bindDataSubtabs();
-bindVisualiserControls();
-bindTrendModal();
-bindStageSettingsModal();
-bindForms();
-bindDataControls();
-renderAll();
-if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToken) {
-  refreshHostedState(appState.supervisorSession);
-} else if ((appState.appMode === "manager" || appState.activeView === "line") && managerBackendSession.backendToken) {
-  refreshHostedState();
+async function bootstrapApp() {
+  bindTabs();
+  bindRunCrewingPatternModal();
+  bindHome();
+  bindDataSubtabs();
+  bindVisualiserControls();
+  bindTrendModal();
+  bindStageSettingsModal();
+  bindForms();
+  bindDataControls();
+  renderAll();
+  try {
+    if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToken) {
+      await refreshHostedState(appState.supervisorSession);
+    } else if ((appState.appMode === "manager" || appState.activeView === "line") && managerBackendSession.backendToken) {
+      await refreshHostedState();
+    }
+  } finally {
+    hideStartupLoading();
+  }
 }
-hideStartupLoading();
+
+bootstrapApp();
 
 window.addEventListener("hashchange", () => {
   restoreRouteFromHash();
