@@ -6,7 +6,7 @@ const API_BASE_URL = `${
   window.PRODUCTION_LINE_API_BASE ||
   "http://localhost:4000"
 }`.replace(/\/+$/, "");
-const API_REQUEST_TIMEOUT_MS = 15000;
+const API_REQUEST_TIMEOUT_MS = 45000;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const STAGES = [
@@ -177,24 +177,29 @@ function currentRouteSnapshot() {
 }
 
 function restoreRouteFromHash() {
-  const raw = String(window.location.hash || "").replace(/^#/, "");
-  if (!raw) {
+  try {
+    const raw = String(window.location.hash || "").replace(/^#/, "");
+    if (!raw) {
+      applyRouteSnapshot(readRouteStorage());
+      return;
+    }
+    const params = new URLSearchParams(raw);
+    applyRouteSnapshot({
+      mode: params.get("mode"),
+      view: params.get("view"),
+      lineId: params.get("line"),
+      supervisorMainTab: params.get("smt"),
+      supervisorTab: params.get("st"),
+      supervisorSelectedLineId: params.get("sl"),
+      supervisorSelectedDate: params.get("sd"),
+      supervisorSelectedShift: params.get("ss"),
+      dashboardDate: params.get("dd"),
+      dashboardShift: params.get("ds")
+    });
+  } catch (error) {
+    console.warn("Route restore failed, using stored snapshot fallback:", error);
     applyRouteSnapshot(readRouteStorage());
-    return;
   }
-  const params = new URLSearchParams(raw);
-  applyRouteSnapshot({
-    mode: params.get("mode"),
-    view: params.get("view"),
-    lineId: params.get("line"),
-    supervisorMainTab: params.get("smt"),
-    supervisorTab: params.get("st"),
-    supervisorSelectedLineId: params.get("sl"),
-    supervisorSelectedDate: params.get("sd"),
-    supervisorSelectedShift: params.get("ss"),
-    dashboardDate: params.get("dd"),
-    dashboardShift: params.get("ds")
-  });
 }
 
 function syncRouteToHash() {
@@ -1650,7 +1655,20 @@ async function refreshHostedState(preferredSession = null) {
   try {
     const activeSession = preferredSession || (await ensureManagerBackendSession());
     if (!activeSession?.backendToken) throw new Error("Missing backend token.");
-    const snapshot = await apiRequest("/api/state-snapshot", { token: activeSession.backendToken });
+    let snapshot = null;
+    let snapshotError = null;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
+        snapshot = await apiRequest("/api/state-snapshot", { token: activeSession.backendToken });
+        snapshotError = null;
+        break;
+      } catch (error) {
+        snapshotError = error;
+        if (attempt >= 2 || !shouldRetryHostedSnapshot(error)) break;
+        await delayMs(350 * attempt);
+      }
+    }
+    if (snapshotError || !snapshot) throw snapshotError || new Error("Could not load state snapshot.");
     const snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
     const hostedLines = {};
     activeSession.backendLineMap = {};
@@ -1765,6 +1783,23 @@ function stageNameCore(name) {
     .replace(/^\s*\d+\.\s*/, "")
     .trim()
     .toLowerCase();
+}
+
+function shouldRetryHostedSnapshot(error) {
+  const status = Number(error?.status || 0);
+  const message = String(error?.message || "").toLowerCase();
+  if ([408, 429, 500, 502, 503, 504].includes(status)) return true;
+  return (
+    message.includes("timed out") ||
+    message.includes("timeout") ||
+    message.includes("networkerror") ||
+    message.includes("failed to fetch") ||
+    message.includes("database unavailable")
+  );
+}
+
+function delayMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function ensureBackendStageId(localLineId, localStageId, session) {
@@ -8299,6 +8334,9 @@ async function bootstrapApp() {
     } else if ((appState.appMode === "manager" || appState.activeView === "line") && managerBackendSession.backendToken) {
       await refreshHostedState();
     }
+  } catch (error) {
+    console.error("Bootstrap failed:", error);
+    renderAll();
   } finally {
     hideStartupLoading({ force: true });
   }
@@ -8307,8 +8345,14 @@ async function bootstrapApp() {
 bootstrapApp();
 
 window.addEventListener("hashchange", () => {
-  restoreRouteFromHash();
-  state = appState.lines[appState.activeLineId] || appState.lines[Object.keys(appState.lines)[0]] || null;
-  if (state) appState.activeLineId = state.id;
-  renderAll();
+  try {
+    restoreRouteFromHash();
+    state = appState.lines[appState.activeLineId] || appState.lines[Object.keys(appState.lines)[0]] || null;
+    if (state) appState.activeLineId = state.id;
+    renderAll();
+  } catch (error) {
+    console.error("Hash navigation restore failed:", error);
+    appState.activeView = "home";
+    renderAll();
+  }
 });
