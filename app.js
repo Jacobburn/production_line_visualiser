@@ -1669,7 +1669,45 @@ async function refreshHostedState(preferredSession = null) {
       }
     }
     if (snapshotError || !snapshot) throw snapshotError || new Error("Could not load state snapshot.");
-    const snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
+    let snapshotLines = Array.isArray(snapshot?.lines) ? snapshot.lines : [];
+    if (!snapshotLines.length && activeSession.role === "manager") {
+      try {
+        const fallbackLinesPayload = await apiRequest("/api/lines", { token: activeSession.backendToken });
+        const fallbackLines = Array.isArray(fallbackLinesPayload?.lines) ? fallbackLinesPayload.lines : [];
+        if (fallbackLines.length) {
+          const bundles = await Promise.all(
+            fallbackLines
+              .map((line) => line?.id)
+              .filter((lineId) => UUID_RE.test(String(lineId || "")))
+              .map(async (lineId) => {
+                const [detail, logs] = await Promise.all([
+                  apiRequest(`/api/lines/${lineId}`, { token: activeSession.backendToken }),
+                  apiRequest(`/api/lines/${lineId}/logs`, { token: activeSession.backendToken })
+                ]);
+                return {
+                  line: fallbackLines.find((item) => item.id === lineId) || { id: lineId, name: "Production Line" },
+                  stages: Array.isArray(detail?.stages) ? detail.stages : [],
+                  guides: Array.isArray(detail?.guides) ? detail.guides : [],
+                  shiftRows: Array.isArray(logs?.shiftRows) ? logs.shiftRows : [],
+                  breakRows: Array.isArray(logs?.breakRows) ? logs.breakRows : [],
+                  runRows: Array.isArray(logs?.runRows) ? logs.runRows : [],
+                  downtimeRows: Array.isArray(logs?.downtimeRows) ? logs.downtimeRows : []
+                };
+              })
+          );
+          snapshotLines = bundles;
+        }
+      } catch (fallbackError) {
+        console.warn("State snapshot fallback load failed:", fallbackError);
+      }
+      if (!snapshotLines.length) {
+        try {
+          await apiRequest("/api/health");
+        } catch (healthError) {
+          throw new Error("Database unavailable");
+        }
+      }
+    }
     const hostedLines = {};
     activeSession.backendLineMap = {};
     activeSession.backendStageMap = {};
@@ -8318,20 +8356,27 @@ function showStartupLoading(message = "") {
 }
 
 async function bootstrapApp() {
+  const shouldRefreshSupervisor = appState.appMode === "supervisor" && Boolean(appState.supervisorSession?.backendToken);
+  const shouldRefreshManager =
+    !shouldRefreshSupervisor && (appState.appMode === "manager" || appState.activeView === "line") && Boolean(managerBackendSession.backendToken);
   try {
-    bindTabs();
-    bindRunCrewingPatternModal();
-    bindHome();
-    bindDataSubtabs();
-    bindVisualiserControls();
-    bindTrendModal();
-    bindStageSettingsModal();
-    bindForms();
-    bindDataControls();
+    try {
+      bindTabs();
+      bindRunCrewingPatternModal();
+      bindHome();
+      bindDataSubtabs();
+      bindVisualiserControls();
+      bindTrendModal();
+      bindStageSettingsModal();
+      bindForms();
+      bindDataControls();
+    } catch (bindError) {
+      console.error("Bootstrap UI bind failed:", bindError);
+    }
     renderAll();
-    if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToken) {
+    if (shouldRefreshSupervisor) {
       await refreshHostedState(appState.supervisorSession);
-    } else if ((appState.appMode === "manager" || appState.activeView === "line") && managerBackendSession.backendToken) {
+    } else if (shouldRefreshManager) {
       await refreshHostedState();
     }
   } catch (error) {
