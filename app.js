@@ -1509,6 +1509,42 @@ function lineHasMovingFlow(line) {
   return !hasOpenDowntime;
 }
 
+function latestOpenRunLogRow(line) {
+  const openRunRows = (line?.runRows || []).filter((row) => isPendingRunLogRow(row));
+  if (!openRunRows.length) return null;
+  return openRunRows
+    .slice()
+    .sort((a, b) => rowNewestSortValue(b, "productionStartTime") - rowNewestSortValue(a, "productionStartTime"))[0];
+}
+
+function liveRunCrewingPatternForLine(line) {
+  const openRunRow = latestOpenRunLogRow(line);
+  if (!openRunRow) return null;
+  const shift = inferShiftForLog(line, openRunRow.date, openRunRow.productionStartTime, openRunRow.shift || "Day");
+  return normalizeRunCrewingPattern(openRunRow.runCrewingPattern, line, shift, { fallbackToIdeal: false });
+}
+
+function crewMapForLineShift(line, shift, stages = line?.stages || STAGES) {
+  if (isFullDayShift(shift)) {
+    return Object.fromEntries(
+      stages.map((stage) => [
+        stage.id,
+        {
+          crew: Math.max(0, num(line?.crewsByShift?.Day?.[stage.id]?.crew), num(line?.crewsByShift?.Night?.[stage.id]?.crew))
+        }
+      ])
+    );
+  }
+  return line?.crewsByShift?.[shift] || defaultStageCrew(stages);
+}
+
+function stageCrewCountForVisual(line, stage, baseCrewMap, liveRunPattern = null) {
+  const baseCrew = Math.max(0, Math.floor(num(baseCrewMap?.[stage.id]?.crew ?? stage?.crew)));
+  if (!liveRunPattern || !isCrewedStage(stage)) return baseCrew;
+  if (!Object.prototype.hasOwnProperty.call(liveRunPattern, stage.id)) return baseCrew;
+  return Math.max(0, Math.floor(num(liveRunPattern[stage.id])));
+}
+
 function lineTileLiveFeedbackLevel(snapshot) {
   if (!snapshot) return "";
   if (snapshot.hasSeriousDowntime && snapshot.hasOpenShift) return "critical";
@@ -8692,7 +8728,8 @@ function renderVisualiser() {
   const isFlowMoving = lineHasMovingFlow(state);
   map.classList.toggle("flow-running", isFlowMoving);
   map.classList.toggle("flow-static", !isFlowMoving);
-  const activeCrew = state.crewsByShift[state.selectedShift] || defaultStageCrew();
+  const activeCrew = crewMapForLineShift(state, state.selectedShift, stages);
+  const liveRunPattern = liveRunCrewingPatternForLine(state);
   let bottleneckCard = null;
   let bottleneckUtilisation = -1;
   const guides = lineFlowGuidesForMap(stages, state.flowGuides);
@@ -8709,7 +8746,7 @@ function renderVisualiser() {
     const utilisation = totalMaxThroughput > 0 ? (stageRate / totalMaxThroughput) * 100 : 0;
     utilAccumulator += Math.max(0, utilisation);
     utilCount += 1;
-    const stageCrew = num(activeCrew?.[stage.id]?.crew ?? stage.crew);
+    const stageCrew = stageCrewCountForVisual(state, stage, activeCrew, liveRunPattern);
     const compact = stage.w * stage.h < 140;
     const status = statusClass(utilisation);
 
@@ -8748,20 +8785,14 @@ function renderVisualiser() {
       });
     }
 
-    if (stage.kind === "transfer") {
-      card.innerHTML = `
-        <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
+    card.innerHTML = `
+      <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
+      <div class="stage-pill-row">
         ${liveDownPill}
-        ${state.visualEditMode ? `<span class="stage-resize-handle" data-stage-resize="${stage.id}"></span>` : ""}
-      `;
-    } else {
-      card.innerHTML = `
-        ${stageCrew > 0 ? `<span class="crew-badge">${stageCrew}</span>` : ""}
-        <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
-        ${liveDownPill}
-        ${state.visualEditMode ? `<span class="stage-resize-handle" data-stage-resize="${stage.id}"></span>` : ""}
-      `;
-    }
+        <span class="stage-crew-pill">${formatNum(stageCrew, 0)} Crew</span>
+      </div>
+      ${state.visualEditMode ? `<span class="stage-resize-handle" data-stage-resize="${stage.id}"></span>` : ""}
+    `;
     if (liveDown) {
       card.setAttribute(
         "title",
@@ -9253,20 +9284,8 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   let utilCount = 0;
   let bottleneckCard = null;
   let bottleneckUtil = -1;
-  const activeCrew = isFullDayShift(selectedShift)
-    ? Object.fromEntries(
-        stages.map((stage) => [
-          stage.id,
-          {
-            crew: Math.max(
-              0,
-              num(line?.crewsByShift?.Day?.[stage.id]?.crew),
-              num(line?.crewsByShift?.Night?.[stage.id]?.crew)
-            )
-          }
-        ])
-      )
-    : line?.crewsByShift?.[selectedShift] || defaultStageCrew(stages);
+  const activeCrew = crewMapForLineShift(line, selectedShift, stages);
+  const liveRunPattern = liveRunCrewingPatternForLine(line);
 
   const svUnitsText = formatNum(units, 0);
   const svDowntimeText = `${formatNum(totalDowntime, 1)} min`;
@@ -9298,7 +9317,7 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
     const stageRate = netRunRate * uptimeRatio;
     const totalMax = stageTotalMaxThroughputForLine(line, stage.id, selectedShift);
     const utilisation = totalMax > 0 ? (stageRate / totalMax) * 100 : 0;
-    const stageCrew = num(activeCrew?.[stage.id]?.crew ?? stage.crew);
+    const stageCrew = stageCrewCountForVisual(line, stage, activeCrew, liveRunPattern);
     const compact = stage.w * stage.h < 140;
     const status = statusClass(utilisation);
     utilAccumulator += Math.max(0, utilisation);
@@ -9316,18 +9335,13 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
     card.style.height = `${stage.h}%`;
     card.classList.toggle("compact", compact);
 
-    if (stage.kind === "transfer") {
-      card.innerHTML = `
-        <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
+    card.innerHTML = `
+      <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
+      <div class="stage-pill-row">
         ${liveDownPill}
-      `;
-    } else {
-      card.innerHTML = `
-        ${stageCrew > 0 ? `<span class="crew-badge">${stageCrew}</span>` : ""}
-        <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
-        ${liveDownPill}
-      `;
-    }
+        <span class="stage-crew-pill">${formatNum(stageCrew, 0)} Crew</span>
+      </div>
+    `;
     if (liveDown) {
       card.setAttribute(
         "title",

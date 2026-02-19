@@ -1129,13 +1129,13 @@ button {
   background: linear-gradient(180deg, #f2f7fb 0%, #eaf1f7 100%);
 }
 
-.stage-card.group-main .crew-badge {
+.stage-card.group-main .stage-crew-pill {
   border-color: #bca888;
   background: #fff7ea;
   color: #5c4628;
 }
 
-.stage-card.group-prep .crew-badge {
+.stage-card.group-prep .stage-crew-pill {
   border-color: #7a8da2;
   background: #f4f8fc;
   color: #203348;
@@ -1212,13 +1212,13 @@ button {
   color: #7a2a2a;
 }
 
-.stage-card.live-downtime-warning .crew-badge {
+.stage-card.live-downtime-warning .stage-crew-pill {
   border-color: #d7a964;
   background: #fff3de;
   color: #714810;
 }
 
-.stage-card.live-downtime-critical .crew-badge {
+.stage-card.live-downtime-critical .stage-crew-pill {
   border-color: #db9c9c;
   background: #fdeaea;
   color: #852f2f;
@@ -1262,27 +1262,12 @@ button {
   margin-top: 0;
 }
 
-.crew-badge {
-  position: absolute;
-  top: 0.3rem;
-  right: 0.3rem;
-  width: 30px;
-  height: 30px;
-  border-radius: 999px;
-  display: grid;
-  place-items: center;
-  border: 2px solid #778390;
-  background: #f3f6f8;
-  font-weight: 700;
-  font-size: 0.95rem;
-}
-
 .stage-title {
   margin: 0;
   font-weight: 700;
   font-size: clamp(0.8rem, 1.15vw, 2rem);
   line-height: 1.15;
-  max-width: calc(100% - 2.2rem);
+  max-width: 100%;
 }
 
 .stage-meta {
@@ -1340,13 +1325,32 @@ button {
 }
 
 .stage-live-pill {
-  align-self: flex-start;
-  margin-top: auto;
+  align-self: auto;
+  margin-top: 0;
   border-radius: 999px;
   padding: 0.12rem 0.42rem;
   font-size: 0.58rem;
   font-weight: 800;
   letter-spacing: 0.01em;
+}
+
+.stage-pill-row {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.24rem;
+}
+
+.stage-crew-pill {
+  border-radius: 999px;
+  padding: 0.12rem 0.42rem;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.01em;
+  border: 1px solid #8090a1;
+  background: #eef3f8;
+  color: #2e4256;
 }
 
 .stage-live-pill.warning {
@@ -1362,6 +1366,11 @@ button {
 }
 
 .stage-card.compact .stage-live-pill {
+  font-size: 0.52rem;
+  padding: 0.1rem 0.35rem;
+}
+
+.stage-card.compact .stage-crew-pill {
   font-size: 0.52rem;
   padding: 0.1rem 0.35rem;
 }
