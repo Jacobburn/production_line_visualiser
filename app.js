@@ -2,6 +2,7 @@ const STORAGE_KEY = "kebab-line-data-v2";
 const STORAGE_BACKUP_KEY = "kebab-line-data-v2-backup";
 const AUTH_STORAGE_KEY = "kebab-line-auth-v1";
 const ROUTE_STORAGE_KEY = "kebab-line-route-v1";
+const HOME_UI_STORAGE_KEY = "kebab-line-home-ui-v1";
 const API_BASE_URL = `${
   window.PRODUCTION_LINE_API_BASE ||
   "http://localhost:4000"
@@ -50,6 +51,13 @@ const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "
 const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
 const LINE_TREND_RANGES = ["day", "week", "month", "quarter"];
 const LOG_ASSIGNABLE_SHIFTS = ["Day", "Night"];
+const LINE_SHIFT_TRACKER_MIN_WEEKS = 1;
+const LINE_SHIFT_TRACKER_DEFAULT_WEEKS = 20;
+const LINE_SHIFT_TRACKER_MAX_WEEKS = 260;
+const LINE_SHIFT_TRACKER_CELL_SIZE = 8;
+const LINE_SHIFT_TRACKER_CELL_GAP = 2;
+const LINE_TILE_FEEDBACK_REFRESH_MS = 30000;
+const LINE_TILE_DOWNTIME_CRITICAL_MINS = 15;
 const SUPERVISOR_SHIFT_OPTIONS = ["Day", "Night"];
 const DOWNTIME_REASON_PRESETS = {
   "Donor Meat": ["Stock Out", "Late Delivery", "Quality Hold", "Temperature Hold"],
@@ -70,7 +78,10 @@ let managerLogInlineEdit = { lineId: "", type: "", logId: "" };
 let supervisorShiftTileEditId = "";
 let runCrewingPatternModalState = null;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
+appState.lineGroups = normalizeLineGroups(appState.lineGroups);
 let lineModelSyncTimer = null;
+let lineShiftTrackerResizeTimer = null;
+let lineTileFeedbackTimer = null;
 let hostedRefreshErrorShown = false;
 let hostedDatabaseAvailable = true;
 let dbLoadingRequestCount = 0;
@@ -83,6 +94,7 @@ let managerBackendSession = {
 };
 clearLegacyStateStorage();
 restoreAuthSessionsFromStorage();
+restoreHomeUiState();
 restoreRouteFromHash();
 state = appState.lines[appState.activeLineId] || null;
 
@@ -108,6 +120,51 @@ function isManagerLogInlineEditRow(lineId, type, logId) {
 
 function clone(value) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function sanitizeHomeLineGroupExpanded(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
+  const next = {};
+  Object.entries(raw).forEach(([key, value]) => {
+    const safeKey = String(key || "").trim();
+    if (!safeKey) return;
+    next[safeKey] = Boolean(value);
+  });
+  return next;
+}
+
+function readHomeUiStorage() {
+  try {
+    const raw = window.localStorage.getItem(HOME_UI_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeHomeUiStorage(value) {
+  try {
+    if (value && typeof value === "object") {
+      window.localStorage.setItem(HOME_UI_STORAGE_KEY, JSON.stringify(value));
+    } else {
+      window.localStorage.removeItem(HOME_UI_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures (private mode, quota, disabled storage).
+  }
+}
+
+function restoreHomeUiState() {
+  const stored = readHomeUiStorage();
+  appState.homeLineGroupExpanded = sanitizeHomeLineGroupExpanded(stored?.homeLineGroupExpanded);
+}
+
+function persistHomeUiState() {
+  writeHomeUiStorage({
+    homeLineGroupExpanded: sanitizeHomeLineGroupExpanded(appState.homeLineGroupExpanded)
+  });
 }
 
 function readRouteStorage() {
@@ -332,6 +389,105 @@ function normalizeFlowGuides(guides) {
   }));
 }
 
+function stageFlowRect(stage) {
+  const x = num(stage?.x);
+  const y = num(stage?.y);
+  const w = Math.max(1, num(stage?.w));
+  const h = Math.max(1, num(stage?.h));
+  return {
+    x,
+    y,
+    w,
+    h,
+    cx: x + w / 2,
+    cy: y + h / 2
+  };
+}
+
+function pointOnStageEdgeToward(rect, targetX, targetY) {
+  const dx = num(targetX) - rect.cx;
+  const dy = num(targetY) - rect.cy;
+  if (Math.abs(dx) < 0.0001 && Math.abs(dy) < 0.0001) return { x: rect.cx, y: rect.cy };
+  const scaleX = Math.abs(dx) > 0.0001 ? rect.w / (2 * Math.abs(dx)) : Number.POSITIVE_INFINITY;
+  const scaleY = Math.abs(dy) > 0.0001 ? rect.h / (2 * Math.abs(dy)) : Number.POSITIVE_INFINITY;
+  const scale = Math.min(scaleX, scaleY);
+  return {
+    x: rect.cx + dx * scale,
+    y: rect.cy + dy * scale
+  };
+}
+
+function autoFlowGuideBetweenStages(fromStage, toStage, index) {
+  if (!fromStage || !toStage) return null;
+  const fromRect = stageFlowRect(fromStage);
+  const toRect = stageFlowRect(toStage);
+  const start = pointOnStageEdgeToward(fromRect, toRect.cx, toRect.cy);
+  const end = pointOnStageEdgeToward(toRect, fromRect.cx, fromRect.cy);
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+  if (!Number.isFinite(distance) || distance < 0.25) return null;
+  return {
+    id: `auto-flow-${index}`,
+    type: "arrow",
+    x: start.x,
+    y: start.y - 1,
+    w: distance,
+    h: 2,
+    angle: (Math.atan2(dy, dx) * 180) / Math.PI,
+    auto: true
+  };
+}
+
+function autoFlowGuidesFromStages(stages) {
+  if (!Array.isArray(stages) || stages.length < 2) return [];
+  const guides = [];
+  for (let index = 0; index < stages.length - 1; index += 1) {
+    const guide = autoFlowGuideBetweenStages(stages[index], stages[index + 1], index);
+    if (guide) guides.push(guide);
+  }
+  return guides;
+}
+
+function lineFlowGuidesForMap(stages, guides) {
+  const shapeGuides = normalizeFlowGuides(guides).filter((guide) => guide.type === "shape");
+  return [...autoFlowGuidesFromStages(stages), ...shapeGuides];
+}
+
+function appendFlowGuidesToMap(map, guides, { editable = false } = {}) {
+  if (!map || !Array.isArray(guides) || !guides.length) return;
+  guides.forEach((guide) => {
+    const isAutoGuide = Boolean(guide.auto);
+    const node = document.createElement("div");
+    node.className = `flow-guide flow-${guide.type}${isAutoGuide ? " auto-flow" : ""}`;
+    if (!isAutoGuide) node.setAttribute("data-guide-id", guide.id);
+    node.style.left = `${guide.x}%`;
+    node.style.top = `${guide.y}%`;
+    node.style.width = `${guide.w}%`;
+    node.style.height = `${guide.h}%`;
+    node.style.transform = `rotate(${guide.angle || 0}deg)`;
+    if (isAutoGuide) node.style.transformOrigin = "0 50%";
+
+    if (editable && !isAutoGuide) {
+      node.innerHTML = `
+        <span class="flow-guide-delete" data-guide-delete="${guide.id}">x</span>
+        <span class="flow-guide-resize" data-guide-resize="${guide.id}"></span>
+        <span class="flow-guide-rotate" data-guide-rotate="${guide.id}"></span>
+      `;
+    }
+
+    if (guide.type === "shape" && guide.src) {
+      const img = document.createElement("img");
+      img.className = "flow-shape-image";
+      img.src = guide.src;
+      img.alt = "";
+      img.draggable = false;
+      node.append(img);
+    }
+    map.append(node);
+  });
+}
+
 function supervisorModeAssignments(mode, lines) {
   const ids = Object.keys(lines || {});
   if (!ids.length) return [];
@@ -366,6 +522,51 @@ function normalizeSupervisorLineShifts(assignedLineShifts, lines, legacyLineIds 
     });
   }
   return normalized;
+}
+
+function normalizeLineGroups(lineGroups) {
+  const source = Array.isArray(lineGroups) ? lineGroups : [];
+  const seen = new Set();
+  return source
+    .map((group, index) => {
+      const id = String(group?.id || "").trim();
+      const name = String(group?.name || "").trim();
+      if (!id || !name || seen.has(id)) return null;
+      seen.add(id);
+      const orderRaw = Number(group?.displayOrder);
+      const displayOrder = Number.isFinite(orderRaw) ? Math.max(0, Math.floor(orderRaw)) : index;
+      return { id, name, displayOrder };
+    })
+    .filter(Boolean)
+    .sort((a, b) => (a.displayOrder - b.displayOrder) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+function sortLinesByName(lines) {
+  return (Array.isArray(lines) ? lines.slice() : []).sort((a, b) =>
+    String(a?.name || "").localeCompare(String(b?.name || ""), undefined, { sensitivity: "base", numeric: true })
+  );
+}
+
+function homeLineGroupExpandedState() {
+  if (!appState.homeLineGroupExpanded || typeof appState.homeLineGroupExpanded !== "object" || Array.isArray(appState.homeLineGroupExpanded)) {
+    appState.homeLineGroupExpanded = {};
+  }
+  return appState.homeLineGroupExpanded;
+}
+
+function isHomeLineGroupExpanded(groupKey) {
+  const key = String(groupKey || "").trim();
+  if (!key) return true;
+  const stateMap = homeLineGroupExpandedState();
+  if (!Object.prototype.hasOwnProperty.call(stateMap, key)) return true;
+  return Boolean(stateMap[key]);
+}
+
+function setHomeLineGroupExpanded(groupKey, expanded) {
+  const key = String(groupKey || "").trim();
+  if (!key) return;
+  const stateMap = homeLineGroupExpandedState();
+  stateMap[key] = Boolean(expanded);
 }
 
 function defaultSupervisors(lines) {
@@ -812,6 +1013,8 @@ function loadState() {
     supervisorSelectedShift: "Full Day",
     supervisorSession: null,
     supervisors: [],
+    lineGroups: [],
+    homeLineGroupExpanded: {},
     activeLineId: "",
     lines: {}
   };
@@ -940,6 +1143,7 @@ function saveState(options = {}) {
     if (options.syncModel) queueLineModelSync(state.id);
   }
   persistAuthSessions();
+  persistHomeUiState();
   syncRouteToHash();
 }
 
@@ -948,6 +1152,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
   const line = {
     id,
     name,
+    groupId: "",
     secretKey: generateSecretKey(),
     selectedDate: todayISO(),
     selectedShift: "Day",
@@ -981,6 +1186,7 @@ function normalizeLine(id, line) {
     ...line,
     id,
     name: line?.name || base.name,
+    groupId: String(line?.groupId || "").trim(),
     secretKey: line?.secretKey || base.secretKey,
     visualEditMode: Boolean(line?.visualEditMode),
     flowGuides: normalizeFlowGuides(line?.flowGuides),
@@ -1106,6 +1312,360 @@ function parseDateLocal(isoDate) {
 
 function todayISO() {
   return formatDateLocal(new Date());
+}
+
+function shiftPresenceByDate(line) {
+  const presenceByDate = {};
+  (line?.shiftRows || []).forEach((row) => {
+    const isoDate = String(row?.date || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return;
+    const shiftValue = String(row?.shift || "");
+    if (!presenceByDate[isoDate]) presenceByDate[isoDate] = { day: false, night: false };
+    if (shiftValue === "Day") presenceByDate[isoDate].day = true;
+    if (shiftValue === "Night") presenceByDate[isoDate].night = true;
+    if (shiftValue === "Full Day") {
+      presenceByDate[isoDate].day = true;
+      presenceByDate[isoDate].night = true;
+    }
+  });
+  return presenceByDate;
+}
+
+function lineShiftTrackerWeeksForWidth(widthPx) {
+  const safeWidth = Math.max(0, num(widthPx));
+  if (!safeWidth) return LINE_SHIFT_TRACKER_DEFAULT_WEEKS;
+  const perWeekWidth = LINE_SHIFT_TRACKER_CELL_SIZE + LINE_SHIFT_TRACKER_CELL_GAP;
+  const fitWeeks = Math.floor((safeWidth + LINE_SHIFT_TRACKER_CELL_GAP) / perWeekWidth);
+  return Math.max(LINE_SHIFT_TRACKER_MIN_WEEKS, Math.min(LINE_SHIFT_TRACKER_MAX_WEEKS, fitWeeks));
+}
+
+function lineShiftTrackerCells(line, { anchorIsoDate = todayISO(), weeks = LINE_SHIFT_TRACKER_DEFAULT_WEEKS } = {}) {
+  const safeWeeks = Math.max(LINE_SHIFT_TRACKER_MIN_WEEKS, Math.min(LINE_SHIFT_TRACKER_MAX_WEEKS, Math.floor(num(weeks)) || LINE_SHIFT_TRACKER_DEFAULT_WEEKS));
+  const anchorDate = parseDateLocal(anchorIsoDate || todayISO());
+  const anchor = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate());
+  const currentWeekStart = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - anchor.getDay());
+  const start = new Date(currentWeekStart.getFullYear(), currentWeekStart.getMonth(), currentWeekStart.getDate() - (safeWeeks - 1) * 7);
+  const presenceByDate = shiftPresenceByDate(line);
+  const cells = [];
+  for (let index = 0; index < safeWeeks * 7; index += 1) {
+    const date = new Date(start.getFullYear(), start.getMonth(), start.getDate() + index);
+    if (date > anchor) {
+      cells.push({ isPad: true });
+      continue;
+    }
+    const isoDate = formatDateLocal(date);
+    const presence = presenceByDate[isoDate] || { day: false, night: false };
+    let level = "none";
+    if (presence.day && presence.night) level = "both";
+    else if (presence.day || presence.night) level = "one";
+    cells.push({ isoDate, level });
+  }
+  return { cells, weeks: safeWeeks };
+}
+
+function renderLineShiftTrackerGrid(line, { anchorIsoDate = todayISO(), weeks = LINE_SHIFT_TRACKER_DEFAULT_WEEKS } = {}) {
+  const { cells, weeks: safeWeeks } = lineShiftTrackerCells(line, { anchorIsoDate, weeks });
+  const levelClass = { none: "is-none", one: "is-one", both: "is-both" };
+  const levelLabel = {
+    none: "No shifts logged",
+    one: "One shift logged",
+    both: "Day and night shifts logged"
+  };
+  const cellHtml = cells
+    .map((entry) => {
+      if (entry?.isPad) return `<span class="line-shift-cell is-pad" aria-hidden="true"></span>`;
+      const tone = levelClass[entry.level] || "is-none";
+      const label = levelLabel[entry.level] || levelLabel.none;
+      return `<span class="line-shift-cell ${tone}" title="${entry.isoDate}: ${label}" aria-label="${entry.isoDate}: ${label}"></span>`;
+    })
+    .join("");
+  return `
+    <div class="line-shift-grid" role="img" aria-label="Shift log activity over the last ${safeWeeks} weeks">
+      ${cellHtml}
+    </div>
+  `;
+}
+
+function renderLineShiftTracker(line) {
+  const lineId = String(line?.id || "");
+  return `<section class="line-shift-tracker" data-line-shift-tracker="${lineId}" aria-label="Shift log activity"></section>`;
+}
+
+function renderLineShiftTrackersForWidth(anchorIsoDate = todayISO()) {
+  if (typeof document === "undefined") return;
+  const trackerNodes = Array.from(document.querySelectorAll("[data-line-shift-tracker]"));
+  trackerNodes.forEach((tracker) => {
+    const lineId = String(tracker.getAttribute("data-line-shift-tracker") || "");
+    const line = appState.lines?.[lineId];
+    if (!line) {
+      tracker.innerHTML = "";
+      return;
+    }
+    const styles = window.getComputedStyle(tracker);
+    const paddingX = num(parseFloat(styles.paddingLeft)) + num(parseFloat(styles.paddingRight));
+    const contentWidth = Math.max(0, tracker.clientWidth - paddingX);
+    const weeks = lineShiftTrackerWeeksForWidth(contentWidth);
+    tracker.innerHTML = renderLineShiftTrackerGrid(line, { anchorIsoDate, weeks });
+  });
+}
+
+function scheduleLineShiftTrackerResizeRender() {
+  if (lineShiftTrackerResizeTimer) clearTimeout(lineShiftTrackerResizeTimer);
+  lineShiftTrackerResizeTimer = window.setTimeout(() => {
+    lineShiftTrackerResizeTimer = null;
+    renderLineShiftTrackersForWidth();
+  }, 80);
+}
+
+function hhmmFromDate(date) {
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+}
+
+function minutesSinceRowStart(row, timeField, now = new Date()) {
+  if (!row || !strictTimeValid(row?.[timeField])) return 0;
+  const rowDate = String(row?.date || "");
+  if (/^\d{4}-\d{2}-\d{2}$/.test(rowDate)) {
+    const [hours, minutes] = String(row[timeField]).split(":").map(Number);
+    const startedAt = parseDateLocal(rowDate);
+    startedAt.setHours(hours, minutes, 0, 0);
+    const elapsed = (now.getTime() - startedAt.getTime()) / 60000;
+    return Number.isFinite(elapsed) ? Math.max(0, elapsed) : 0;
+  }
+  return Math.max(0, diffMinutes(String(row[timeField]), hhmmFromDate(now)));
+}
+
+function lineDowntimeReasonCategory(row) {
+  const explicitCategory = String(row?.reasonCategory || "").trim();
+  if (explicitCategory) return explicitCategory;
+  const parsed = parseDowntimeReasonParts(row?.reason, row?.equipment);
+  return String(parsed?.reasonCategory || "").trim();
+}
+
+function lineTileLiveSnapshot(line, now = new Date()) {
+  const hasOpenShift = (line?.shiftRows || []).some((row) => isPendingShiftLogRow(row));
+  const hasOpenRun = (line?.runRows || []).some((row) => isPendingRunLogRow(row));
+  const openDowntimeRows = (line?.downtimeRows || []).filter((row) => isPendingDowntimeLogRow(row));
+  const hasOpenDowntime = openDowntimeRows.length > 0;
+  const longestOpenDowntime = openDowntimeRows.reduce(
+    (best, row) => {
+      const minutes = minutesSinceRowStart(row, "downtimeStart", now);
+      if (minutes > best.minutes) {
+        return {
+          minutes,
+          category: lineDowntimeReasonCategory(row) || "Downtime"
+        };
+      }
+      return best;
+    },
+    { minutes: 0, category: "" }
+  );
+  const longestOpenDowntimeMins = longestOpenDowntime.minutes;
+  const hasSeriousDowntime = hasOpenDowntime && longestOpenDowntimeMins >= LINE_TILE_DOWNTIME_CRITICAL_MINS;
+
+  return {
+    hasOpenShift,
+    hasOpenRun,
+    hasOpenDowntime,
+    hasSeriousDowntime,
+    longestOpenDowntimeMins,
+    liveDowntimeCategory: longestOpenDowntime.category || (hasOpenDowntime ? "Downtime" : "")
+  };
+}
+
+function lineHasMovingFlow(line) {
+  if (!line) return false;
+  const hasOpenRun = (line?.runRows || []).some((row) => isPendingRunLogRow(row));
+  if (!hasOpenRun) return false;
+  const hasOpenDowntime = (line?.downtimeRows || []).some((row) => isPendingDowntimeLogRow(row));
+  return !hasOpenDowntime;
+}
+
+function lineTileLiveFeedbackLevel(snapshot) {
+  if (!snapshot) return "";
+  if (snapshot.hasSeriousDowntime && snapshot.hasOpenShift) return "critical";
+  if (snapshot.hasOpenDowntime) return "warning";
+  if (snapshot.hasOpenRun) return "active";
+  return "";
+}
+
+function lineTileCalloutPillsHtml(snapshot) {
+  if (!snapshot) return "";
+  const pills = [];
+  const downCategory = String(snapshot.liveDowntimeCategory || "Downtime").trim();
+  const downLabel = `Down - ${htmlEscape(downCategory || "Downtime")}`;
+  pills.push(
+    snapshot.hasOpenShift
+      ? `<span class="line-callout-pill is-green">On Shift</span>`
+      : `<span class="line-callout-pill is-neutral">Not on Shift</span>`
+  );
+  pills.push(
+    snapshot.hasOpenRun
+      ? `<span class="line-callout-pill is-green">Running Product</span>`
+      : `<span class="line-callout-pill is-neutral">Not Running Product</span>`
+  );
+  if (snapshot.hasSeriousDowntime && snapshot.hasOpenShift) pills.push(`<span class="line-callout-pill is-red">${downLabel} - Urgent</span>`);
+  else if (snapshot.hasOpenDowntime) pills.push(`<span class="line-callout-pill is-yellow">${downLabel}</span>`);
+  return pills.join("");
+}
+
+function renderLineCalloutPills(line, now = new Date()) {
+  return lineTileCalloutPillsHtml(lineTileLiveSnapshot(line, now));
+}
+
+function renderHomeLineCard(line) {
+  const callouts = renderLineCalloutPills(line);
+  const tracker = renderLineShiftTracker(line);
+  return `
+    <article class="line-card" data-line-tile="${line.id}">
+      <h3>${htmlEscape(line.name)}</h3>
+      <div class="line-card-callouts">${callouts}</div>
+      ${tracker}
+      <div class="line-card-actions">
+        <button type="button" data-open-line="${line.id}">Open Line</button>
+        <button type="button" class="ghost-btn" data-edit-line="${line.id}">Edit</button>
+        <button type="button" class="danger" data-delete-line="${line.id}">Delete</button>
+      </div>
+    </article>
+  `;
+}
+
+function renderGroupedHomeLineCards(lineList, lineGroups) {
+  const sortedLines = sortLinesByName(lineList);
+  const groups = normalizeLineGroups(lineGroups);
+  if (!groups.length) {
+    return {
+      grouped: false,
+      html: sortedLines.map((line) => renderHomeLineCard(line)).join("")
+    };
+  }
+
+  const groupsById = new Set(groups.map((group) => group.id));
+  const groupedLines = Object.fromEntries(groups.map((group) => [group.id, []]));
+  const ungrouped = [];
+  sortedLines.forEach((line) => {
+    const groupId = String(line?.groupId || "").trim();
+    if (groupId && groupsById.has(groupId)) groupedLines[groupId].push(line);
+    else ungrouped.push(line);
+  });
+
+  const sections = groups
+    .map((group) => {
+      const lines = groupedLines[group.id] || [];
+      if (!lines.length) return "";
+      const lineCount = lines.length;
+      const runningCount = lines.filter((line) => lineHasMovingFlow(line)).length;
+      const groupKey = `group-${group.id}`;
+      const expanded = isHomeLineGroupExpanded(groupKey);
+      return `
+        <section class="line-group-section" data-line-group-section="${group.id}">
+          <header class="line-group-head">
+            <button type="button" class="line-group-toggle" data-line-group-toggle="${groupKey}" aria-expanded="${expanded ? "true" : "false"}">
+              <span class="line-group-caret" aria-hidden="true"></span>
+              <h3>${htmlEscape(group.name)}</h3>
+            </button>
+            <span class="line-group-count">${runningCount}/${lineCount} lines running</span>
+          </header>
+          <div class="line-group-body"${expanded ? "" : " hidden"}>
+            ${expanded
+              ? `<div class="line-cards">${lines.map((line) => renderHomeLineCard(line)).join("")}</div>`
+              : ""}
+          </div>
+        </section>
+      `;
+    })
+    .filter(Boolean);
+
+  if (ungrouped.length) {
+    const lineCount = ungrouped.length;
+    const runningCount = ungrouped.filter((line) => lineHasMovingFlow(line)).length;
+    const groupKey = "group-ungrouped";
+    const expanded = isHomeLineGroupExpanded(groupKey);
+    sections.push(`
+      <section class="line-group-section line-group-section-ungrouped" data-line-group-section="ungrouped">
+        <header class="line-group-head">
+          <button type="button" class="line-group-toggle" data-line-group-toggle="${groupKey}" aria-expanded="${expanded ? "true" : "false"}">
+            <span class="line-group-caret" aria-hidden="true"></span>
+            <h3>Ungrouped</h3>
+          </button>
+          <span class="line-group-count">${runningCount}/${lineCount} lines running</span>
+        </header>
+        <div class="line-group-body"${expanded ? "" : " hidden"}>
+          ${expanded
+            ? `<div class="line-cards">${ungrouped.map((line) => renderHomeLineCard(line)).join("")}</div>`
+            : ""}
+        </div>
+      </section>
+    `);
+  }
+
+  return {
+    grouped: true,
+    html: sections.join("")
+  };
+}
+
+function stageLiveDowntimePillHtml(liveDown) {
+  if (!liveDown) return "";
+  const mins = Math.max(1, Math.floor(num(liveDown.minutes)));
+  const tone = liveDown.level === "critical" ? "critical" : "warning";
+  return `<span class="stage-live-pill ${tone}">Down - ${mins} mins</span>`;
+}
+
+function liveEquipmentDowntimeByStage(line, stages = [], now = new Date()) {
+  const openEquipmentRows = (line?.downtimeRows || []).filter((row) => {
+    if (!isPendingDowntimeLogRow(row)) return false;
+    const equipment = String(row?.equipment || "").trim();
+    if (!equipment) return false;
+    const reasonCategory = String(row?.reasonCategory || "").trim();
+    if (reasonCategory && reasonCategory !== "Equipment") return false;
+    return true;
+  });
+  const byStageId = {};
+  stages.forEach((stage) => {
+    let maxMinutes = 0;
+    openEquipmentRows.forEach((row) => {
+      if (!matchesStage(stage, row.equipment)) return;
+      maxMinutes = Math.max(maxMinutes, minutesSinceRowStart(row, "downtimeStart", now));
+    });
+    if (maxMinutes <= 0) return;
+    byStageId[stage.id] = {
+      minutes: maxMinutes,
+      level: maxMinutes > LINE_TILE_DOWNTIME_CRITICAL_MINS ? "critical" : "warning"
+    };
+  });
+  return byStageId;
+}
+
+function applyLineTileLiveFeedback(now = new Date()) {
+  if (typeof document === "undefined") return;
+  const tiles = Array.from(document.querySelectorAll("[data-line-tile]"));
+  tiles.forEach((tile) => {
+    const lineId = String(tile.getAttribute("data-line-tile") || "");
+    const line = appState.lines?.[lineId];
+    const snapshot = lineTileLiveSnapshot(line, now);
+    const level = lineTileLiveFeedbackLevel(snapshot);
+    tile.classList.remove("line-card-live-active", "line-card-live-warning", "line-card-live-critical");
+    if (level === "active") tile.classList.add("line-card-live-active");
+    if (level === "warning") tile.classList.add("line-card-live-warning");
+    if (level === "critical") tile.classList.add("line-card-live-critical");
+    const calloutWrap = tile.querySelector(".line-card-callouts");
+    if (calloutWrap) calloutWrap.innerHTML = lineTileCalloutPillsHtml(snapshot);
+  });
+}
+
+function syncLineTileFeedbackLoop({ enabled = false } = {}) {
+  if (!enabled) {
+    if (lineTileFeedbackTimer) {
+      clearInterval(lineTileFeedbackTimer);
+      lineTileFeedbackTimer = null;
+    }
+    return;
+  }
+  if (lineTileFeedbackTimer) return;
+  lineTileFeedbackTimer = window.setInterval(() => {
+    if (appState.activeView === "home") applyLineTileLiveFeedback();
+    if (appState.activeView === "line" && appState.appMode === "manager" && state && !state.visualEditMode) renderVisualiser();
+  }, LINE_TILE_FEEDBACK_REFRESH_MS);
 }
 
 function num(value) {
@@ -1578,6 +2138,7 @@ function toBackendStageType(stage) {
 function makeLineFromBackend(lineSummary, lineDetail, logs) {
   const lineId = lineSummary.id;
   const line = makeDefaultLine(lineId, lineSummary.name || "Production Line");
+  line.groupId = String(lineSummary?.groupId || "").trim();
   line.secretKey = lineSummary.secretKey || line.secretKey;
   const backendStages = Array.isArray(lineDetail?.stages) ? lineDetail.stages : [];
   line.stages = backendStages.length
@@ -1730,6 +2291,15 @@ async function refreshHostedState(preferredSession = null) {
     });
 
     appState.lines = hostedLines;
+    const snapshotLineGroups = normalizeLineGroups(snapshot?.lineGroups);
+    const derivedLineGroups = normalizeLineGroups(
+      snapshotLines.map((bundle, index) => ({
+        id: bundle?.line?.groupId,
+        name: bundle?.line?.groupName,
+        displayOrder: index
+      }))
+    );
+    appState.lineGroups = snapshotLineGroups.length ? snapshotLineGroups : derivedLineGroups;
     const ids = Object.keys(hostedLines);
     appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0] || "";
     state = appState.lines[appState.activeLineId] || null;
@@ -1940,6 +2510,8 @@ async function patchManagerDowntimeLog(logId, payload) {
     method: "PATCH",
     token: session.backendToken,
     body: {
+      date: payload.date,
+      shift: payload.shift,
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
       equipmentStageId: backendEquipmentId || null,
@@ -1947,6 +2519,30 @@ async function patchManagerDowntimeLog(logId, payload) {
     }
   });
   return response?.downtimeLog || null;
+}
+
+async function deleteManagerShiftLog(logId) {
+  const session = await ensureManagerBackendSession();
+  await apiRequest(`/api/logs/shifts/${logId}`, {
+    method: "DELETE",
+    token: session.backendToken
+  });
+}
+
+async function deleteManagerRunLog(logId) {
+  const session = await ensureManagerBackendSession();
+  await apiRequest(`/api/logs/runs/${logId}`, {
+    method: "DELETE",
+    token: session.backendToken
+  });
+}
+
+async function deleteManagerDowntimeLog(logId) {
+  const session = await ensureManagerBackendSession();
+  await apiRequest(`/api/logs/downtime/${logId}`, {
+    method: "DELETE",
+    token: session.backendToken
+  });
 }
 
 async function saveLineModelToBackend(lineId) {
@@ -2706,10 +3302,16 @@ function bindHome() {
   const supervisorDownReasonCategory = document.getElementById("superDownReasonCategory");
   const supervisorDownReasonDetail = document.getElementById("superDownReasonDetail");
   const manageSupervisorsBtn = document.getElementById("manageSupervisorsBtn");
+  const manageLineGroupsBtn = document.getElementById("manageLineGroupsBtn");
   const addSupervisorBtn = document.getElementById("addSupervisorBtn");
   const manageSupervisorsModal = document.getElementById("manageSupervisorsModal");
   const closeManageSupervisorsModalBtn = document.getElementById("closeManageSupervisorsModal");
   const supervisorManagerList = document.getElementById("supervisorManagerList");
+  const manageLineGroupsModal = document.getElementById("manageLineGroupsModal");
+  const closeManageLineGroupsModalBtn = document.getElementById("closeManageLineGroupsModal");
+  const lineGroupManagerList = document.getElementById("lineGroupManagerList");
+  const lineGroupCreateForm = document.getElementById("lineGroupCreateForm");
+  const newLineGroupNameInput = document.getElementById("newLineGroupName");
   const addSupervisorModal = document.getElementById("addSupervisorModal");
   const closeAddSupervisorModalBtn = document.getElementById("closeAddSupervisorModal");
   const addSupervisorForm = document.getElementById("addSupervisorForm");
@@ -2965,6 +3567,113 @@ function bindHome() {
     manageSupervisorsModal.setAttribute("aria-hidden", "true");
   };
 
+  const renderLineGroupManagerList = () => {
+    if (!lineGroupManagerList) return;
+    const lineGroups = normalizeLineGroups(appState.lineGroups);
+    const lines = sortLinesByName(Object.values(appState.lines || {}));
+    const lineCountByGroup = {};
+    lines.forEach((line) => {
+      const groupId = String(line?.groupId || "").trim();
+      if (!groupId) return;
+      lineCountByGroup[groupId] = (lineCountByGroup[groupId] || 0) + 1;
+    });
+
+    const groupRows = lineGroups
+      .map((group) => {
+        const lineCount = lineCountByGroup[group.id] || 0;
+        return `
+          <div class="line-group-row" data-line-group-id="${group.id}">
+            <input
+              data-line-group-name-input="${group.id}"
+              value="${htmlEscape(group.name)}"
+              placeholder="Group name"
+              aria-label="Line group name"
+            />
+            <span class="line-group-count">${lineCount} line${lineCount === 1 ? "" : "s"}</span>
+            <button type="button" class="ghost-btn" data-line-group-rename="${group.id}">Save</button>
+            <button type="button" class="danger" data-line-group-delete="${group.id}">Delete</button>
+          </div>
+        `;
+      })
+      .join("");
+
+    const groupOptions = [
+      `<option value="">Ungrouped</option>`,
+      ...lineGroups.map((group) => `<option value="${group.id}">${htmlEscape(group.name)}</option>`)
+    ].join("");
+    const assignmentRows = lines
+      .map((line, index) => {
+        const selectedGroupId = String(line?.groupId || "").trim();
+        return `
+          <label class="line-group-line-row" for="line-group-assignment-${index}">
+            <span>${htmlEscape(line.name)}</span>
+            <select id="line-group-assignment-${index}" data-line-group-assignment="${line.id}">
+              ${groupOptions}
+            </select>
+          </label>
+        `;
+      })
+      .join("");
+
+    lineGroupManagerList.innerHTML = `
+      <section class="panel line-group-panel">
+        <h3>Groups</h3>
+        <div class="line-group-list">
+          ${groupRows || `<p class="muted">No groups yet. Create one above.</p>`}
+        </div>
+      </section>
+      <section class="panel line-group-panel">
+        <h3>Line Assignments</h3>
+        <div class="line-group-line-list">
+          ${assignmentRows || `<p class="muted">No production lines available.</p>`}
+        </div>
+      </section>
+    `;
+
+    Array.from(lineGroupManagerList.querySelectorAll("[data-line-group-assignment]")).forEach((select) => {
+      const lineId = String(select.getAttribute("data-line-group-assignment") || "");
+      const line = appState.lines?.[lineId];
+      if (!line) return;
+      const selectedGroupId = String(line?.groupId || "").trim();
+      select.value = selectedGroupId;
+    });
+  };
+
+  const openManageLineGroupsModal = async () => {
+    if (!manageLineGroupsModal) return;
+    await refreshHostedState();
+    if (lineGroupCreateForm) lineGroupCreateForm.reset();
+    renderLineGroupManagerList();
+    manageLineGroupsModal.classList.add("open");
+    manageLineGroupsModal.setAttribute("aria-hidden", "false");
+    if (newLineGroupNameInput) newLineGroupNameInput.focus();
+  };
+
+  const closeManageLineGroupsModal = () => {
+    if (!manageLineGroupsModal) return;
+    manageLineGroupsModal.classList.remove("open");
+    manageLineGroupsModal.setAttribute("aria-hidden", "true");
+  };
+
+  const saveLineGroupAssignment = async (lineId, nextGroupId) => {
+    const line = appState.lines?.[lineId];
+    if (!line) return;
+    const validGroupIds = new Set(normalizeLineGroups(appState.lineGroups).map((group) => group.id));
+    const safeGroupId = nextGroupId && validGroupIds.has(nextGroupId) ? nextGroupId : "";
+    const session = await ensureManagerBackendSession();
+    const backendLineId = UUID_RE.test(String(lineId)) ? lineId : await ensureBackendLineId(lineId, session);
+    if (!backendLineId) throw new Error("Line is not synced to server.");
+    await apiRequest(`/api/lines/${backendLineId}`, {
+      method: "PATCH",
+      token: session.backendToken,
+      body: { groupId: safeGroupId || null }
+    });
+    line.groupId = safeGroupId;
+    saveState();
+    renderHome();
+    renderLineGroupManagerList();
+  };
+
   const openAddSupervisorModal = async () => {
     await refreshHostedState();
     addSupervisorForm.reset();
@@ -3058,6 +3767,7 @@ function bindHome() {
       sidebarBackdrop.classList.add("hidden");
     });
   }
+  window.addEventListener("resize", scheduleLineShiftTrackerResizeRender);
 
   dashboardDate.addEventListener("change", () => {
     appState.dashboardDate = dashboardDate.value || todayISO();
@@ -3338,6 +4048,104 @@ function bindHome() {
   manageSupervisorsModal.addEventListener("click", (event) => {
     if (event.target === manageSupervisorsModal) closeManageSupervisorsModal();
   });
+
+  if (manageLineGroupsBtn) {
+    manageLineGroupsBtn.addEventListener("click", openManageLineGroupsModal);
+  }
+  if (closeManageLineGroupsModalBtn) {
+    closeManageLineGroupsModalBtn.addEventListener("click", closeManageLineGroupsModal);
+  }
+  if (manageLineGroupsModal) {
+    manageLineGroupsModal.addEventListener("click", (event) => {
+      if (event.target === manageLineGroupsModal) closeManageLineGroupsModal();
+    });
+  }
+  if (lineGroupCreateForm) {
+    lineGroupCreateForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = String(newLineGroupNameInput?.value || "").trim();
+      if (!name) {
+        alert("Group name is required.");
+        return;
+      }
+      try {
+        const session = await ensureManagerBackendSession();
+        await apiRequest("/api/line-groups", {
+          method: "POST",
+          token: session.backendToken,
+          body: { name }
+        });
+        await refreshHostedState();
+        renderLineGroupManagerList();
+        if (lineGroupCreateForm) lineGroupCreateForm.reset();
+      } catch (error) {
+        console.warn("Line group create failed:", error);
+        alert(`Could not create line group.\n${error?.message || "Please try again."}`);
+      }
+    });
+  }
+  if (lineGroupManagerList) {
+    lineGroupManagerList.addEventListener("change", async (event) => {
+      const assignmentSelect = event.target.closest("[data-line-group-assignment]");
+      if (!assignmentSelect) return;
+      const lineId = String(assignmentSelect.getAttribute("data-line-group-assignment") || "");
+      const groupId = String(assignmentSelect.value || "").trim();
+      try {
+        await saveLineGroupAssignment(lineId, groupId);
+      } catch (error) {
+        console.warn("Line group assignment failed:", error);
+        alert(`Could not update line group assignment.\n${error?.message || "Please try again."}`);
+        renderLineGroupManagerList();
+      }
+    });
+    lineGroupManagerList.addEventListener("click", async (event) => {
+      const renameBtn = event.target.closest("[data-line-group-rename]");
+      if (renameBtn) {
+        const groupId = String(renameBtn.getAttribute("data-line-group-rename") || "");
+        if (!groupId) return;
+        const input = lineGroupManagerList.querySelector(`[data-line-group-name-input="${groupId}"]`);
+        const nextName = String(input?.value || "").trim();
+        if (!nextName) {
+          alert("Group name is required.");
+          return;
+        }
+        try {
+          const session = await ensureManagerBackendSession();
+          await apiRequest(`/api/line-groups/${groupId}`, {
+            method: "PATCH",
+            token: session.backendToken,
+            body: { name: nextName }
+          });
+          await refreshHostedState();
+          renderLineGroupManagerList();
+        } catch (error) {
+          console.warn("Line group rename failed:", error);
+          alert(`Could not rename line group.\n${error?.message || "Please try again."}`);
+        }
+        return;
+      }
+
+      const deleteBtn = event.target.closest("[data-line-group-delete]");
+      if (!deleteBtn) return;
+      const groupId = String(deleteBtn.getAttribute("data-line-group-delete") || "");
+      if (!groupId) return;
+      const group = normalizeLineGroups(appState.lineGroups).find((item) => item.id === groupId);
+      const groupName = group?.name || "this group";
+      if (!window.confirm(`Delete "${groupName}"? Lines in this group will become ungrouped.`)) return;
+      try {
+        const session = await ensureManagerBackendSession();
+        await apiRequest(`/api/line-groups/${groupId}`, {
+          method: "DELETE",
+          token: session.backendToken
+        });
+        await refreshHostedState();
+        renderLineGroupManagerList();
+      } catch (error) {
+        console.warn("Line group delete failed:", error);
+        alert(`Could not delete line group.\n${error?.message || "Please try again."}`);
+      }
+    });
+  }
 
   addSupervisorBtn.addEventListener("click", openAddSupervisorModal);
   closeAddSupervisorModalBtn.addEventListener("click", closeAddSupervisorModal);
@@ -4957,6 +5765,17 @@ function bindHome() {
   });
 
   cards.addEventListener("click", async (event) => {
+    const groupToggleBtn = event.target.closest("[data-line-group-toggle]");
+    if (groupToggleBtn) {
+      const groupKey = String(groupToggleBtn.getAttribute("data-line-group-toggle") || "");
+      if (!groupKey) return;
+      const expanded = isHomeLineGroupExpanded(groupKey);
+      setHomeLineGroupExpanded(groupKey, !expanded);
+      saveState();
+      renderHome();
+      return;
+    }
+
     const editBtn = event.target.closest("[data-edit-line]");
     if (editBtn) {
       const id = editBtn.getAttribute("data-edit-line");
@@ -5099,12 +5918,12 @@ function bindVisualiserControls() {
       editBtn.textContent = active ? "Done Editing" : "Edit Layout";
     }
     if (addLineBtn) {
-      addLineBtn.disabled = !active;
-      addLineBtn.classList.toggle("hidden", !active);
+      addLineBtn.disabled = true;
+      addLineBtn.classList.add("hidden");
     }
     if (addArrowBtn) {
-      addArrowBtn.disabled = !active;
-      addArrowBtn.classList.toggle("hidden", !active);
+      addArrowBtn.disabled = true;
+      addArrowBtn.classList.add("hidden");
     }
     if (uploadShapeBtn) {
       uploadShapeBtn.disabled = !active;
@@ -5769,22 +6588,87 @@ function bindForms() {
     if (type === "shift") {
       const row = (state.shiftRows || []).find((item) => item.id === logId);
       if (!row) return;
+      const date = inlineValue(rowNode, "date");
+      const shift = inlineValue(rowNode, "shift");
       const crewOnShift = Math.max(0, Math.floor(num(inlineValue(rowNode, "crewOnShift"))));
       const startTime = inlineValue(rowNode, "startTime");
       const finishTime = inlineValue(rowNode, "finishTime");
+      const breakCount = Math.max(0, Math.floor(num(inlineValue(rowNode, "breakCount"))));
+      const breakTimeMins = Math.max(0, num(inlineValue(rowNode, "breakTimeMins")));
+      if (!rowIsValidDateShift(date, shift)) {
+        alert("Date/shift are invalid.");
+        return;
+      }
       if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
         alert("Times must be HH:MM (24h).");
         return;
       }
-      const payload = { crewOnShift, startTime, finishTime };
+      const payload = { date, shift, crewOnShift, startTime, finishTime };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
+        const toHHMM = (minutes) => {
+          const minsPerDay = 24 * 60;
+          const normalized = ((Math.floor(num(minutes)) % minsPerDay) + minsPerDay) % minsPerDay;
+          const hh = String(Math.floor(normalized / 60)).padStart(2, "0");
+          const mm = String(normalized % 60).padStart(2, "0");
+          return `${hh}:${mm}`;
+        };
+        const existingBreakRows = Array.isArray(state.breakRows) ? state.breakRows : [];
+        const hasShiftLinkedBreaks = existingBreakRows.some((breakRow) => String(breakRow?.shiftLogId || "") === String(row.id || ""));
+        const belongsToEditedShift = (breakRow) => {
+          const shiftLogId = String(breakRow?.shiftLogId || "");
+          if (shiftLogId) return shiftLogId === String(row.id || "");
+          if (hasShiftLinkedBreaks) return false;
+          return String(breakRow?.date || "") === String(row.date || "") && String(breakRow?.shift || "") === String(row.shift || "");
+        };
+        const retainedBreakRows = existingBreakRows.filter((breakRow) => !belongsToEditedShift(breakRow));
+        const generatedBreakRows = [];
+        if (breakCount > 0) {
+          const shiftDuration = Math.max(1, Math.floor(diffMinutes(startTime, finishTime) || 0));
+          const totalBreak = Math.max(0, Math.round(breakTimeMins));
+          const base = Math.floor(totalBreak / breakCount);
+          let remainder = totalBreak - base * breakCount;
+          const durations = Array.from({ length: breakCount }, () => {
+            const duration = base + (remainder > 0 ? 1 : 0);
+            if (remainder > 0) remainder -= 1;
+            return duration;
+          });
+          const totalAssigned = durations.reduce((sum, duration) => sum + duration, 0);
+          const totalGapSpace = Math.max(0, shiftDuration - totalAssigned);
+          const gapBase = Math.floor(totalGapSpace / (breakCount + 1));
+          let gapRemainder = totalGapSpace - gapBase * (breakCount + 1);
+          const shiftStartMins = parseTimeToMinutes(startTime);
+          let cursor = Number.isFinite(shiftStartMins) ? shiftStartMins : 0;
+          durations.forEach((duration, index) => {
+            const leadingGap = gapBase + (gapRemainder > 0 ? 1 : 0);
+            if (gapRemainder > 0) gapRemainder -= 1;
+            cursor += leadingGap;
+            const breakStart = toHHMM(cursor);
+            const breakFinish = toHHMM(cursor + duration);
+            generatedBreakRows.push({
+              id: makeLocalLogId("break"),
+              lineId: state.id,
+              date,
+              shift,
+              shiftLogId: row.id || "",
+              breakStart,
+              breakFinish,
+              breakMins: duration,
+              submittedBy: "manager",
+              submittedAt: nowIso()
+            });
+            cursor += duration;
+            if (index === durations.length - 1) return;
+          });
+        }
+
         if (canPatchServer) {
           const saved = await patchManagerShiftLog(logId, payload);
           Object.assign(row, payload, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
         } else {
           Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
         }
+        state.breakRows = [...retainedBreakRows, ...generatedBreakRows];
         clearManagerLogInlineEdit();
         addAudit(state, "MANAGER_SHIFT_EDIT", `Manager edited shift row for ${row.date} (${row.shift})`);
         saveState();
@@ -5798,10 +6682,15 @@ function bindForms() {
     if (type === "run") {
       const row = (state.runRows || []).find((item) => item.id === logId);
       if (!row) return;
+      const date = inlineValue(rowNode, "date");
       const product = inlineValue(rowNode, "product");
       const productionStartTime = inlineValue(rowNode, "productionStartTime");
       const finishTime = inlineValue(rowNode, "finishTime");
       const unitsProduced = Math.max(0, num(inlineValue(rowNode, "unitsProduced")));
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
+        alert("Date is invalid.");
+        return;
+      }
       if (!product) {
         alert("Product is required.");
         return;
@@ -5810,20 +6699,39 @@ function bindForms() {
         alert("Times must be HH:MM (24h).");
         return;
       }
+      const backendShift = inferShiftForLog(state, date, productionStartTime, row.shift || state.selectedShift || "Day");
+      const runPatternRaw = inlineValue(rowNode, "runCrewingPattern");
+      const runPatternFromEdit = normalizeRunCrewingPattern(runPatternRaw, state, backendShift, { fallbackToIdeal: false });
+      const existingRunPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, backendShift, { fallbackToIdeal: false });
+      const runCrewingPattern = Object.keys(runPatternFromEdit).length ? runPatternFromEdit : existingRunPattern;
       const payload = {
+        lineId: state.id,
+        date,
+        shift: backendShift,
         product,
         setUpStartTime: "",
         productionStartTime,
         finishTime,
-        unitsProduced
+        unitsProduced,
+        runCrewingPattern
       };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
         if (canPatchServer) {
           const saved = await patchManagerRunLog(logId, payload);
-          Object.assign(row, payload, { shift: "", submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+          Object.assign(row, payload, {
+            shift: "",
+            runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
+            submittedBy: "manager",
+            submittedAt: saved?.submittedAt || nowIso()
+          });
         } else {
-          Object.assign(row, payload, { shift: "", submittedBy: "manager", submittedAt: nowIso() });
+          Object.assign(row, payload, {
+            shift: "",
+            runCrewingPattern,
+            submittedBy: "manager",
+            submittedAt: nowIso()
+          });
         }
         clearManagerLogInlineEdit();
         addAudit(state, "MANAGER_RUN_EDIT", `Manager edited run ${row.product}`);
@@ -5838,21 +6746,55 @@ function bindForms() {
     if (type === "downtime") {
       const row = (state.downtimeRows || []).find((item) => item.id === logId);
       if (!row) return;
+      const date = inlineValue(rowNode, "date");
       const downtimeStart = inlineValue(rowNode, "downtimeStart");
       const downtimeFinish = inlineValue(rowNode, "downtimeFinish");
-      const reason = inlineValue(rowNode, "reason");
+      const reasonCategory = inlineValue(rowNode, "reasonCategory");
+      let reasonDetail = inlineValue(rowNode, "reasonDetail");
+      const reasonNote = inlineValue(rowNode, "reasonNote");
+      let equipment = inlineValue(rowNode, "equipment");
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
+        alert("Date is invalid.");
+        return;
+      }
       if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
         alert("Times must be HH:MM (24h).");
         return;
       }
+      if (!reasonCategory) {
+        alert("Reason group is required.");
+        return;
+      }
+      if (reasonCategory === "Equipment") {
+        reasonDetail = reasonDetail || equipment;
+        equipment = reasonDetail || equipment;
+        if (!equipment) {
+          alert("Select an equipment stage.");
+          return;
+        }
+      } else {
+        equipment = "";
+      }
+      if (!reasonDetail) {
+        alert("Reason detail is required.");
+        return;
+      }
+      const shift = inferShiftForLog(state, date, downtimeStart, row.shift || state.selectedShift || "Day");
+      const reason = buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote);
       const updatedValues = {
+        date,
         downtimeStart,
         downtimeFinish,
-        equipment: row.equipment || "",
-        reason
+        equipment,
+        reason,
+        reasonCategory,
+        reasonDetail,
+        reasonNote
       };
       const payload = {
         lineId: state.id,
+        date,
+        shift,
         ...updatedValues
       };
       const canPatchServer = UUID_RE.test(String(logId || ""));
@@ -5877,7 +6819,325 @@ function bindForms() {
     }
   };
 
+  const managerDefaultFinishTime = (startTime) => {
+    const nowCandidate = nowTimeHHMM();
+    const startMins = parseTimeToMinutes(startTime);
+    const nowMins = parseTimeToMinutes(nowCandidate);
+    if (Number.isFinite(startMins) && Number.isFinite(nowMins) && startMins === nowMins) {
+      const minsPerDay = 24 * 60;
+      const normalized = ((Math.floor(num(startMins + 1)) % minsPerDay) + minsPerDay) % minsPerDay;
+      const hh = String(Math.floor(normalized / 60)).padStart(2, "0");
+      const mm = String(normalized % 60).padStart(2, "0");
+      return `${hh}:${mm}`;
+    }
+    return nowCandidate;
+  };
+
+  const clearManagerInlineEditIfTarget = (type, logId) => {
+    if (isManagerLogInlineEditRow(state.id, type, logId)) clearManagerLogInlineEdit();
+  };
+
+  const finaliseManagerShiftLogById = async (logId) => {
+    const row = (state.shiftRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+    if (!row) {
+      alert("Shift log could not be found.");
+      return;
+    }
+    if (!isPendingShiftLogRow(row)) {
+      alert("This shift is already finalised.");
+      return;
+    }
+    const startTime = String(row.startTime || "").trim();
+    if (!strictTimeValid(startTime)) {
+      alert("Shift start time is invalid. Edit the row and set a valid start time first.");
+      return;
+    }
+    const existingBreakRows = Array.isArray(state.breakRows) ? state.breakRows : [];
+    const hasShiftLinkedBreaks = existingBreakRows.some((breakRow) => String(breakRow?.shiftLogId || "") === String(row.id || ""));
+    const belongsToShift = (breakRow) => {
+      const shiftLogId = String(breakRow?.shiftLogId || "");
+      if (shiftLogId) return shiftLogId === String(row.id || "");
+      if (hasShiftLinkedBreaks) return false;
+      return String(breakRow?.date || "") === String(row.date || "") && String(breakRow?.shift || "") === String(row.shift || "");
+    };
+    const openBreak = latestBySubmittedAt(existingBreakRows.filter((breakRow) => belongsToShift(breakRow) && isOpenBreakRow(breakRow)));
+    if (openBreak?.id) {
+      alert("End the current break before finalising the shift.");
+      return;
+    }
+    const finishPrompt = window.prompt("Finish time (HH:MM)", managerDefaultFinishTime(startTime));
+    if (finishPrompt === null) return;
+    const finishTime = String(finishPrompt || "").trim();
+    if (!strictTimeValid(finishTime)) {
+      alert("Finish time must be HH:MM (24h).");
+      return;
+    }
+    if (finishTime === startTime) {
+      alert("Finish time must be different from start time.");
+      return;
+    }
+    const payload = {
+      date: row.date,
+      shift: row.shift || inferShiftForLog(state, row.date, startTime, state.selectedShift || "Day"),
+      crewOnShift: Math.max(0, Math.floor(num(row.crewOnShift))),
+      startTime,
+      finishTime
+    };
+    const canPatchServer = UUID_RE.test(String(logId || ""));
+    try {
+      if (canPatchServer) {
+        const saved = await patchManagerShiftLog(logId, payload);
+        Object.assign(row, payload, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+      } else {
+        Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
+      }
+      clearManagerInlineEditIfTarget("shift", logId);
+      addAudit(state, "MANAGER_SHIFT_COMPLETE", `Manager finalised shift row for ${row.date} (${row.shift})`);
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not finalise shift row.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const finaliseManagerRunLogById = async (logId) => {
+    const row = (state.runRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+    if (!row) {
+      alert("Run log could not be found.");
+      return;
+    }
+    if (!isPendingRunLogRow(row)) {
+      alert("This production run is already finalised.");
+      return;
+    }
+    const productionStartTime = String(row.productionStartTime || "").trim();
+    if (!strictTimeValid(productionStartTime)) {
+      alert("Run start time is invalid. Edit the row and set a valid start time first.");
+      return;
+    }
+    const finishPrompt = window.prompt("Finish time (HH:MM)", managerDefaultFinishTime(productionStartTime));
+    if (finishPrompt === null) return;
+    const finishTime = String(finishPrompt || "").trim();
+    if (!strictTimeValid(finishTime)) {
+      alert("Finish time must be HH:MM (24h).");
+      return;
+    }
+    if (finishTime === productionStartTime) {
+      alert("Finish time must be different from start time.");
+      return;
+    }
+    const unitsPrompt = window.prompt("Units produced", String(Math.max(0, num(row.unitsProduced))));
+    if (unitsPrompt === null) return;
+    const unitsProduced = Math.max(0, num(unitsPrompt));
+    const backendShift = inferShiftForLog(state, row.date, productionStartTime, row.shift || state.selectedShift || "Day");
+    const runCrewingPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, backendShift, { fallbackToIdeal: false });
+    const payload = {
+      lineId: state.id,
+      date: row.date,
+      shift: backendShift,
+      product: row.product || "Run",
+      setUpStartTime: "",
+      productionStartTime,
+      finishTime,
+      unitsProduced,
+      runCrewingPattern
+    };
+    const canPatchServer = UUID_RE.test(String(logId || ""));
+    try {
+      if (canPatchServer) {
+        const saved = await patchManagerRunLog(logId, payload);
+        Object.assign(row, payload, {
+          shift: "",
+          runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
+          submittedBy: "manager",
+          submittedAt: saved?.submittedAt || nowIso()
+        });
+      } else {
+        Object.assign(row, payload, {
+          shift: "",
+          runCrewingPattern,
+          submittedBy: "manager",
+          submittedAt: nowIso()
+        });
+      }
+      clearManagerInlineEditIfTarget("run", logId);
+      addAudit(state, "MANAGER_RUN_COMPLETE", `Manager finalised run ${row.product || "Run"}`);
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not finalise production run.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const finaliseManagerDowntimeLogById = async (logId) => {
+    const row = (state.downtimeRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+    if (!row) {
+      alert("Downtime log could not be found.");
+      return;
+    }
+    if (!isPendingDowntimeLogRow(row)) {
+      alert("This downtime log is already finalised.");
+      return;
+    }
+    const downtimeStart = String(row.downtimeStart || "").trim();
+    if (!strictTimeValid(downtimeStart)) {
+      alert("Downtime start time is invalid. Edit the row and set a valid start time first.");
+      return;
+    }
+    const finishPrompt = window.prompt("Downtime finish time (HH:MM)", managerDefaultFinishTime(downtimeStart));
+    if (finishPrompt === null) return;
+    const downtimeFinish = String(finishPrompt || "").trim();
+    if (!strictTimeValid(downtimeFinish)) {
+      alert("Finish time must be HH:MM (24h).");
+      return;
+    }
+    if (downtimeFinish === downtimeStart) {
+      alert("Finish time must be different from start time.");
+      return;
+    }
+    const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+    const reasonCategory = String(row.reasonCategory || parsedReason.reasonCategory || "").trim();
+    const reasonDetail = String(row.reasonDetail || parsedReason.reasonDetail || "").trim();
+    const reasonNote = String((row.reasonNote ?? parsedReason.reasonNote) || "").trim();
+    if (!reasonCategory || !reasonDetail) {
+      alert("Reason group and detail are required before finalising downtime.");
+      return;
+    }
+    const equipment = reasonCategory === "Equipment" ? (row.equipment || reasonDetail) : "";
+    if (reasonCategory === "Equipment" && !equipment) {
+      alert("Equipment downtime requires an equipment stage.");
+      return;
+    }
+    const shift = row.shift || inferShiftForLog(state, row.date, downtimeStart, state.selectedShift || "Day");
+    const updatedValues = {
+      date: row.date,
+      downtimeStart,
+      downtimeFinish,
+      equipment,
+      reasonCategory,
+      reasonDetail,
+      reasonNote,
+      reason: buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote)
+    };
+    const payload = {
+      lineId: state.id,
+      date: row.date,
+      shift,
+      ...updatedValues
+    };
+    const canPatchServer = UUID_RE.test(String(logId || ""));
+    try {
+      if (canPatchServer) {
+        const saved = await patchManagerDowntimeLog(logId, payload);
+        Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+      } else {
+        Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: nowIso() });
+      }
+      clearManagerInlineEditIfTarget("downtime", logId);
+      addAudit(
+        state,
+        "MANAGER_DOWNTIME_COMPLETE",
+        `Manager finalised downtime row for ${row.date} (${stageNameById(equipment) || reasonCategory})`
+      );
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not finalise downtime row.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const deleteManagerShiftLogById = async (logId) => {
+    const row = (state.shiftRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+    if (!row) {
+      alert("Shift log could not be found.");
+      return;
+    }
+    if (!window.confirm("Delete this shift log entry? This cannot be undone.")) return;
+    const canDeleteServer = UUID_RE.test(String(logId || ""));
+    try {
+      if (canDeleteServer) await deleteManagerShiftLog(logId);
+      const existingBreakRows = Array.isArray(state.breakRows) ? state.breakRows : [];
+      const hasShiftLinkedBreaks = existingBreakRows.some((breakRow) => String(breakRow?.shiftLogId || "") === String(row.id || ""));
+      state.shiftRows = (state.shiftRows || []).filter((item) => String(item?.id || "") !== String(logId || ""));
+      state.breakRows = existingBreakRows.filter((breakRow) => {
+        const breakShiftLogId = String(breakRow?.shiftLogId || "");
+        if (breakShiftLogId) return breakShiftLogId !== String(logId || "");
+        if (hasShiftLinkedBreaks) return true;
+        return !(String(breakRow?.date || "") === String(row.date || "") && String(breakRow?.shift || "") === String(row.shift || ""));
+      });
+      clearManagerInlineEditIfTarget("shift", logId);
+      addAudit(state, "MANAGER_SHIFT_DELETE", `Manager deleted shift row for ${row.date} (${row.shift})`);
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not delete shift row.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const deleteManagerRunLogById = async (logId) => {
+    const row = (state.runRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+    if (!row) {
+      alert("Run log could not be found.");
+      return;
+    }
+    if (!window.confirm("Delete this run log entry? This cannot be undone.")) return;
+    const canDeleteServer = UUID_RE.test(String(logId || ""));
+    try {
+      if (canDeleteServer) await deleteManagerRunLog(logId);
+      state.runRows = (state.runRows || []).filter((item) => String(item?.id || "") !== String(logId || ""));
+      clearManagerInlineEditIfTarget("run", logId);
+      addAudit(state, "MANAGER_RUN_DELETE", `Manager deleted run ${row.product || "Run"}`);
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not delete production run.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  const deleteManagerDowntimeLogById = async (logId) => {
+    const row = (state.downtimeRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+    if (!row) {
+      alert("Downtime log could not be found.");
+      return;
+    }
+    if (!window.confirm("Delete this downtime log entry? This cannot be undone.")) return;
+    const canDeleteServer = UUID_RE.test(String(logId || ""));
+    try {
+      if (canDeleteServer) await deleteManagerDowntimeLog(logId);
+      state.downtimeRows = (state.downtimeRows || []).filter((item) => String(item?.id || "") !== String(logId || ""));
+      clearManagerInlineEditIfTarget("downtime", logId);
+      addAudit(
+        state,
+        "MANAGER_DOWNTIME_DELETE",
+        `Manager deleted downtime row for ${row.date} (${stageNameById(row.equipment) || lineDowntimeReasonCategory(row) || "Downtime"})`
+      );
+      saveState();
+      renderAll();
+    } catch (error) {
+      alert(`Could not delete downtime row.\n${error?.message || "Please try again."}`);
+    }
+  };
+
   const handleLogTableEdit = async (event) => {
+    const patternBtn = event.target.closest("[data-inline-run-pattern]");
+    if (patternBtn) {
+      const rowNode = patternBtn.closest("tr");
+      if (!rowNode || !state) return;
+      const patternInput = rowNode.querySelector('[data-inline-field="runCrewingPattern"]');
+      const patternSummary = rowNode.querySelector("[data-inline-run-pattern-summary]");
+      if (!patternInput) return;
+      const date = inlineValue(rowNode, "date") || state.selectedDate || todayISO();
+      const startTime = inlineValue(rowNode, "productionStartTime");
+      const fallbackShift = String(patternBtn.getAttribute("data-pattern-shift") || state.selectedShift || "Day");
+      const shift = inferShiftForLog(state, date, startTime, fallbackShift);
+      openRunCrewingPatternModal({
+        line: state,
+        shift,
+        inputEl: patternInput,
+        summaryEl: patternSummary
+      });
+      return;
+    }
     const btn = event.target.closest("[data-log-action]");
     if (!btn) return;
     const type = btn.getAttribute("data-log-type");
@@ -5888,14 +7148,57 @@ function bindForms() {
       await saveManagerLogInlineEdit(type, logId, btn.closest("tr"));
       return;
     }
-    setManagerLogInlineEdit(state.id, type, logId);
-    renderTrackingTables();
+    if (action === "edit") {
+      setManagerLogInlineEdit(state.id, type, logId);
+      renderTrackingTables();
+      return;
+    }
+    if (action === "finalise") {
+      if (type === "shift") await finaliseManagerShiftLogById(logId);
+      if (type === "run") await finaliseManagerRunLogById(logId);
+      if (type === "downtime") await finaliseManagerDowntimeLogById(logId);
+      return;
+    }
+    if (action === "delete") {
+      if (type === "shift") await deleteManagerShiftLogById(logId);
+      if (type === "run") await deleteManagerRunLogById(logId);
+      if (type === "downtime") await deleteManagerDowntimeLogById(logId);
+    }
+  };
+
+  const handleDowntimeInlineFieldChange = (event) => {
+    const target = event.target;
+    const field = String(target?.getAttribute?.("data-inline-field") || "");
+    if (!["reasonCategory", "reasonDetail", "equipment"].includes(field)) return;
+    const rowNode = target.closest("tr");
+    if (!rowNode) return;
+    const categoryNode = rowNode.querySelector('[data-inline-field="reasonCategory"]');
+    const detailNode = rowNode.querySelector('[data-inline-field="reasonDetail"]');
+    const equipmentNode = rowNode.querySelector('[data-inline-field="equipment"]');
+    if (!categoryNode || !detailNode) return;
+    const category = String(categoryNode.value || "");
+    const detail = String(detailNode.value || "");
+    setDowntimeDetailOptions(detailNode, state, category, detail);
+    if (!equipmentNode) return;
+    const isEquipment = category === "Equipment";
+    equipmentNode.disabled = !isEquipment;
+    if (!isEquipment) {
+      equipmentNode.value = "";
+      return;
+    }
+    if (field === "equipment") {
+      if (equipmentNode.value) detailNode.value = equipmentNode.value;
+    } else if (detailNode.value) {
+      equipmentNode.value = detailNode.value;
+    }
   };
 
   ["shiftTable", "runTable", "downtimeTable"].forEach((tableId) => {
     const table = document.getElementById(tableId);
     if (table) table.addEventListener("click", handleLogTableEdit);
   });
+  const downtimeTable = document.getElementById("downtimeTable");
+  if (downtimeTable) downtimeTable.addEventListener("change", handleDowntimeInlineFieldChange);
 }
 
 function bindDataControls() {
@@ -7015,6 +8318,8 @@ function renderSupervisorDayVisualiser(line, selectedDate) {
 
 function renderVisualiser() {
   const data = derivedData();
+  const stages = getStages();
+  const liveDowntimeByStage = liveEquipmentDowntimeByStage(state, stages);
   const selectedRunRows = selectedRows(data.runRows);
   const selectedDowntimeRows = selectedRows(data.downtimeRows);
   const selectedShiftRows = selectedRows(data.shiftRows);
@@ -7046,47 +8351,22 @@ function renderVisualiser() {
   const map = document.getElementById("lineMap");
   map.innerHTML = "";
   map.classList.toggle("layout-editing", Boolean(state.visualEditMode));
+  const isFlowMoving = lineHasMovingFlow(state);
+  map.classList.toggle("flow-running", isFlowMoving);
+  map.classList.toggle("flow-static", !isFlowMoving);
   const activeCrew = state.crewsByShift[state.selectedShift] || defaultStageCrew();
   let bottleneckCard = null;
   let bottleneckUtilisation = -1;
-  const guides = normalizeFlowGuides(state.flowGuides);
-  state.flowGuides = guides;
+  const guides = lineFlowGuidesForMap(stages, state.flowGuides);
+  appendFlowGuidesToMap(map, guides, { editable: Boolean(state.visualEditMode) });
 
-  guides.forEach((guide) => {
-    const node = document.createElement("div");
-    node.className = `flow-guide flow-${guide.type}`;
-    node.setAttribute("data-guide-id", guide.id);
-    node.style.left = `${guide.x}%`;
-    node.style.top = `${guide.y}%`;
-    node.style.width = `${guide.w}%`;
-    node.style.height = `${guide.h}%`;
-    node.style.transform = `rotate(${guide.angle || 0}deg)`;
-    if (state.visualEditMode) {
-      node.innerHTML = `
-        <span class="flow-guide-delete" data-guide-delete="${guide.id}">x</span>
-        <span class="flow-guide-resize" data-guide-resize="${guide.id}"></span>
-        <span class="flow-guide-rotate" data-guide-rotate="${guide.id}"></span>
-      `;
-    }
-    if (guide.type === "shape" && guide.src) {
-      const img = document.createElement("img");
-      img.className = "flow-shape-image";
-      img.src = guide.src;
-      img.alt = "";
-      img.draggable = false;
-      node.append(img);
-    }
-    map.append(node);
-  });
-
-  getStages().forEach((stage, index) => {
+  stages.forEach((stage, index) => {
     const stageDowntime = selectedDowntimeRows
       .filter((row) => matchesStage(stage, row.equipment))
       .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
 
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
-    const perCrewMax = stageMaxThroughput(stage.id);
     const totalMaxThroughput = stageTotalMaxThroughput(stage.id, state.selectedShift);
     const utilisation = totalMaxThroughput > 0 ? (stageRate / totalMaxThroughput) * 100 : 0;
     utilAccumulator += Math.max(0, utilisation);
@@ -7097,6 +8377,10 @@ function renderVisualiser() {
 
     const card = document.createElement("article");
     card.className = `stage-card group-${stage.group}${stage.kind ? ` kind-${stage.kind}` : ""} status-${status}`;
+    const liveDown = liveDowntimeByStage[stage.id];
+    const liveDownPill = stageLiveDowntimePillHtml(liveDown);
+    if (liveDown?.level === "critical") card.classList.add("live-downtime-critical");
+    if (liveDown?.level === "warning") card.classList.add("live-downtime-warning");
     card.setAttribute("data-stage-id", stage.id);
     card.style.left = `${stage.x}%`;
     card.style.top = `${stage.y}%`;
@@ -7129,31 +8413,24 @@ function renderVisualiser() {
     if (stage.kind === "transfer") {
       card.innerHTML = `
         <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
-        <div class="stage-meta compact">
-          <div>Util: ${formatNum(Math.max(utilisation, 0), 1)}%</div>
-          <div>Down: ${formatNum(stageDowntime, 1)} min</div>
-        </div>
-        <div class="stage-tag-row">
-          <span class="status-tag ${status}">${status.toUpperCase()}</span>
-        </div>
+        ${liveDownPill}
         ${state.visualEditMode ? `<span class="stage-resize-handle" data-stage-resize="${stage.id}"></span>` : ""}
       `;
     } else {
       card.innerHTML = `
         ${stageCrew > 0 ? `<span class="crew-badge">${stageCrew}</span>` : ""}
         <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
-        <div class="stage-meta compact">
-          <div>Util: ${formatNum(Math.max(utilisation, 0), 1)}%</div>
-          ${compact ? "" : `<div>Down: ${formatNum(stageDowntime, 1)} min</div>`}
-          ${compact ? "" : `<div>ETC: ${formatNum(stageRate, 2)} u/min</div>`}
-          ${compact ? "" : `<div>Max: ${formatNum(totalMaxThroughput, 0)} u/min</div>`}
-          ${compact ? "" : `<div>Per Crew: ${formatNum(perCrewMax, 0)} u/min</div>`}
-        </div>
-        <div class="stage-tag-row">
-          <span class="status-tag ${status}">${status.toUpperCase()}</span>
-        </div>
+        ${liveDownPill}
         ${state.visualEditMode ? `<span class="stage-resize-handle" data-stage-resize="${stage.id}"></span>` : ""}
       `;
+    }
+    if (liveDown) {
+      card.setAttribute(
+        "title",
+        liveDown.level === "critical"
+          ? `Urgent downtime: ${Math.floor(liveDown.minutes)} min`
+          : `Active downtime: ${Math.floor(liveDown.minutes)} min`
+      );
     }
 
     map.append(card);
@@ -7161,13 +8438,6 @@ function renderVisualiser() {
 
   if (bottleneckCard) {
     bottleneckCard.classList.add("bottleneck");
-    const tagRow = bottleneckCard.querySelector(".stage-tag-row");
-    if (tagRow) {
-      const badge = document.createElement("span");
-      badge.className = "bottleneck-tag";
-      badge.textContent = "BOTTLENECK";
-      tagRow.append(badge);
-    }
   }
 
   const lineUtil = utilCount > 0 ? utilAccumulator / utilCount : 0;
@@ -7382,15 +8652,43 @@ function renderTrackingTables() {
       value ?? ""
     )}"${minAttr}${stepAttr}${placeholderAttr} />`;
   };
+  const inlineSelectHtml = (field, value, options = [], { placeholder = "", disabled = false } = {}) => {
+    const normalized = Array.isArray(options)
+      ? options.map((option) => {
+          if (typeof option === "string") return { value: option, label: option };
+          return {
+            value: String(option?.value || ""),
+            label: String(option?.label ?? option?.value ?? "")
+          };
+        })
+      : [];
+    const selected = String(value ?? "");
+    if (selected && !normalized.some((option) => option.value === selected)) {
+      normalized.unshift({ value: selected, label: selected });
+    }
+    const placeholderHtml = placeholder ? `<option value="">${htmlEscape(placeholder)}</option>` : "";
+    const optionsHtml = normalized
+      .map(
+        (option) =>
+          `<option value="${htmlEscape(option.value)}"${option.value === selected ? " selected" : ""}>${htmlEscape(option.label)}</option>`
+      )
+      .join("");
+    return `<select class="table-inline-input" data-inline-field="${htmlEscape(field)}"${disabled ? " disabled" : ""}>${placeholderHtml}${optionsHtml}</select>`;
+  };
   const isInlineEditing = (type, rowId) => isManagerLogInlineEditRow(activeLineId, type, rowId);
-  const actionHtml = (type, row, { editing = false, pending = false, pendingLabel = "Pending" } = {}) => `
-    <div class="table-action-stack">
-      ${pending ? `<span class="table-pending-pill">${htmlEscape(pendingLabel)}</span>` : ""}
-      <button type="button" class="table-edit-pill${editing ? " is-save" : ""}" data-log-action="${
-        editing ? "save" : "edit"
-      }" data-log-type="${type}" data-log-id="${row.id || ""}">${editing ? "Save" : "Edit"}</button>
-    </div>
-  `;
+  const actionHtml = (type, row, { editing = false, pending = false } = {}) => {
+    const id = htmlEscape(row.id || "");
+    const typeAttr = htmlEscape(type);
+    return `
+      <div class="table-action-stack">
+        <button type="button" class="table-edit-pill${editing ? " is-save" : ""}" data-log-action="${
+          editing ? "save" : "edit"
+        }" data-log-type="${typeAttr}" data-log-id="${id}">${editing ? "Save" : "Edit"}</button>
+        <button type="button" class="table-edit-pill table-delete-pill" data-log-action="delete" data-log-type="${typeAttr}" data-log-id="${id}">Delete</button>
+        ${!editing && pending ? `<button type="button" class="table-edit-pill finalise-pill" data-log-action="finalise" data-log-type="${typeAttr}" data-log-id="${id}">Finalise</button>` : ""}
+      </div>
+    `;
+  };
 
   const sortNewestFirst = (rows, primaryTimeField) =>
     (rows || [])
@@ -7423,20 +8721,30 @@ function renderTrackingTables() {
   const displayShiftRows = sortNewestFirst(data.shiftRows, "startTime").map((row) => {
     const key = `${row.date}__${row.shift}`;
     const summary = breakSummaryByShift.get(key) || { count: 0, mins: 0 };
+    const breakCount = Math.max(0, Math.floor(num(summary.count)));
+    const breakTimeMins = Math.max(0, num(summary.mins));
     const editing = isInlineEditing("shift", String(row.id || ""));
     const hasOpenBreak = openBreakByShiftLogId.has(String(row.id || ""));
     const pending = isPendingShiftLogRow(row) || hasOpenBreak;
-    const pendingLabel = hasOpenBreak ? "Pending | Break Active" : "Pending";
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
+      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
+      shift: editing
+        ? inlineSelectHtml(
+            "shift",
+            String(row.shift || ""),
+            SHIFT_OPTIONS.map((option) => ({ value: option, label: option })),
+            { placeholder: "Shift" }
+          )
+        : row.shift,
       crewOnShift: editing ? inlineInputHtml("crewOnShift", Math.max(0, num(row.crewOnShift)), { type: "number", min: "0", step: "1" }) : row.crewOnShift,
       startTime: editing ? inlineInputHtml("startTime", String(row.startTime || ""), { placeholder: "HH:MM" }) : row.startTime,
       finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
-      breakCount: summary.count,
-      breakTimeMins: summary.mins,
+      breakCount: editing ? inlineInputHtml("breakCount", breakCount, { type: "number", min: "0", step: "1" }) : breakCount,
+      breakTimeMins: editing ? inlineInputHtml("breakTimeMins", breakTimeMins, { type: "number", min: "0", step: "0.1" }) : breakTimeMins,
       submittedBy: managerLogSubmittedByLabel(row),
-      action: actionHtml("shift", row, { editing, pending, pendingLabel })
+      action: actionHtml("shift", row, { editing, pending })
     };
   });
 
@@ -7456,11 +8764,29 @@ function renderTrackingTables() {
   const displayRunRows = sortNewestFirst(data.runRows, "productionStartTime").map((row) => {
     const editing = isInlineEditing("run", String(row.id || ""));
     const pending = isPendingRunLogRow(row);
+    const patternShift = inferShiftForLog(state, String(row.date || todayISO()), String(row.productionStartTime || ""), state.selectedShift || "Day");
+    const runPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, patternShift, { fallbackToIdeal: false });
+    const runPatternRaw = Object.keys(runPattern).length ? JSON.stringify(runPattern) : "";
+    const runPatternSummary = runCrewingPatternSummaryText(runPattern, state);
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
+      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
       assignedShift: resolveTimedLogShiftLabel(row, state, "productionStartTime", "finishTime"),
-      product: editing ? inlineInputHtml("product", String(row.product || "")) : row.product,
+      product: editing
+        ? `
+          <div class="table-inline-stack">
+            ${inlineInputHtml("product", String(row.product || ""))}
+            <input type="hidden" data-inline-field="runCrewingPattern" value="${htmlEscape(runPatternRaw)}" />
+            <div class="table-inline-row">
+              <span class="table-inline-note" data-inline-run-pattern-summary>${htmlEscape(runPatternSummary)}</span>
+              <button type="button" class="table-edit-pill table-inline-mini" data-inline-run-pattern data-pattern-shift="${htmlEscape(
+                patternShift
+              )}">Crewing Pattern</button>
+            </div>
+          </div>
+        `
+        : row.product,
       productionStartTime: editing
         ? inlineInputHtml("productionStartTime", String(row.productionStartTime || ""), { placeholder: "HH:MM" })
         : row.productionStartTime,
@@ -7489,14 +8815,45 @@ function renderTrackingTables() {
   const displayDowntimeRows = sortNewestFirst(data.downtimeRows, "downtimeStart").map((row) => {
     const editing = isInlineEditing("downtime", String(row.id || ""));
     const pending = isPendingDowntimeLogRow(row);
+    const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+    const reasonCategory = String(row.reasonCategory || parsedReason.reasonCategory || "");
+    const reasonDetail = String(row.reasonDetail || parsedReason.reasonDetail || "");
+    const reasonNote = String((row.reasonNote ?? parsedReason.reasonNote) || "");
+    const downtimeCategories = Array.from(new Set(["Equipment", ...Object.keys(DOWNTIME_REASON_PRESETS), reasonCategory])).filter(Boolean);
+    const reasonDetailChoices = downtimeDetailOptions(state, reasonCategory);
+    const equipmentChoices = downtimeDetailOptions(state, "Equipment");
+    const equipmentValue = String(row.equipment || (reasonCategory === "Equipment" ? reasonDetail : ""));
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
+      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
       assignedShift: resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish"),
       downtimeStart: editing ? inlineInputHtml("downtimeStart", String(row.downtimeStart || ""), { placeholder: "HH:MM" }) : row.downtimeStart,
       downtimeFinish: editing ? inlineInputHtml("downtimeFinish", String(row.downtimeFinish || ""), { placeholder: "HH:MM" }) : row.downtimeFinish,
-      equipment: row.equipment ? stageNameById(row.equipment) : "-",
-      reason: editing ? inlineInputHtml("reason", String(row.reason || "")) : row.reason,
+      equipment: editing
+        ? inlineSelectHtml("equipment", equipmentValue, equipmentChoices, { placeholder: "Select Stage", disabled: reasonCategory !== "Equipment" })
+        : row.equipment
+          ? stageNameById(row.equipment)
+          : "-",
+      reason: editing
+        ? `
+          <div class="table-inline-stack">
+            ${inlineSelectHtml(
+              "reasonCategory",
+              reasonCategory,
+              downtimeCategories.map((category) => ({ value: category, label: category })),
+              { placeholder: "Reason Group" }
+            )}
+            ${inlineSelectHtml(
+              "reasonDetail",
+              reasonDetail,
+              reasonDetailChoices.map((detailOption) => ({ value: detailOption.value, label: detailOption.label })),
+              { placeholder: reasonCategory === "Equipment" ? "Select Stage" : "Select Reason" }
+            )}
+            ${inlineInputHtml("reasonNote", reasonNote, { placeholder: "Optional note" })}
+          </div>
+        `
+        : row.reason,
       submittedBy: managerLogSubmittedByLabel(row),
       action: actionHtml("downtime", row, { editing, pending })
     };
@@ -7544,6 +8901,7 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   const map = document.getElementById("supervisorLineMap");
   if (!map) return;
   const stages = line?.stages?.length ? line.stages : STAGES;
+  const liveDowntimeByStage = liveEquipmentDowntimeByStage(line, stages);
   const data = derivedDataForLine(line || {});
   const selectedRunRows = selectedShiftRowsByDate(data.runRows, selectedDate, selectedShift, { line });
   const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, selectedDate, selectedShift, { line });
@@ -7588,24 +8946,11 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   setSvText("svDayKpiRunRate", svRunRateText);
   map.innerHTML = "";
   map.classList.remove("layout-editing");
-
-  normalizeFlowGuides(line?.flowGuides).forEach((guide) => {
-    const node = document.createElement("div");
-    node.className = `flow-guide flow-${guide.type}`;
-    node.style.left = `${guide.x}%`;
-    node.style.top = `${guide.y}%`;
-    node.style.width = `${guide.w}%`;
-    node.style.height = `${guide.h}%`;
-    node.style.transform = `rotate(${guide.angle || 0}deg)`;
-    if (guide.type === "shape" && guide.src) {
-      const img = document.createElement("img");
-      img.className = "flow-shape-image";
-      img.src = guide.src;
-      img.alt = "";
-      node.append(img);
-    }
-    map.append(node);
-  });
+  const isFlowMoving = lineHasMovingFlow(line);
+  map.classList.toggle("flow-running", isFlowMoving);
+  map.classList.toggle("flow-static", !isFlowMoving);
+  const guides = lineFlowGuidesForMap(stages, line?.flowGuides);
+  appendFlowGuidesToMap(map, guides, { editable: false });
 
   stages.forEach((stage, index) => {
     const stageDowntime = selectedDownRows
@@ -7613,7 +8958,6 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
       .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
-    const perCrewMax = stageMaxThroughputForLine(line, stage.id);
     const totalMax = stageTotalMaxThroughputForLine(line, stage.id, selectedShift);
     const utilisation = totalMax > 0 ? (stageRate / totalMax) * 100 : 0;
     const stageCrew = num(activeCrew?.[stage.id]?.crew ?? stage.crew);
@@ -7624,6 +8968,10 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
 
     const card = document.createElement("article");
     card.className = `stage-card group-${stage.group}${stage.kind ? ` kind-${stage.kind}` : ""} status-${status}`;
+    const liveDown = liveDowntimeByStage[stage.id];
+    const liveDownPill = stageLiveDowntimePillHtml(liveDown);
+    if (liveDown?.level === "critical") card.classList.add("live-downtime-critical");
+    if (liveDown?.level === "warning") card.classList.add("live-downtime-warning");
     card.style.left = `${stage.x}%`;
     card.style.top = `${stage.y}%`;
     card.style.width = `${stage.w}%`;
@@ -7633,29 +8981,22 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
     if (stage.kind === "transfer") {
       card.innerHTML = `
         <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
-        <div class="stage-meta compact">
-          <div>Util: ${formatNum(Math.max(utilisation, 0), 1)}%</div>
-          <div>Down: ${formatNum(stageDowntime, 1)} min</div>
-        </div>
-        <div class="stage-tag-row">
-          <span class="status-tag ${status}">${status.toUpperCase()}</span>
-        </div>
+        ${liveDownPill}
       `;
     } else {
       card.innerHTML = `
         ${stageCrew > 0 ? `<span class="crew-badge">${stageCrew}</span>` : ""}
         <h3 class="stage-title">${stageDisplayName(stage, index)}</h3>
-        <div class="stage-meta compact">
-          <div>Util: ${formatNum(Math.max(utilisation, 0), 1)}%</div>
-          ${compact ? "" : `<div>Down: ${formatNum(stageDowntime, 1)} min</div>`}
-          ${compact ? "" : `<div>ETC: ${formatNum(stageRate, 2)} u/min</div>`}
-          ${compact ? "" : `<div>Max: ${formatNum(totalMax, 0)} u/min</div>`}
-          ${compact ? "" : `<div>Per Crew: ${formatNum(perCrewMax, 0)} u/min</div>`}
-        </div>
-        <div class="stage-tag-row">
-          <span class="status-tag ${status}">${status.toUpperCase()}</span>
-        </div>
+        ${liveDownPill}
       `;
+    }
+    if (liveDown) {
+      card.setAttribute(
+        "title",
+        liveDown.level === "critical"
+          ? `Urgent downtime: ${Math.floor(liveDown.minutes)} min`
+          : `Active downtime: ${Math.floor(liveDown.minutes)} min`
+      );
     }
 
     if (utilisation > bottleneckUtil) {
@@ -7667,13 +9008,6 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
 
   if (bottleneckCard) {
     bottleneckCard.classList.add("bottleneck");
-    const row = bottleneckCard.querySelector(".stage-tag-row");
-    if (row) {
-      const badge = document.createElement("span");
-      badge.className = "bottleneck-tag";
-      badge.textContent = "BOTTLENECK";
-      row.append(badge);
-    }
   }
   const lineUtil = utilCount > 0 ? utilAccumulator / utilCount : 0;
   const svUtilText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
@@ -7730,6 +9064,7 @@ function renderHome() {
   appState.supervisorSession = session;
   const isSupervisor = appState.appMode === "supervisor";
   const managerSessionActive = Boolean(managerBackendSession.backendToken);
+  syncLineTileFeedbackLoop({ enabled: !isSupervisor && managerSessionActive });
   const activeSupervisor = session?.username ? supervisorByUsername(session.username) : null;
 
   if (homeTitle) {
@@ -7811,13 +9146,15 @@ function renderHome() {
     Staffing: "staffing"
   });
   if (!hostedDatabaseAvailable) {
+    cards.classList.remove("line-cards-grouped");
     cards.innerHTML = `
       <article class="line-card line-card-unavailable" role="status">
-        <h3>Data base not avaiable</h3>
+        <h3>Database not available</h3>
         <p>We could not load production lines because the database is currently unavailable.</p>
       </article>
     `;
   } else if (!lineList.length) {
+    cards.classList.remove("line-cards-grouped");
     cards.innerHTML = `
       <article class="line-card line-card-empty" role="status">
         <h3>No Production Lines</h3>
@@ -7825,25 +9162,12 @@ function renderHome() {
       </article>
     `;
   } else {
-    cards.innerHTML = lineList
-      .map((line) => {
-        const stages = line.stages?.length || STAGES.length;
-        const shifts = line.shiftRows?.length || 0;
-        const assignedSupCount = (appState.supervisors || []).filter((sup) => (sup.assignedLineIds || []).includes(line.id)).length;
-        return `
-          <article class="line-card">
-            <h3>${line.name}</h3>
-            <p>${stages} stages | ${shifts} shift records | ${assignedSupCount} supervisors assigned</p>
-            <div class="line-card-actions">
-              <button type="button" data-open-line="${line.id}">Open Line</button>
-              <button type="button" class="ghost-btn" data-edit-line="${line.id}">Edit</button>
-              <button type="button" class="danger" data-delete-line="${line.id}">Delete</button>
-            </div>
-          </article>
-        `;
-      })
-      .join("");
+    const groupedCards = renderGroupedHomeLineCards(lineList, appState.lineGroups);
+    cards.classList.toggle("line-cards-grouped", groupedCards.grouped);
+    cards.innerHTML = groupedCards.html;
   }
+  renderLineShiftTrackersForWidth();
+  applyLineTileLiveFeedback();
   if (statTotalLines) statTotalLines.textContent = formatNum(lineList.length, 0);
   if (statSupervisors) statSupervisors.textContent = formatNum((appState.supervisors || []).length, 0);
   if (statShiftRecords) statShiftRecords.textContent = formatNum(lineList.reduce((sum, line) => sum + (line.shiftRows?.length || 0), 0), 0);
@@ -8293,12 +9617,12 @@ function renderAll() {
     editBtn.classList.toggle("active", active);
     editBtn.textContent = active ? "Done Editing" : "Edit Layout";
     if (addLineBtn) {
-      addLineBtn.disabled = !active;
-      addLineBtn.classList.toggle("hidden", !active);
+      addLineBtn.disabled = true;
+      addLineBtn.classList.add("hidden");
     }
     if (addArrowBtn) {
-      addArrowBtn.disabled = !active;
-      addArrowBtn.classList.toggle("hidden", !active);
+      addArrowBtn.disabled = true;
+      addArrowBtn.classList.add("hidden");
     }
     if (uploadShapeBtn) {
       uploadShapeBtn.disabled = !active;

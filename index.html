@@ -111,8 +111,11 @@
               </section>
 
               <section class="dash-card add-line-card">
-                <h2>Line Builder</h2>
-                <button id="openBuilder" type="button">+ Add Line</button>
+                <h2>Manage Production Lines</h2>
+                <div class="action-row">
+                  <button id="openBuilder" type="button">+ Add Line</button>
+                  <button id="manageLineGroupsBtn" class="ghost-btn" type="button">Manage Line Groups</button>
+                </div>
                 <p class="muted">Use the popup drag-and-drop builder to define stages and layout.</p>
               </section>
             </div>
@@ -325,6 +328,23 @@
           <button id="closeManageSupervisorsModal" class="ghost-btn" type="button">Close</button>
         </div>
         <div id="supervisorManagerList" class="data-layout"></div>
+      </div>
+    </div>
+
+    <div id="manageLineGroupsModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card manage-line-groups-modal-card" role="dialog" aria-modal="true" aria-labelledby="manageLineGroupsTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="manageLineGroupsTitle">Manage Line Groups</h2>
+            <p class="muted">Create groups and manually assign production lines to each group.</p>
+          </div>
+          <button id="closeManageLineGroupsModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="lineGroupCreateForm" class="line-group-create-form">
+          <input id="newLineGroupName" placeholder="New group name" maxlength="120" required />
+          <button type="submit">Create Group</button>
+        </form>
+        <div id="lineGroupManagerList" class="line-group-manager-list"></div>
       </div>
     </div>
 

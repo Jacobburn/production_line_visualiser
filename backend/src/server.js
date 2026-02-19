@@ -32,8 +32,12 @@ const lineSchema = z.object({
   secretKey: z.string().min(4).max(64)
 });
 
-const lineRenameSchema = z.object({
-  name: z.string().min(2).max(120)
+const lineGroupCreateSchema = z.object({
+  name: z.string().trim().min(1).max(120)
+});
+
+const lineGroupUpdateSchema = z.object({
+  name: z.string().trim().min(1).max(120)
 });
 
 const lineModelSchema = z.object({
@@ -117,6 +121,11 @@ const downtimeLogSchema = z.object({
 });
 
 const hasAtLeastOneField = (obj) => Object.values(obj).some((value) => value !== undefined);
+
+const lineUpdateSchema = z.object({
+  name: z.string().trim().min(2).max(120).optional(),
+  groupId: z.string().uuid().optional().or(z.literal('')).or(z.null())
+}).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const shiftLogUpdateSchema = z.object({
   crewOnShift: z.number().int().min(0).optional(),
@@ -244,6 +253,21 @@ async function fetchSupervisorAssignments(supervisorUserId) {
   };
 }
 
+async function fetchLineGroups() {
+  const result = await dbQuery(
+    `SELECT
+       id,
+       name,
+       display_order AS "displayOrder",
+       created_at AS "createdAt",
+       updated_at AS "updatedAt"
+     FROM line_groups
+     WHERE is_active = TRUE
+     ORDER BY display_order ASC, LOWER(name) ASC, created_at ASC`
+  );
+  return result.rows;
+}
+
 async function hasLineAccess(user, lineId) {
   if (user.role === 'manager') return true;
   const result = await dbQuery(
@@ -316,12 +340,72 @@ async function findMissingActiveLineIds(lineIds) {
   return uniqueLineIds.filter((lineId) => !foundIds.has(lineId));
 }
 
+async function findMissingActiveLineGroupIds(groupIds) {
+  const uniqueGroupIds = Array.from(
+    new Set((Array.isArray(groupIds) ? groupIds : []).filter((groupId) => z.string().uuid().safeParse(groupId).success))
+  );
+  if (!uniqueGroupIds.length) return [];
+  const result = await dbQuery(
+    `SELECT id::TEXT AS id
+     FROM line_groups
+     WHERE is_active = TRUE
+       AND id = ANY($1::UUID[])`,
+    [uniqueGroupIds]
+  );
+  const foundIds = new Set(result.rows.map((row) => row.id));
+  return uniqueGroupIds.filter((groupId) => !foundIds.has(groupId));
+}
+
 async function writeAudit({ lineId = null, actorUserId = null, actorName = null, actorRole = null, action, details = '' }) {
   await dbQuery(
     `INSERT INTO audit_events(line_id, actor_user_id, actor_name, actor_role, action, details)
      VALUES ($1, $2, $3, $4, $5, $6)`,
     [lineId, actorUserId, actorName, actorRole, action, details]
   );
+}
+
+let lineGroupSchemaReady = false;
+let lineGroupSchemaPromise = null;
+
+async function ensureLineGroupSchema() {
+  if (lineGroupSchemaReady) return;
+  if (lineGroupSchemaPromise) return lineGroupSchemaPromise;
+  lineGroupSchemaPromise = (async () => {
+    await dbQuery(
+      `CREATE TABLE IF NOT EXISTS line_groups (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         name TEXT NOT NULL,
+         display_order INTEGER NOT NULL DEFAULT 0,
+         is_active BOOLEAN NOT NULL DEFAULT TRUE,
+         created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`
+    );
+    await dbQuery(
+      `ALTER TABLE production_lines
+       ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES line_groups(id) ON DELETE SET NULL`
+    );
+    await dbQuery(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_line_groups_name_active_unique
+       ON line_groups (LOWER(name))
+       WHERE is_active = TRUE`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_line_groups_display_order
+       ON line_groups (display_order ASC, created_at ASC)`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_production_lines_group_id
+       ON production_lines (group_id)`
+    );
+    lineGroupSchemaReady = true;
+  })()
+    .catch((error) => {
+      lineGroupSchemaPromise = null;
+      throw error;
+    });
+  return lineGroupSchemaPromise;
 }
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
@@ -357,10 +441,117 @@ app.get('/api/me', authMiddleware, asyncRoute(async (req, res) => {
   res.json({ user: req.user });
 }));
 
+app.get('/api/line-groups', authMiddleware, requireRole('manager'), asyncRoute(async (_req, res) => {
+  await ensureLineGroupSchema();
+  res.json({ lineGroups: await fetchLineGroups() });
+}));
+
+app.post('/api/line-groups', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
+  const parsed = lineGroupCreateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid line group payload' });
+
+  const name = parsed.data.name.trim();
+  try {
+    const result = await dbQuery(
+      `INSERT INTO line_groups(name, display_order, created_by_user_id)
+       VALUES (
+         $1,
+         COALESCE((SELECT MAX(display_order) + 1 FROM line_groups WHERE is_active = TRUE), 0),
+         $2
+       )
+       RETURNING
+         id,
+         name,
+         display_order AS "displayOrder",
+         created_at AS "createdAt",
+         updated_at AS "updatedAt"`,
+      [name, req.user.id]
+    );
+    return res.status(201).json({ lineGroup: result.rows[0] });
+  } catch (error) {
+    if (String(error?.message || '').includes('duplicate key')) {
+      return res.status(409).json({ error: 'Line group name already exists' });
+    }
+    throw error;
+  }
+}));
+
+app.patch('/api/line-groups/:groupId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
+  const groupId = req.params.groupId;
+  if (!z.string().uuid().safeParse(groupId).success) return res.status(400).json({ error: 'Invalid line group id' });
+  const parsed = lineGroupUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid line group update payload' });
+
+  try {
+    const result = await dbQuery(
+      `UPDATE line_groups
+       SET name = $2, updated_at = NOW()
+       WHERE id = $1 AND is_active = TRUE
+       RETURNING
+         id,
+         name,
+         display_order AS "displayOrder",
+         created_at AS "createdAt",
+         updated_at AS "updatedAt"`,
+      [groupId, parsed.data.name.trim()]
+    );
+    if (!result.rowCount) return res.status(404).json({ error: 'Line group not found' });
+    return res.json({ lineGroup: result.rows[0] });
+  } catch (error) {
+    if (String(error?.message || '').includes('duplicate key')) {
+      return res.status(409).json({ error: 'Line group name already exists' });
+    }
+    throw error;
+  }
+}));
+
+app.delete('/api/line-groups/:groupId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
+  const groupId = req.params.groupId;
+  if (!z.string().uuid().safeParse(groupId).success) return res.status(400).json({ error: 'Invalid line group id' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const groupCheck = await client.query(
+      `SELECT id FROM line_groups WHERE id = $1 AND is_active = TRUE`,
+      [groupId]
+    );
+    if (!groupCheck.rowCount) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Line group not found' });
+    }
+    await client.query(
+      `UPDATE production_lines
+       SET group_id = NULL, updated_at = NOW()
+       WHERE group_id = $1 AND is_active = TRUE`,
+      [groupId]
+    );
+    await client.query(
+      `UPDATE line_groups
+       SET is_active = FALSE, updated_at = NOW()
+       WHERE id = $1`,
+      [groupId]
+    );
+    await client.query('COMMIT');
+    return res.json({ ok: true });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
 app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
   const managerBaseFields = `
     l.id,
     l.name,
+    l.group_id::TEXT AS "groupId",
+    COALESCE(g.name, '') AS "groupName",
     l.secret_key AS "secretKey",
     l.created_at AS "createdAt",
     (
@@ -373,6 +564,8 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
   const supervisorBaseFields = `
     l.id,
     l.name,
+    l.group_id::TEXT AS "groupId",
+    COALESCE(g.name, '') AS "groupName",
     NULL::TEXT AS "secretKey",
     l.created_at AS "createdAt",
     (
@@ -396,9 +589,18 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
   `;
 
   const query = req.user.role === 'manager'
-    ? `SELECT ${managerBaseFields} FROM production_lines l WHERE l.is_active = TRUE ORDER BY l.created_at DESC`
+    ? `SELECT ${managerBaseFields}
+       FROM production_lines l
+       LEFT JOIN line_groups g
+         ON g.id = l.group_id
+        AND g.is_active = TRUE
+       WHERE l.is_active = TRUE
+       ORDER BY l.created_at DESC`
     : `SELECT ${supervisorBaseFields}
        FROM production_lines l
+       LEFT JOIN line_groups g
+         ON g.id = l.group_id
+        AND g.is_active = TRUE
        INNER JOIN (
          SELECT DISTINCT line_id
          FROM supervisor_line_shift_assignments
@@ -412,10 +614,13 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
   const linesQuery = req.user.role === 'manager'
     ? `SELECT
          l.id,
          l.name,
+         l.group_id::TEXT AS "groupId",
+         COALESCE(g.name, '') AS "groupName",
          l.secret_key AS "secretKey",
          l.created_at AS "createdAt",
          (
@@ -425,11 +630,16 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
            SELECT COUNT(*)::INT FROM shift_logs sl WHERE sl.line_id = l.id
          ) AS "shiftCount"
        FROM production_lines l
+       LEFT JOIN line_groups g
+         ON g.id = l.group_id
+        AND g.is_active = TRUE
        WHERE l.is_active = TRUE
        ORDER BY l.created_at DESC`
     : `SELECT
          l.id,
          l.name,
+         l.group_id::TEXT AS "groupId",
+         COALESCE(g.name, '') AS "groupName",
          NULL::TEXT AS "secretKey",
          l.created_at AS "createdAt",
          (
@@ -451,6 +661,9 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              )
          ) AS "shiftCount"
        FROM production_lines l
+       LEFT JOIN line_groups g
+         ON g.id = l.group_id
+        AND g.is_active = TRUE
        INNER JOIN (
          SELECT DISTINCT line_id
          FROM supervisor_line_shift_assignments
@@ -464,9 +677,10 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   const lineRows = linesResult.rows;
   const lineIds = lineRows.map((line) => line.id);
   if (!lineIds.length) {
-    const payload = { lines: [], supervisors: [] };
+    const payload = { lines: [], supervisors: [], lineGroups: [] };
     if (req.user.role === 'manager') {
       payload.supervisors = await fetchSupervisorsWithAssignments();
+      payload.lineGroups = await fetchLineGroups();
     } else if (req.user.role === 'supervisor') {
       payload.supervisorAssignments = await fetchSupervisorAssignments(req.user.id);
     }
@@ -793,9 +1007,10 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     downtimeRows: downtimeByLine.get(line.id) || []
   }));
 
-  const payload = { lines, supervisors: [] };
+  const payload = { lines, supervisors: [], lineGroups: [] };
   if (req.user.role === 'manager') {
     payload.supervisors = await fetchSupervisorsWithAssignments();
+    payload.lineGroups = await fetchLineGroups();
   } else if (req.user.role === 'supervisor') {
     payload.supervisorAssignments = await fetchSupervisorAssignments(req.user.id);
   }
@@ -1017,18 +1232,39 @@ app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manage
 }));
 
 app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
 
   const lineResult = await dbQuery(
     req.user.role === 'manager'
-      ? `SELECT id, name, secret_key AS "secretKey", created_at AS "createdAt", updated_at AS "updatedAt"
-         FROM production_lines
-         WHERE id = $1 AND is_active = TRUE`
-      : `SELECT id, name, NULL::TEXT AS "secretKey", created_at AS "createdAt", updated_at AS "updatedAt"
-         FROM production_lines
-         WHERE id = $1 AND is_active = TRUE`,
+      ? `SELECT
+           l.id,
+           l.name,
+           l.group_id::TEXT AS "groupId",
+           COALESCE(g.name, '') AS "groupName",
+           l.secret_key AS "secretKey",
+           l.created_at AS "createdAt",
+           l.updated_at AS "updatedAt"
+         FROM production_lines l
+         LEFT JOIN line_groups g
+           ON g.id = l.group_id
+          AND g.is_active = TRUE
+         WHERE l.id = $1 AND l.is_active = TRUE`
+      : `SELECT
+           l.id,
+           l.name,
+           l.group_id::TEXT AS "groupId",
+           COALESCE(g.name, '') AS "groupName",
+           NULL::TEXT AS "secretKey",
+           l.created_at AS "createdAt",
+           l.updated_at AS "updatedAt"
+         FROM production_lines l
+         LEFT JOIN line_groups g
+           ON g.id = l.group_id
+          AND g.is_active = TRUE
+         WHERE l.id = $1 AND l.is_active = TRUE`,
     [lineId]
   );
   if (!lineResult.rowCount) return res.status(404).json({ error: 'Line not found' });
@@ -1296,31 +1532,104 @@ app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyn
 }));
 
 app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
-  const parsed = lineRenameSchema.safeParse(req.body || {});
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid line rename payload' });
+  const parsed = lineUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid line update payload' });
+
+  const hasNameUpdate = Object.prototype.hasOwnProperty.call(parsed.data, 'name');
+  const hasGroupUpdate = Object.prototype.hasOwnProperty.call(parsed.data, 'groupId');
+  const nextName = hasNameUpdate ? parsed.data.name.trim() : null;
+  const nextGroupId = hasGroupUpdate
+    ? (String(parsed.data.groupId || '').trim() || null)
+    : undefined;
+  if (nextGroupId) {
+    const missingGroupIds = await findMissingActiveLineGroupIds([nextGroupId]);
+    if (missingGroupIds.length) return res.status(400).json({ error: 'Line group not found' });
+  }
 
   try {
+    const currentResult = await dbQuery(
+      `SELECT
+         l.id,
+         l.name,
+         l.group_id::TEXT AS "groupId",
+         COALESCE(g.name, '') AS "groupName"
+       FROM production_lines l
+       LEFT JOIN line_groups g
+         ON g.id = l.group_id
+        AND g.is_active = TRUE
+       WHERE l.id = $1
+         AND l.is_active = TRUE`,
+      [lineId]
+    );
+    if (!currentResult.rowCount) return res.status(404).json({ error: 'Line not found' });
+    const currentLine = currentResult.rows[0];
+
+    const setParts = ['updated_at = NOW()'];
+    const params = [lineId];
+    if (hasNameUpdate) {
+      setParts.push(`name = $${params.length + 1}`);
+      params.push(nextName);
+    }
+    if (hasGroupUpdate) {
+      setParts.push(`group_id = $${params.length + 1}`);
+      params.push(nextGroupId);
+    }
+
     const result = await dbQuery(
       `UPDATE production_lines
-       SET name = $2, updated_at = NOW()
+       SET ${setParts.join(', ')}
        WHERE id = $1 AND is_active = TRUE
-       RETURNING id, name, secret_key AS "secretKey", updated_at AS "updatedAt"`,
-      [lineId, parsed.data.name.trim()]
+       RETURNING id`,
+      params
     );
     if (!result.rowCount) return res.status(404).json({ error: 'Line not found' });
 
-    await writeAudit({
-      lineId,
-      actorUserId: req.user.id,
-      actorName: req.user.name,
-      actorRole: req.user.role,
-      action: 'RENAME_LINE',
-      details: `Line renamed to: ${result.rows[0].name}`
-    });
+    const updatedLineResult = await dbQuery(
+      `SELECT
+         l.id,
+         l.name,
+         l.group_id::TEXT AS "groupId",
+         COALESCE(g.name, '') AS "groupName",
+         l.secret_key AS "secretKey",
+         l.updated_at AS "updatedAt"
+       FROM production_lines l
+       LEFT JOIN line_groups g
+         ON g.id = l.group_id
+        AND g.is_active = TRUE
+       WHERE l.id = $1
+         AND l.is_active = TRUE`,
+      [lineId]
+    );
+    if (!updatedLineResult.rowCount) return res.status(404).json({ error: 'Line not found' });
+    const updatedLine = updatedLineResult.rows[0];
 
-    return res.json({ line: result.rows[0] });
+    if (hasNameUpdate && currentLine.name !== updatedLine.name) {
+      await writeAudit({
+        lineId,
+        actorUserId: req.user.id,
+        actorName: req.user.name,
+        actorRole: req.user.role,
+        action: 'RENAME_LINE',
+        details: `Line renamed to: ${updatedLine.name}`
+      });
+    }
+    if (hasGroupUpdate && String(currentLine.groupId || '') !== String(updatedLine.groupId || '')) {
+      const previousGroup = currentLine.groupName || 'Ungrouped';
+      const nextGroup = updatedLine.groupName || 'Ungrouped';
+      await writeAudit({
+        lineId,
+        actorUserId: req.user.id,
+        actorName: req.user.name,
+        actorRole: req.user.role,
+        action: 'UPDATE_LINE_GROUP',
+        details: `Line group changed: ${previousGroup} -> ${nextGroup}`
+      });
+    }
+
+    return res.json({ line: updatedLine });
   } catch (error) {
     if (String(error?.message || '').includes('duplicate key')) {
       return res.status(409).json({ error: 'Line name already exists' });
@@ -1853,6 +2162,116 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   });
 
   return res.json({ downtimeLog: result.rows[0] });
+}));
+
+app.delete('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
+
+  const existingResult = await dbQuery(
+    `SELECT
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       submitted_by_user_id AS "submittedByUserId"
+     FROM shift_logs
+     WHERE id = $1`,
+    [logId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Shift log not found' });
+  const existing = existingResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot delete logs submitted by another user' });
+  }
+
+  await dbQuery(`DELETE FROM shift_logs WHERE id = $1`, [logId]);
+  await writeAudit({
+    lineId: existing.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'DELETE_SHIFT_LOG',
+    details: `Shift log ${logId} deleted (${existing.shift} ${existing.date})`
+  });
+
+  return res.status(204).send();
+}));
+
+app.delete('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid run log id' });
+
+  const existingResult = await dbQuery(
+    `SELECT
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       product,
+       submitted_by_user_id AS "submittedByUserId"
+     FROM run_logs
+     WHERE id = $1`,
+    [logId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Run log not found' });
+  const existing = existingResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot delete logs submitted by another user' });
+  }
+
+  await dbQuery(`DELETE FROM run_logs WHERE id = $1`, [logId]);
+  await writeAudit({
+    lineId: existing.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'DELETE_RUN_LOG',
+    details: `Run log ${logId} deleted (${existing.product}, ${existing.date} ${existing.shift})`
+  });
+
+  return res.status(204).send();
+}));
+
+app.delete('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid downtime log id' });
+
+  const existingResult = await dbQuery(
+    `SELECT
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       shift,
+       COALESCE(reason, '') AS reason,
+       submitted_by_user_id AS "submittedByUserId"
+     FROM downtime_logs
+     WHERE id = $1`,
+    [logId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Downtime log not found' });
+  const existing = existingResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
+    return res.status(403).json({ error: 'Cannot delete logs submitted by another user' });
+  }
+
+  await dbQuery(`DELETE FROM downtime_logs WHERE id = $1`, [logId]);
+  await writeAudit({
+    lineId: existing.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'DELETE_DOWNTIME_LOG',
+    details: `Downtime log ${logId} deleted (${existing.reason || `${existing.date} ${existing.shift}`})`
+  });
+
+  return res.status(204).send();
 }));
 
 function isTransientDatabaseError(error) {
