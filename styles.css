@@ -2899,7 +2899,9 @@ th {
 }
 
 body:has(#homeView.dashboard-page:not(.hidden)) {
-  background: #ffffff;
+  background:
+    radial-gradient(circle at 92% 2%, rgba(207, 127, 0, 0.08), transparent 28%),
+    #f4f7fb;
 }
 
 #homeView.dashboard-page {
@@ -3011,7 +3013,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 
 #homeView.dashboard-page .dashboard-main {
   display: grid;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
 }
 
@@ -3020,11 +3022,11 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 10px 12px 10px 16px;
+  gap: 12px;
+  padding: 12px 14px 12px 18px;
   border-radius: 14px;
-  border: 1px solid var(--border-home);
-  background: #f7f9fb;
+  border: 1px solid #d5dde7;
+  background: linear-gradient(180deg, #fbfcfe 0%, #f5f8fb 100%);
   box-shadow: var(--shadow-card-home);
   margin-bottom: 10px;
 }
@@ -3107,7 +3109,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 #homeView.dashboard-page .topbar-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   margin-left: auto;
   flex-wrap: nowrap;
   min-height: 0;
@@ -3168,10 +3170,10 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   border-radius: 999px;
   background: #ffffff;
   min-height: 44px;
-  padding: 4px 10px 4px 4px;
+  padding: 4px 12px 4px 4px;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
   flex-shrink: 0;
 }
 
@@ -3388,18 +3390,20 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 #homeView.dashboard-page .dash-card {
-  border-radius: 18px;
+  border-radius: 16px;
   border: 1px solid var(--border-home);
   background: var(--card-bg-home);
-  box-shadow: var(--shadow-card-home);
+  box-shadow: 0 3px 10px rgba(16, 24, 32, 0.06);
   padding: 16px;
+  transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 
 #homeView.dashboard-page .dash-card h2 {
-  margin: 0 0 10px;
-  font-size: 14px;
+  margin: 0 0 11px;
+  font-size: 15px;
   line-height: 20px;
   color: var(--text-home);
+  letter-spacing: -0.01em;
 }
 
 #homeView.dashboard-page .stat-card {
@@ -3502,6 +3506,91 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   min-height: 190px;
 }
 
+#homeView.dashboard-page .dash-card-head {
+  margin-bottom: 4px;
+}
+
+#homeView.dashboard-page .line-card {
+  border-color: #ced8e3;
+  border-radius: 14px;
+  padding: 14px;
+  min-height: 176px;
+  background: linear-gradient(180deg, #f9fbfe 0%, #f5f8fc 100%);
+  display: flex;
+  flex-direction: column;
+  transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
+}
+
+#homeView.dashboard-page .line-card h3 {
+  margin-bottom: 0.34rem;
+  line-height: 1.18;
+}
+
+#homeView.dashboard-page .line-card p {
+  margin-bottom: 0;
+  line-height: 1.3;
+  color: #5a6674;
+}
+
+#homeView.dashboard-page .line-card-actions {
+  margin-top: auto;
+  padding-top: 0.95rem;
+  gap: 0.5rem;
+}
+
+#homeView.dashboard-page .line-card-actions button {
+  min-height: 40px;
+  padding: 0 14px;
+  font-size: 0.92rem;
+  font-weight: 700;
+}
+
+#homeView.dashboard-page .line-card-actions .ghost-btn {
+  background: #f2f5f8;
+}
+
+#homeView.dashboard-page .line-card-actions .danger {
+  background: #c92a1a;
+}
+
+#homeView.dashboard-page .line-card:hover {
+  border-color: #bcc9d7;
+  box-shadow: 0 6px 16px rgba(16, 24, 32, 0.1);
+  transform: translateY(-1px);
+}
+
+#homeView.dashboard-page .line-card:focus-within {
+  border-color: #c5862c;
+  box-shadow: 0 0 0 3px rgba(207, 127, 0, 0.18);
+}
+
+#homeView.dashboard-page .line-card.line-card-unavailable {
+  border-color: #e6b8b8;
+  background: #fff4f4;
+}
+
+#homeView.dashboard-page .line-card.line-card-empty {
+  background: #f7fbff;
+}
+
+#homeView.dashboard-page .manage-super-card .action-row,
+#homeView.dashboard-page .add-line-card #openBuilder {
+  margin-top: 2px;
+}
+
+#homeView.dashboard-page .manage-super-card .action-row button,
+#homeView.dashboard-page .add-line-card #openBuilder {
+  min-height: 40px;
+  padding: 0 16px;
+  font-weight: 700;
+}
+
+#homeView.dashboard-page .manage-super-card .muted,
+#homeView.dashboard-page .add-line-card .muted {
+  margin-top: 10px;
+  line-height: 1.35;
+}
+
 #homeView.dashboard-page .dashboard-grid .control-row {
   margin-bottom: 12px;
 }
@@ -3557,7 +3646,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 #homeView.dashboard-page .dash-card:hover {
-  box-shadow: 0 4px 14px rgba(17, 21, 24, 0.08);
+  box-shadow: 0 8px 20px rgba(17, 21, 24, 0.08);
 }
 
 @media (max-width: 1536px) {
