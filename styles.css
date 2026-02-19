@@ -3489,7 +3489,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 #homeView.dashboard-page .project-list-card .line-cards {
-  grid-template-columns: 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 #homeView.dashboard-page .add-line-card,
@@ -3572,6 +3572,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 
 @media (max-width: 1280px) {
   #homeView.dashboard-page .project-list-card .line-cards {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     max-height: 320px;
     overflow: auto;
   }
@@ -3595,6 +3596,10 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 @media (max-width: 768px) {
+  #homeView.dashboard-page .project-list-card .line-cards {
+    grid-template-columns: 1fr;
+  }
+
   #homeView.dashboard-page .dashboard-topbar {
     height: auto;
     flex-direction: column;
