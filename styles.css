@@ -294,6 +294,27 @@ button {
   color: #fff;
   cursor: pointer;
   font-weight: 600;
+  transition: filter 0.16s ease, box-shadow 0.16s ease, background-color 0.16s ease, color 0.16s ease, border-color 0.16s ease;
+}
+
+#homeView.dashboard-page button:not(:disabled):hover,
+#lineWorkspace button:not(:disabled):hover {
+  filter: brightness(0.96);
+}
+
+#homeView.dashboard-page button:not(:disabled):not(.ghost-btn):not(.danger):not(.table-edit-pill):not(.data-subtab-btn):not(.shift-option):not(.line-group-toggle):not(.tab-btn):not(.supervisor-action-delete):hover,
+#lineWorkspace button:not(:disabled):not(.ghost-btn):not(.danger):not(.table-edit-pill):not(.data-subtab-btn):not(.shift-option):not(.line-group-toggle):not(.tab-btn):not(.supervisor-action-delete):hover,
+#manageSupervisorsModal .supervisor-action-save:not(:disabled):hover,
+#homeView.dashboard-page .tab-btn.active:not(:disabled):hover,
+#lineWorkspace .tab-btn.active:not(:disabled):hover {
+  background: #2a3440;
+  border-color: #2a3440;
+  filter: none;
+}
+
+#homeView.dashboard-page button:not(:disabled):active,
+#lineWorkspace button:not(:disabled):active {
+  filter: brightness(0.92);
 }
 
 .ghost-btn {
@@ -3985,6 +4006,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 #homeView.dashboard-page .project-list-card {
   grid-column: span 12;
   min-height: 240px;
+  margin-bottom: 14px;
 }
 
 #homeView.dashboard-page .project-list-card .line-cards {
@@ -4137,6 +4159,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 
 #homeView.dashboard-page .manage-super-card {
   min-height: 190px;
+  margin-bottom: 14px;
 }
 
 #homeView.dashboard-page .dash-card-head {
