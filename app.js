@@ -2593,6 +2593,16 @@ async function patchManagerShiftLog(logId, payload) {
   return response?.shiftLog || null;
 }
 
+async function patchManagerShiftBreak(shiftLogId, breakId, payload) {
+  const session = await ensureManagerBackendSession();
+  const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: payload
+  });
+  return response?.breakLog || null;
+}
+
 async function patchManagerRunLog(logId, payload) {
   const session = await ensureManagerBackendSession();
   const response = await apiRequest(`/api/logs/runs/${logId}`, {
@@ -7201,17 +7211,53 @@ function bindForms() {
       return;
     }
     const existingBreakRows = Array.isArray(state.breakRows) ? state.breakRows : [];
-    const hasShiftLinkedBreaks = existingBreakRows.some((breakRow) => String(breakRow?.shiftLogId || "") === String(row.id || ""));
+    const lineHasShiftLinkedBreaks = existingBreakRows.some((breakRow) => Boolean(String(breakRow?.shiftLogId || "").trim()));
     const belongsToShift = (breakRow) => {
-      const shiftLogId = String(breakRow?.shiftLogId || "");
-      if (shiftLogId) return shiftLogId === String(row.id || "");
-      if (hasShiftLinkedBreaks) return false;
+      if (lineHasShiftLinkedBreaks) return String(breakRow?.shiftLogId || "") === String(row.id || "");
       return String(breakRow?.date || "") === String(row.date || "") && String(breakRow?.shift || "") === String(row.shift || "");
     };
     const openBreak = latestBySubmittedAt(existingBreakRows.filter((breakRow) => belongsToShift(breakRow) && isOpenBreakRow(breakRow)));
-    if (openBreak?.id) {
-      alert("End the current break before finalising the shift.");
-      return;
+    if (openBreak) {
+      const breakStart = String(openBreak.breakStart || "").trim();
+      const breakFinishPrompt = window.prompt(
+        "End open break first. Break finish time (HH:MM)",
+        managerDefaultFinishTime(strictTimeValid(breakStart) ? breakStart : startTime)
+      );
+      if (breakFinishPrompt === null) return;
+      const breakFinish = String(breakFinishPrompt || "").trim();
+      if (!strictTimeValid(breakFinish)) {
+        alert("Break finish time must be HH:MM (24h).");
+        return;
+      }
+      if (strictTimeValid(breakStart) && breakFinish === breakStart) {
+        alert("Break finish time must be different from break start time.");
+        return;
+      }
+      const canPatchBreakServer = UUID_RE.test(String(logId || "")) && UUID_RE.test(String(openBreak.id || ""));
+      try {
+        if (canPatchBreakServer) {
+          const savedBreak = await patchManagerShiftBreak(logId, openBreak.id, { breakFinish });
+          const nextBreakStart = String(savedBreak?.breakStart || breakStart || "");
+          const nextBreakFinish = String(savedBreak?.breakFinish || breakFinish || "");
+          Object.assign(openBreak, {
+            breakStart: nextBreakStart || breakStart,
+            breakFinish: nextBreakFinish || breakFinish,
+            breakMins: Math.max(0, diffMinutes(nextBreakStart || breakStart, nextBreakFinish || breakFinish)),
+            submittedBy: "manager",
+            submittedAt: savedBreak?.submittedAt || nowIso()
+          });
+        } else {
+          Object.assign(openBreak, {
+            breakFinish,
+            breakMins: Math.max(0, diffMinutes(breakStart, breakFinish)),
+            submittedBy: "manager",
+            submittedAt: nowIso()
+          });
+        }
+      } catch (error) {
+        alert(`Could not end open break.\n${error?.message || "Please try again."}`);
+        return;
+      }
     }
     const finishPrompt = window.prompt("Finish time (HH:MM)", managerDefaultFinishTime(startTime));
     if (finishPrompt === null) return;
@@ -9094,7 +9140,8 @@ function renderTrackingTables() {
     const breakTimeMins = Math.max(0, num(summary.mins));
     const editing = isInlineEditing("shift", String(row.id || ""));
     const hasOpenBreak = openBreakByShiftLogId.has(String(row.id || ""));
-    const pending = isPendingShiftLogRow(row) || hasOpenBreak;
+    const shiftPending = isPendingShiftLogRow(row);
+    const pending = shiftPending || hasOpenBreak;
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
@@ -9113,7 +9160,7 @@ function renderTrackingTables() {
       breakCount: editing ? inlineInputHtml("breakCount", breakCount, { type: "number", min: "0", step: "1" }) : breakCount,
       breakTimeMins: editing ? inlineInputHtml("breakTimeMins", breakTimeMins, { type: "number", min: "0", step: "0.1" }) : breakTimeMins,
       submittedBy: managerLogSubmittedByLabel(row),
-      action: actionHtml("shift", row, { editing, pending })
+      action: actionHtml("shift", row, { editing, pending: shiftPending })
     };
   });
 
