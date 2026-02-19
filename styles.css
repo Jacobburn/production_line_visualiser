@@ -3386,7 +3386,8 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 #homeView.dashboard-page #managerHome.dashboard-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
-  gap: 16px;
+  column-gap: 16px;
+  row-gap: 24px;
 }
 
 #homeView.dashboard-page .dash-card {
