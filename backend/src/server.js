@@ -40,6 +40,10 @@ const lineGroupUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120)
 });
 
+const lineGroupReorderSchema = z.object({
+  groupIds: z.array(z.string().uuid()).min(1)
+});
+
 const lineModelSchema = z.object({
   stages: z.array(
     z.object({
@@ -126,6 +130,19 @@ const lineUpdateSchema = z.object({
   name: z.string().trim().min(2).max(120).optional(),
   groupId: z.string().uuid().optional().or(z.literal('')).or(z.null())
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
+
+const lineReorderSchema = z.object({
+  lineIds: z.array(z.string().uuid()).min(1),
+  groupId: z.string().uuid().optional().or(z.literal('')).or(z.null())
+});
+
+const LINE_ORDER_BY_SQL = `
+  CASE WHEN l.group_id IS NULL THEN 1 ELSE 0 END ASC,
+  COALESCE(g.display_order, 2147483647) ASC,
+  l.display_order ASC,
+  LOWER(l.name) ASC,
+  l.created_at ASC
+`;
 
 const shiftLogUpdateSchema = z.object({
   crewOnShift: z.number().int().min(0).optional(),
@@ -387,6 +404,10 @@ async function ensureLineGroupSchema() {
        ADD COLUMN IF NOT EXISTS group_id UUID REFERENCES line_groups(id) ON DELETE SET NULL`
     );
     await dbQuery(
+      `ALTER TABLE production_lines
+       ADD COLUMN IF NOT EXISTS display_order INTEGER NOT NULL DEFAULT 0`
+    );
+    await dbQuery(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_line_groups_name_active_unique
        ON line_groups (LOWER(name))
        WHERE is_active = TRUE`
@@ -398,6 +419,11 @@ async function ensureLineGroupSchema() {
     await dbQuery(
       `CREATE INDEX IF NOT EXISTS idx_production_lines_group_id
        ON production_lines (group_id)`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_production_lines_group_display_order
+       ON production_lines (group_id, display_order ASC, created_at ASC)
+       WHERE is_active = TRUE`
     );
     lineGroupSchemaReady = true;
   })()
@@ -477,6 +503,51 @@ app.post('/api/line-groups', authMiddleware, requireRole('manager'), asyncRoute(
   }
 }));
 
+app.patch('/api/line-groups/reorder', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
+  const parsed = lineGroupReorderSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid line group reorder payload' });
+  const nextGroupIds = parsed.data.groupIds;
+  const uniqueGroupIds = Array.from(new Set(nextGroupIds));
+  if (uniqueGroupIds.length !== nextGroupIds.length) {
+    return res.status(400).json({ error: 'Duplicate group ids are not allowed' });
+  }
+
+  const activeGroupsResult = await dbQuery(
+    `SELECT id::TEXT AS id
+     FROM line_groups
+     WHERE is_active = TRUE
+     ORDER BY display_order ASC, LOWER(name) ASC, created_at ASC`
+  );
+  const activeGroupIds = activeGroupsResult.rows.map((row) => row.id);
+  if (activeGroupIds.length !== uniqueGroupIds.length) {
+    return res.status(400).json({ error: 'Reorder payload must include all active groups' });
+  }
+  const activeGroupSet = new Set(activeGroupIds);
+  const hasInvalid = uniqueGroupIds.some((groupId) => !activeGroupSet.has(groupId));
+  if (hasInvalid) return res.status(400).json({ error: 'One or more line group ids are invalid' });
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (let index = 0; index < uniqueGroupIds.length; index += 1) {
+      await client.query(
+        `UPDATE line_groups
+         SET display_order = $2, updated_at = NOW()
+         WHERE id = $1 AND is_active = TRUE`,
+        [uniqueGroupIds[index], index]
+      );
+    }
+    await client.query('COMMIT');
+    return res.json({ lineGroups: await fetchLineGroups() });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
 app.patch('/api/line-groups/:groupId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   await ensureLineGroupSchema();
   const groupId = req.params.groupId;
@@ -524,9 +595,25 @@ app.delete('/api/line-groups/:groupId', authMiddleware, requireRole('manager'), 
       return res.status(404).json({ error: 'Line group not found' });
     }
     await client.query(
-      `UPDATE production_lines
-       SET group_id = NULL, updated_at = NOW()
-       WHERE group_id = $1 AND is_active = TRUE`,
+      `WITH group_lines AS (
+         SELECT
+           id,
+           ROW_NUMBER() OVER (ORDER BY display_order ASC, created_at ASC) - 1 AS row_idx
+         FROM production_lines
+         WHERE group_id = $1 AND is_active = TRUE
+       ),
+       ungrouped_base AS (
+         SELECT COALESCE(MAX(display_order) + 1, 0) AS start_order
+         FROM production_lines
+         WHERE group_id IS NULL AND is_active = TRUE
+       )
+       UPDATE production_lines line
+       SET
+         group_id = NULL,
+         display_order = (SELECT start_order FROM ungrouped_base) + group_lines.row_idx,
+         updated_at = NOW()
+       FROM group_lines
+       WHERE line.id = group_lines.id`,
       [groupId]
     );
     await client.query(
@@ -552,6 +639,7 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
     l.name,
     l.group_id::TEXT AS "groupId",
     COALESCE(g.name, '') AS "groupName",
+    l.display_order AS "displayOrder",
     l.secret_key AS "secretKey",
     l.created_at AS "createdAt",
     (
@@ -566,6 +654,7 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
     l.name,
     l.group_id::TEXT AS "groupId",
     COALESCE(g.name, '') AS "groupName",
+    l.display_order AS "displayOrder",
     NULL::TEXT AS "secretKey",
     l.created_at AS "createdAt",
     (
@@ -595,7 +684,7 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
          ON g.id = l.group_id
         AND g.is_active = TRUE
        WHERE l.is_active = TRUE
-       ORDER BY l.created_at DESC`
+       ORDER BY ${LINE_ORDER_BY_SQL}`
     : `SELECT ${supervisorBaseFields}
        FROM production_lines l
        LEFT JOIN line_groups g
@@ -607,10 +696,82 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
          WHERE supervisor_user_id = $1
        ) a ON a.line_id = l.id
        WHERE l.is_active = TRUE
-       ORDER BY l.created_at DESC`;
+       ORDER BY ${LINE_ORDER_BY_SQL}`;
 
   const result = await dbQuery(query, req.user.role === 'manager' ? [] : [req.user.id]);
   res.json({ lines: result.rows });
+}));
+
+app.patch('/api/lines/reorder', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
+  const parsed = lineReorderSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid line reorder payload' });
+
+  const nextGroupId = String(parsed.data.groupId || '').trim() || null;
+  if (nextGroupId) {
+    const missingGroupIds = await findMissingActiveLineGroupIds([nextGroupId]);
+    if (missingGroupIds.length) return res.status(400).json({ error: 'Line group not found' });
+  }
+
+  const nextLineIds = parsed.data.lineIds;
+  const uniqueLineIds = Array.from(new Set(nextLineIds));
+  if (uniqueLineIds.length !== nextLineIds.length) {
+    return res.status(400).json({ error: 'Duplicate line ids are not allowed' });
+  }
+
+  const existingLineResult = await dbQuery(
+    `SELECT id::TEXT AS id
+     FROM production_lines
+     WHERE is_active = TRUE
+       AND (($1::UUID IS NULL AND group_id IS NULL) OR group_id = $1::UUID)
+     ORDER BY display_order ASC, created_at ASC`,
+    [nextGroupId]
+  );
+  const existingLineIds = existingLineResult.rows.map((row) => row.id);
+  if (existingLineIds.length !== uniqueLineIds.length) {
+    return res.status(400).json({ error: 'Reorder payload must include all active lines in the target group' });
+  }
+  const existingLineSet = new Set(existingLineIds);
+  const hasInvalidLine = uniqueLineIds.some((lineId) => !existingLineSet.has(lineId));
+  if (hasInvalidLine) {
+    return res.status(400).json({ error: 'One or more line ids are invalid for the target group' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (let index = 0; index < uniqueLineIds.length; index += 1) {
+      const updateResult = await client.query(
+        `UPDATE production_lines
+         SET display_order = $2, updated_at = NOW()
+         WHERE id = $1
+           AND is_active = TRUE
+           AND (($3::UUID IS NULL AND group_id IS NULL) OR group_id = $3::UUID)`,
+        [uniqueLineIds[index], index, nextGroupId]
+      );
+      if (!updateResult.rowCount) {
+        throw new Error('Line reorder conflict. Please refresh and try again.');
+      }
+    }
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  const reorderedResult = await dbQuery(
+    `SELECT
+       id,
+       name,
+       group_id::TEXT AS "groupId",
+       display_order AS "displayOrder"
+     FROM production_lines
+     WHERE id = ANY($1::UUID[])`,
+    [uniqueLineIds]
+  );
+  return res.json({ lines: reorderedResult.rows });
 }));
 
 app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
@@ -621,6 +782,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          l.name,
          l.group_id::TEXT AS "groupId",
          COALESCE(g.name, '') AS "groupName",
+         l.display_order AS "displayOrder",
          l.secret_key AS "secretKey",
          l.created_at AS "createdAt",
          (
@@ -634,12 +796,13 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          ON g.id = l.group_id
         AND g.is_active = TRUE
        WHERE l.is_active = TRUE
-       ORDER BY l.created_at DESC`
+       ORDER BY ${LINE_ORDER_BY_SQL}`
     : `SELECT
          l.id,
          l.name,
          l.group_id::TEXT AS "groupId",
          COALESCE(g.name, '') AS "groupName",
+         l.display_order AS "displayOrder",
          NULL::TEXT AS "secretKey",
          l.created_at AS "createdAt",
          (
@@ -670,7 +833,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          WHERE supervisor_user_id = $1
        ) a ON a.line_id = l.id
        WHERE l.is_active = TRUE
-       ORDER BY l.created_at DESC`;
+       ORDER BY ${LINE_ORDER_BY_SQL}`;
 
   const isManager = req.user.role === 'manager';
   const linesResult = await dbQuery(linesQuery, isManager ? [] : [req.user.id]);
@@ -1024,9 +1187,25 @@ app.post('/api/lines', authMiddleware, requireRole('manager'), asyncRoute(async 
 
   try {
     const result = await dbQuery(
-      `INSERT INTO production_lines(name, secret_key, created_by_user_id)
-       VALUES ($1, $2, $3)
-       RETURNING id, name, secret_key AS "secretKey", created_at AS "createdAt"`,
+      `INSERT INTO production_lines(name, secret_key, created_by_user_id, display_order)
+       VALUES (
+         $1,
+         $2,
+         $3,
+         COALESCE((
+           SELECT MAX(display_order) + 1
+           FROM production_lines
+           WHERE group_id IS NULL
+             AND is_active = TRUE
+         ), 0)
+       )
+       RETURNING
+         id,
+         name,
+         group_id::TEXT AS "groupId",
+         display_order AS "displayOrder",
+         secret_key AS "secretKey",
+         created_at AS "createdAt"`,
       [parsed.data.name.trim(), parsed.data.secretKey.trim(), req.user.id]
     );
 
@@ -1244,6 +1423,7 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
            l.name,
            l.group_id::TEXT AS "groupId",
            COALESCE(g.name, '') AS "groupName",
+           l.display_order AS "displayOrder",
            l.secret_key AS "secretKey",
            l.created_at AS "createdAt",
            l.updated_at AS "updatedAt"
@@ -1257,6 +1437,7 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
            l.name,
            l.group_id::TEXT AS "groupId",
            COALESCE(g.name, '') AS "groupName",
+           l.display_order AS "displayOrder",
            NULL::TEXT AS "secretKey",
            l.created_at AS "createdAt",
            l.updated_at AS "updatedAt"
@@ -1555,7 +1736,8 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
          l.id,
          l.name,
          l.group_id::TEXT AS "groupId",
-         COALESCE(g.name, '') AS "groupName"
+         COALESCE(g.name, '') AS "groupName",
+         l.display_order AS "displayOrder"
        FROM production_lines l
        LEFT JOIN line_groups g
          ON g.id = l.group_id
@@ -1566,6 +1748,19 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
     );
     if (!currentResult.rowCount) return res.status(404).json({ error: 'Line not found' });
     const currentLine = currentResult.rows[0];
+    const groupChanged = hasGroupUpdate && String(currentLine.groupId || '') !== String(nextGroupId || '');
+    const nextDisplayOrderResult = groupChanged
+      ? await dbQuery(
+        `SELECT COALESCE(MAX(display_order) + 1, 0) AS "nextDisplayOrder"
+         FROM production_lines
+         WHERE is_active = TRUE
+           AND (($1::UUID IS NULL AND group_id IS NULL) OR group_id = $1::UUID)`,
+        [nextGroupId || null]
+      )
+      : null;
+    const nextDisplayOrder = groupChanged
+      ? Number(nextDisplayOrderResult?.rows?.[0]?.nextDisplayOrder || 0)
+      : null;
 
     const setParts = ['updated_at = NOW()'];
     const params = [lineId];
@@ -1576,6 +1771,10 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
     if (hasGroupUpdate) {
       setParts.push(`group_id = $${params.length + 1}`);
       params.push(nextGroupId);
+      if (groupChanged) {
+        setParts.push(`display_order = $${params.length + 1}`);
+        params.push(nextDisplayOrder);
+      }
     }
 
     const result = await dbQuery(
@@ -1593,6 +1792,7 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
          l.name,
          l.group_id::TEXT AS "groupId",
          COALESCE(g.name, '') AS "groupName",
+         l.display_order AS "displayOrder",
          l.secret_key AS "secretKey",
          l.updated_at AS "updatedAt"
        FROM production_lines l

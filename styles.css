@@ -4003,6 +4003,12 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   gap: 0.6rem;
 }
 
+#homeView.dashboard-page .line-group-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.42rem;
+}
+
 #homeView.dashboard-page .line-group-toggle {
   display: inline-flex;
   align-items: center;
@@ -4064,6 +4070,45 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   white-space: nowrap;
 }
 
+#homeView.dashboard-page .line-group-drag-handle,
+#homeView.dashboard-page .line-card-drag-handle {
+  border: 0;
+  background: transparent;
+  padding: 0 2px;
+  color: #4f6278;
+  font-size: 0.78rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  user-select: none;
+  opacity: 0.74;
+  transition: color 0.15s ease, opacity 0.15s ease, transform 0.15s ease;
+}
+
+#homeView.dashboard-page .line-group-drag-handle:hover,
+#homeView.dashboard-page .line-card-drag-handle:hover {
+  color: #33495f;
+  opacity: 1;
+  transform: translateY(-1px);
+}
+
+#homeView.dashboard-page .line-group-drag-handle:focus-visible,
+#homeView.dashboard-page .line-card-drag-handle:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px rgba(207, 127, 0, 0.18);
+  border-radius: 6px;
+  opacity: 1;
+}
+
+#homeView.dashboard-page .line-group-drag-handle:active,
+#homeView.dashboard-page .line-card-drag-handle:active {
+  cursor: grabbing;
+  transform: none;
+}
+
 #homeView.dashboard-page .line-group-section .line-cards {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
@@ -4093,8 +4138,16 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 
-#homeView.dashboard-page .line-card h3 {
+#homeView.dashboard-page .line-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
   margin-bottom: 0.34rem;
+}
+
+#homeView.dashboard-page .line-card h3 {
+  margin: 0;
   line-height: 1.18;
 }
 
@@ -4364,6 +4417,17 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 #homeView.dashboard-page .line-card.line-card-live-critical:focus-within {
   border-color: #b44c4c;
   box-shadow: 0 0 0 3px rgba(190, 72, 72, 0.23);
+}
+
+#homeView.dashboard-page #lineCards.home-dnd-group-active .line-group-section,
+#homeView.dashboard-page #lineCards.home-dnd-line-active .line-card {
+  transition: transform 0.12s ease;
+}
+
+#homeView.dashboard-page .line-group-section.is-dragging,
+#homeView.dashboard-page .line-card.is-dragging {
+  opacity: 0.6;
+  transform: scale(0.995);
 }
 
 #homeView.dashboard-page .line-card.line-card-unavailable {

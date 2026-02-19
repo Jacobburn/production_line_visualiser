@@ -80,6 +80,7 @@ let runCrewingPatternModalState = null;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 appState.lineGroups = normalizeLineGroups(appState.lineGroups);
 let lineModelSyncTimer = null;
+const deferredLineModelSyncIds = new Set();
 let lineShiftTrackerResizeTimer = null;
 let lineTileFeedbackTimer = null;
 let hostedRefreshErrorShown = false;
@@ -545,6 +546,18 @@ function sortLinesByName(lines) {
   return (Array.isArray(lines) ? lines.slice() : []).sort((a, b) =>
     String(a?.name || "").localeCompare(String(b?.name || ""), undefined, { sensitivity: "base", numeric: true })
   );
+}
+
+function sortLinesByDisplayOrder(lines) {
+  return (Array.isArray(lines) ? lines.slice() : []).sort((a, b) => {
+    const orderA = Number(a?.displayOrder);
+    const orderB = Number(b?.displayOrder);
+    const hasOrderA = Number.isFinite(orderA);
+    const hasOrderB = Number.isFinite(orderB);
+    if (hasOrderA && hasOrderB && orderA !== orderB) return orderA - orderB;
+    if (hasOrderA !== hasOrderB) return hasOrderA ? -1 : 1;
+    return String(a?.name || "").localeCompare(String(b?.name || ""), undefined, { sensitivity: "base", numeric: true });
+  });
 }
 
 function homeLineGroupExpandedState() {
@@ -1136,11 +1149,24 @@ function queueLineModelSync(lineId) {
   }, 300);
 }
 
+function requestLineModelSync(lineId, { force = false } = {}) {
+  const safeLineId = String(lineId || "");
+  if (!safeLineId) return;
+  const line = appState.lines?.[safeLineId];
+  const editingLayout = Boolean(line?.visualEditMode);
+  if (editingLayout && !force) {
+    deferredLineModelSyncIds.add(safeLineId);
+    return;
+  }
+  deferredLineModelSyncIds.delete(safeLineId);
+  queueLineModelSync(safeLineId);
+}
+
 function saveState(options = {}) {
   if (state && state.id) {
     appState.lines[state.id] = state;
     appState.activeLineId = state.id;
-    if (options.syncModel) queueLineModelSync(state.id);
+    if (options.syncModel) requestLineModelSync(state.id, { force: Boolean(options.forceSyncModel) });
   }
   persistAuthSessions();
   persistHomeUiState();
@@ -1153,6 +1179,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     id,
     name,
     groupId: "",
+    displayOrder: 0,
     secretKey: generateSecretKey(),
     selectedDate: todayISO(),
     selectedShift: "Day",
@@ -1180,6 +1207,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
 
 function normalizeLine(id, line) {
   const base = makeDefaultLine(id, line?.name || "Production Line");
+  const displayOrderRaw = Number(line?.displayOrder);
   const stages = Array.isArray(line?.stages) && line.stages.length ? line.stages : clone(STAGES);
   const normalized = {
     ...base,
@@ -1187,6 +1215,7 @@ function normalizeLine(id, line) {
     id,
     name: line?.name || base.name,
     groupId: String(line?.groupId || "").trim(),
+    displayOrder: Number.isFinite(displayOrderRaw) ? Math.max(0, Math.floor(displayOrderRaw)) : base.displayOrder,
     secretKey: line?.secretKey || base.secretKey,
     visualEditMode: Boolean(line?.visualEditMode),
     flowGuides: normalizeFlowGuides(line?.flowGuides),
@@ -1512,12 +1541,26 @@ function renderLineCalloutPills(line, now = new Date()) {
   return lineTileCalloutPillsHtml(lineTileLiveSnapshot(line, now));
 }
 
-function renderHomeLineCard(line) {
+function renderHomeLineCard(line, { groupKey = "", showDragHandle = false } = {}) {
   const callouts = renderLineCalloutPills(line);
   const tracker = renderLineShiftTracker(line);
+  const safeGroupKey = String(groupKey || "").trim() || "ungrouped";
+  const dragHandle = showDragHandle
+    ? `<button
+          type="button"
+          class="line-card-drag-handle"
+          data-line-card-drag-handle
+          draggable="true"
+          title="Drag to reorder line"
+          aria-label="Reorder ${htmlEscape(line.name)}"
+        ><span aria-hidden="true">::</span></button>`
+    : "";
   return `
-    <article class="line-card" data-line-tile="${line.id}">
-      <h3>${htmlEscape(line.name)}</h3>
+    <article class="line-card" data-line-tile="${line.id}" data-line-card-id="${line.id}" data-line-card-group="${safeGroupKey}">
+      <div class="line-card-head">
+        <h3>${htmlEscape(line.name)}</h3>
+        ${dragHandle}
+      </div>
       <div class="line-card-callouts">${callouts}</div>
       ${tracker}
       <div class="line-card-actions">
@@ -1530,7 +1573,7 @@ function renderHomeLineCard(line) {
 }
 
 function renderGroupedHomeLineCards(lineList, lineGroups) {
-  const sortedLines = sortLinesByName(lineList);
+  const sortedLines = sortLinesByDisplayOrder(lineList);
   const groups = normalizeLineGroups(lineGroups);
   if (!groups.length) {
     return {
@@ -1563,11 +1606,21 @@ function renderGroupedHomeLineCards(lineList, lineGroups) {
               <span class="line-group-caret" aria-hidden="true"></span>
               <h3>${htmlEscape(group.name)}</h3>
             </button>
-            <span class="line-group-count">${runningCount}/${lineCount} lines running</span>
+            <div class="line-group-tools">
+              <span class="line-group-count">${runningCount}/${lineCount} lines running</span>
+              <button
+                type="button"
+                class="line-group-drag-handle"
+                data-line-group-drag-handle
+                draggable="true"
+                title="Drag to reorder group"
+                aria-label="Reorder ${htmlEscape(group.name)} group"
+              ><span aria-hidden="true">::</span></button>
+            </div>
           </header>
           <div class="line-group-body"${expanded ? "" : " hidden"}>
             ${expanded
-              ? `<div class="line-cards">${lines.map((line) => renderHomeLineCard(line)).join("")}</div>`
+              ? `<div class="line-cards" data-line-card-list="${group.id}">${lines.map((line) => renderHomeLineCard(line, { groupKey: group.id, showDragHandle: true })).join("")}</div>`
               : ""}
           </div>
         </section>
@@ -1587,11 +1640,13 @@ function renderGroupedHomeLineCards(lineList, lineGroups) {
             <span class="line-group-caret" aria-hidden="true"></span>
             <h3>Ungrouped</h3>
           </button>
-          <span class="line-group-count">${runningCount}/${lineCount} lines running</span>
+          <div class="line-group-tools">
+            <span class="line-group-count">${runningCount}/${lineCount} lines running</span>
+          </div>
         </header>
         <div class="line-group-body"${expanded ? "" : " hidden"}>
           ${expanded
-            ? `<div class="line-cards">${ungrouped.map((line) => renderHomeLineCard(line)).join("")}</div>`
+            ? `<div class="line-cards" data-line-card-list="ungrouped">${ungrouped.map((line) => renderHomeLineCard(line, { groupKey: "ungrouped", showDragHandle: true })).join("")}</div>`
             : ""}
         </div>
       </section>
@@ -1671,6 +1726,12 @@ function syncLineTileFeedbackLoop({ enabled = false } = {}) {
 function num(value) {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+function roundToDecimals(value, decimals = 1) {
+  const safeDecimals = Math.max(0, Math.floor(num(decimals)));
+  const factor = 10 ** safeDecimals;
+  return Math.round(num(value) * factor) / factor;
 }
 
 function formatNum(value, digits = 1) {
@@ -2139,6 +2200,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
   const lineId = lineSummary.id;
   const line = makeDefaultLine(lineId, lineSummary.name || "Production Line");
   line.groupId = String(lineSummary?.groupId || "").trim();
+  line.displayOrder = Math.max(0, Math.floor(num(lineSummary?.displayOrder)));
   line.secretKey = lineSummary.secretKey || line.secretKey;
   const backendStages = Array.isArray(lineDetail?.stages) ? lineDetail.stages : [];
   line.stages = backendStages.length
@@ -2591,6 +2653,9 @@ async function createLineOnBackend(lineName, secretKey, lineModel) {
   if (!lineId) throw new Error("Backend line create failed");
   appState.lines[lineId] = lineModel;
   lineModel.id = lineId;
+  lineModel.groupId = String(created?.line?.groupId || "").trim();
+  const nextOrder = Number(created?.line?.displayOrder);
+  if (Number.isFinite(nextOrder)) lineModel.displayOrder = Math.max(0, Math.floor(nextOrder));
   await saveLineModelToBackend(lineId);
   return { lineId, created };
 }
@@ -3570,7 +3635,7 @@ function bindHome() {
   const renderLineGroupManagerList = () => {
     if (!lineGroupManagerList) return;
     const lineGroups = normalizeLineGroups(appState.lineGroups);
-    const lines = sortLinesByName(Object.values(appState.lines || {}));
+    const lines = sortLinesByDisplayOrder(Object.values(appState.lines || {}));
     const lineCountByGroup = {};
     lines.forEach((line) => {
       const groupId = String(line?.groupId || "").trim();
@@ -3663,12 +3728,14 @@ function bindHome() {
     const session = await ensureManagerBackendSession();
     const backendLineId = UUID_RE.test(String(lineId)) ? lineId : await ensureBackendLineId(lineId, session);
     if (!backendLineId) throw new Error("Line is not synced to server.");
-    await apiRequest(`/api/lines/${backendLineId}`, {
+    const response = await apiRequest(`/api/lines/${backendLineId}`, {
       method: "PATCH",
       token: session.backendToken,
       body: { groupId: safeGroupId || null }
     });
     line.groupId = safeGroupId;
+    const nextOrder = Number(response?.line?.displayOrder);
+    if (Number.isFinite(nextOrder)) line.displayOrder = Math.max(0, Math.floor(nextOrder));
     saveState();
     renderHome();
     renderLineGroupManagerList();
@@ -5764,6 +5831,224 @@ function bindHome() {
     }
   });
 
+  const homeDnDState = {
+    type: "",
+    draggedGroupId: "",
+    draggedLineId: "",
+    sourceGroupKey: ""
+  };
+
+  const resetHomeDnDState = () => {
+    homeDnDState.type = "";
+    homeDnDState.draggedGroupId = "";
+    homeDnDState.draggedLineId = "";
+    homeDnDState.sourceGroupKey = "";
+    cards.classList.remove("home-dnd-group-active", "home-dnd-line-active");
+    cards.querySelectorAll(".is-dragging").forEach((node) => node.classList.remove("is-dragging"));
+  };
+
+  const isManagerHomeDnDEnabled = () =>
+    appState.appMode === "manager" &&
+    Boolean(managerBackendSession.backendToken) &&
+    cards.classList.contains("line-cards-grouped");
+
+  const findGroupSectionById = (groupId) =>
+    Array.from(cards.querySelectorAll("[data-line-group-section]")).find(
+      (section) => String(section.getAttribute("data-line-group-section") || "") === String(groupId || "")
+    ) || null;
+
+  const findLineCardById = (lineId) =>
+    Array.from(cards.querySelectorAll("[data-line-card-id]")).find(
+      (card) => String(card.getAttribute("data-line-card-id") || "") === String(lineId || "")
+    ) || null;
+
+  const persistGroupOrderFromDom = async () => {
+    const orderedGroupIds = Array.from(cards.querySelectorAll("[data-line-group-section]"))
+      .map((section) => String(section.getAttribute("data-line-group-section") || "").trim())
+      .filter((groupId) => groupId && groupId !== "ungrouped");
+    if (orderedGroupIds.length < 2) return;
+    const allGroupIds = normalizeLineGroups(appState.lineGroups).map((group) => group.id);
+    const fullGroupOrder = [
+      ...orderedGroupIds,
+      ...allGroupIds.filter((groupId) => !orderedGroupIds.includes(groupId))
+    ];
+    const session = await ensureManagerBackendSession();
+    const response = await apiRequest("/api/line-groups/reorder", {
+      method: "PATCH",
+      token: session.backendToken,
+      body: { groupIds: fullGroupOrder }
+    });
+    const backendGroups = normalizeLineGroups(response?.lineGroups);
+    if (backendGroups.length) {
+      appState.lineGroups = backendGroups;
+    } else {
+      const displayOrderById = Object.fromEntries(fullGroupOrder.map((groupId, index) => [groupId, index]));
+      appState.lineGroups = normalizeLineGroups(
+        normalizeLineGroups(appState.lineGroups).map((group) => ({
+          ...group,
+          displayOrder: Number.isFinite(displayOrderById[group.id]) ? displayOrderById[group.id] : group.displayOrder
+        }))
+      );
+    }
+    saveState();
+  };
+
+  const persistLineOrderFromDom = async (groupKey) => {
+    const safeGroupKey = String(groupKey || "").trim();
+    if (!safeGroupKey) return;
+    const targetList = Array.from(cards.querySelectorAll("[data-line-card-list]")).find(
+      (list) => String(list.getAttribute("data-line-card-list") || "") === safeGroupKey
+    );
+    if (!targetList) return;
+    const lineIds = Array.from(targetList.querySelectorAll("[data-line-card-id]"))
+      .map((card) => String(card.getAttribute("data-line-card-id") || "").trim())
+      .filter(Boolean);
+    if (lineIds.length < 2) return;
+    const nextGroupId = safeGroupKey === "ungrouped" ? null : safeGroupKey;
+    const session = await ensureManagerBackendSession();
+    const response = await apiRequest("/api/lines/reorder", {
+      method: "PATCH",
+      token: session.backendToken,
+      body: {
+        lineIds,
+        groupId: nextGroupId
+      }
+    });
+    const syncedLines = Array.isArray(response?.lines) ? response.lines : [];
+    if (syncedLines.length) {
+      syncedLines.forEach((lineRow) => {
+        const line = appState.lines?.[lineRow.id];
+        if (!line) return;
+        line.groupId = String(lineRow?.groupId || "").trim();
+        const nextOrder = Number(lineRow?.displayOrder);
+        if (Number.isFinite(nextOrder)) line.displayOrder = Math.max(0, Math.floor(nextOrder));
+      });
+    } else {
+      lineIds.forEach((lineId, index) => {
+        const line = appState.lines?.[lineId];
+        if (!line) return;
+        line.groupId = nextGroupId || "";
+        line.displayOrder = index;
+      });
+    }
+    saveState();
+  };
+
+  cards.addEventListener("dragstart", (event) => {
+    const groupHandle = event.target.closest("[data-line-group-drag-handle]");
+    if (groupHandle) {
+      if (!isManagerHomeDnDEnabled()) {
+        event.preventDefault();
+        return;
+      }
+      const section = groupHandle.closest("[data-line-group-section]");
+      const groupId = String(section?.getAttribute("data-line-group-section") || "").trim();
+      if (!groupId || groupId === "ungrouped") {
+        event.preventDefault();
+        return;
+      }
+      homeDnDState.type = "group";
+      homeDnDState.draggedGroupId = groupId;
+      cards.classList.add("home-dnd-group-active");
+      if (section) section.classList.add("is-dragging");
+      if (event.dataTransfer) {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", `group:${groupId}`);
+      }
+      return;
+    }
+
+    const lineHandle = event.target.closest("[data-line-card-drag-handle]");
+    if (!lineHandle) return;
+    if (!isManagerHomeDnDEnabled()) {
+      event.preventDefault();
+      return;
+    }
+    const lineCard = lineHandle.closest("[data-line-card-id]");
+    const lineId = String(lineCard?.getAttribute("data-line-card-id") || "").trim();
+    const groupKey = String(lineCard?.getAttribute("data-line-card-group") || "").trim();
+    if (!lineId || !groupKey) {
+      event.preventDefault();
+      return;
+    }
+    homeDnDState.type = "line";
+    homeDnDState.draggedLineId = lineId;
+    homeDnDState.sourceGroupKey = groupKey;
+    cards.classList.add("home-dnd-line-active");
+    if (lineCard) lineCard.classList.add("is-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", `line:${lineId}`);
+    }
+  });
+
+  cards.addEventListener("dragover", (event) => {
+    if (!homeDnDState.type || !isManagerHomeDnDEnabled()) return;
+    if (homeDnDState.type === "group") {
+      const targetSection = event.target.closest("[data-line-group-section]");
+      if (!targetSection) return;
+      const targetGroupId = String(targetSection.getAttribute("data-line-group-section") || "").trim();
+      if (!targetGroupId || targetGroupId === "ungrouped" || targetGroupId === homeDnDState.draggedGroupId) return;
+      const draggedSection = findGroupSectionById(homeDnDState.draggedGroupId);
+      if (!draggedSection) return;
+      event.preventDefault();
+      const rect = targetSection.getBoundingClientRect();
+      const beforeTarget = event.clientY < rect.top + rect.height / 2;
+      const referenceNode = beforeTarget ? targetSection : targetSection.nextElementSibling;
+      if (referenceNode !== draggedSection) {
+        cards.insertBefore(draggedSection, referenceNode);
+      }
+      return;
+    }
+
+    if (homeDnDState.type === "line") {
+      const targetList = event.target.closest("[data-line-card-list]");
+      if (!targetList) return;
+      const targetGroupKey = String(targetList.getAttribute("data-line-card-list") || "").trim();
+      if (targetGroupKey !== homeDnDState.sourceGroupKey) return;
+      const draggedCard = findLineCardById(homeDnDState.draggedLineId);
+      if (!draggedCard) return;
+      event.preventDefault();
+      const targetCard = event.target.closest("[data-line-card-id]");
+      if (!targetCard) {
+        if (targetList.lastElementChild !== draggedCard) targetList.append(draggedCard);
+        return;
+      }
+      if (targetCard === draggedCard) return;
+      const rect = targetCard.getBoundingClientRect();
+      const beforeTarget = event.clientY < rect.top + rect.height / 2;
+      const referenceNode = beforeTarget ? targetCard : targetCard.nextElementSibling;
+      if (referenceNode !== draggedCard) {
+        targetList.insertBefore(draggedCard, referenceNode);
+      }
+    }
+  });
+
+  cards.addEventListener("drop", async (event) => {
+    if (!homeDnDState.type) return;
+    event.preventDefault();
+    const dropType = homeDnDState.type;
+    const sourceGroupKey = homeDnDState.sourceGroupKey;
+    try {
+      if (dropType === "group") {
+        await persistGroupOrderFromDom();
+      } else if (dropType === "line" && sourceGroupKey) {
+        await persistLineOrderFromDom(sourceGroupKey);
+      }
+      renderHome();
+    } catch (error) {
+      console.warn("Home reorder sync failed:", error);
+      alert(`Could not save the new order.\n${error?.message || "Please try again."}`);
+      await refreshHostedState();
+    } finally {
+      resetHomeDnDState();
+    }
+  });
+
+  cards.addEventListener("dragend", () => {
+    resetHomeDnDState();
+  });
+
   cards.addEventListener("click", async (event) => {
     const groupToggleBtn = event.target.closest("[data-line-group-toggle]");
     if (groupToggleBtn) {
@@ -5990,9 +6275,14 @@ function bindVisualiserControls() {
   if (editBtn) {
     editBtn.addEventListener("click", () => {
       if (!state) return;
+      const wasEditing = Boolean(state.visualEditMode);
       state.visualEditMode = !state.visualEditMode;
       setLayoutEditButtonUI();
-      saveState();
+      if (wasEditing && !state.visualEditMode && deferredLineModelSyncIds.has(String(state.id || ""))) {
+        saveState({ syncModel: true, forceSyncModel: true });
+      } else {
+        saveState();
+      }
       renderVisualiser();
     });
   }
@@ -6217,14 +6507,17 @@ function stageDefaultSize(stage) {
 function openStageSettingsModal(stageId) {
   const stage = getStages().find((item) => item.id === stageId);
   if (!stage) return;
+  const defaults = stageDefaultSize(stage);
+  const safeWidth = Math.max(2, num(stage.w) || defaults.w);
+  const safeHeight = Math.max(1, num(stage.h) || defaults.h);
   document.getElementById("stageSettingsId").value = stage.id;
   document.getElementById("stageSettingsName").value = stageBaseName(stage.name) || "Stage";
   document.getElementById("stageSettingsType").value = stage.kind === "transfer" ? "transfer" : stage.group || "main";
   document.getElementById("stageSettingsCrewDay").value = num(state.crewsByShift?.Day?.[stage.id]?.crew ?? stage.crew);
   document.getElementById("stageSettingsCrewNight").value = num(state.crewsByShift?.Night?.[stage.id]?.crew ?? stage.crew);
   document.getElementById("stageSettingsMaxThroughput").value = stageMaxThroughput(stage.id);
-  document.getElementById("stageSettingsWidth").value = num(stage.w) || stageDefaultSize(stage).w;
-  document.getElementById("stageSettingsHeight").value = num(stage.h) || stageDefaultSize(stage).h;
+  document.getElementById("stageSettingsWidth").value = roundToDecimals(safeWidth, 1).toFixed(1);
+  document.getElementById("stageSettingsHeight").value = roundToDecimals(safeHeight, 1).toFixed(1);
 
   const overlay = document.getElementById("stageSettingsModal");
   overlay.classList.add("open");
@@ -6258,15 +6551,15 @@ function bindStageSettingsModal() {
     const crewDay = Math.max(0, num(document.getElementById("stageSettingsCrewDay").value));
     const crewNight = Math.max(0, num(document.getElementById("stageSettingsCrewNight").value));
     const maxThroughput = Math.max(0, num(document.getElementById("stageSettingsMaxThroughput").value));
-    const width = Math.max(2, num(document.getElementById("stageSettingsWidth").value));
-    const height = Math.max(1, num(document.getElementById("stageSettingsHeight").value));
+    const width = roundToDecimals(Math.max(2, num(document.getElementById("stageSettingsWidth").value)), 1);
+    const height = roundToDecimals(Math.max(1, num(document.getElementById("stageSettingsHeight").value)), 1);
     const defaults = stageDefaultSize(stage);
 
     stage.name = name;
     stage.group = type === "transfer" ? "prep" : type;
     stage.kind = type === "transfer" ? "transfer" : undefined;
-    stage.w = width || defaults.w;
-    stage.h = height || defaults.h;
+    stage.w = width > 0 ? width : roundToDecimals(defaults.w, 1);
+    stage.h = height > 0 ? height : roundToDecimals(defaults.h, 1);
     stage.match = name
       .toLowerCase()
       .split(/[^a-z0-9]+/)
