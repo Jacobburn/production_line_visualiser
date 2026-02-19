@@ -179,7 +179,18 @@ const clearLineDataSchema = z.object({
   secretKey: z.string().min(1).max(128)
 });
 
+const loadPermanentSampleDataSchema = z.object({
+  replaceExisting: z.boolean().optional().default(true)
+});
+
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+
+const SAMPLE_DOWNTIME_REASON_PRESETS = {
+  'Donor Meat': ['Stock Out', 'Late Delivery', 'Quality Hold', 'Temperature Hold'],
+  People: ['Understaffed', 'Training', 'Handover Delay', 'Absence'],
+  Materials: ['Film Shortage', 'Label Shortage', 'Tray Shortage', 'Marinade Shortage', 'Skewer shortage'],
+  Other: ['Cleaning', 'QA Hold', 'Power', 'Unplanned Stop']
+};
 
 function normalizeAssignedLineShifts(rawMap, fallbackLineIds = []) {
   const next = {};
@@ -379,6 +390,198 @@ async function writeAudit({ lineId = null, actorUserId = null, actorName = null,
      VALUES ($1, $2, $3, $4, $5, $6)`,
     [lineId, actorUserId, actorName, actorRole, action, details]
   );
+}
+
+function formatDateUtc(date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function buildDowntimeReasonText(category, detail, note = '') {
+  const group = String(category || '').trim();
+  const detailText = String(detail || '').trim();
+  const noteText = String(note || '').trim();
+  if (!group) return noteText;
+  if (!detailText && !noteText) return group;
+  if (!noteText) return `${group} > ${detailText}`;
+  if (!detailText) return `${group} > ${noteText}`;
+  return `${group} > ${detailText} > ${noteText}`;
+}
+
+function pickFrom(list, index, offset = 0, fallback = '') {
+  const source = Array.isArray(list) ? list : [];
+  if (!source.length) return fallback;
+  const position = ((index + offset) % source.length + source.length) % source.length;
+  return source[position] || fallback;
+}
+
+function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
+  const shiftRows = [];
+  const breakRows = [];
+  const runRows = [];
+  const downtimeRows = [];
+  const safeDays = Math.max(1, Math.min(365, Number.isFinite(Number(days)) ? Math.floor(Number(days)) : 84));
+  const start = new Date(Date.UTC(2025, 10, 1));
+
+  const stages = Array.isArray(stageRows) ? stageRows : [];
+  const stageIds = stages.map((stage) => stage.id).filter(Boolean);
+  const stageNameById = new Map(stages.map((stage) => [stage.id, String(stage.stageName || 'Stage').trim() || 'Stage']));
+  const dayEquipment = stageIds.filter((_, index) => index % 2 === 0);
+  const nightEquipment = stageIds.filter((_, index) => index % 2 === 1);
+  const fallbackEquipment = stageIds[0] || null;
+  const dayRequired = Math.max(
+    1,
+    stages.reduce((sum, stage) => sum + Math.max(0, Number(stage.dayCrew) || 0), 0) || 14
+  );
+  const nightRequired = Math.max(
+    1,
+    stages.reduce((sum, stage) => sum + Math.max(0, Number(stage.nightCrew) || 0), 0) || 12
+  );
+
+  for (let i = 0; i < safeDays; i += 1) {
+    const dateObj = new Date(start);
+    dateObj.setUTCDate(start.getUTCDate() + i);
+    const date = formatDateUtc(dateObj);
+    const dayTrend = 0.95 + ((i % 7) - 3) * 0.01;
+    const nightTrend = 0.92 + (((i + 2) % 7) - 3) * 0.01;
+
+    shiftRows.push(
+      {
+        date,
+        shift: 'Day',
+        crewOnShift: Math.max(0, dayRequired - (i % 12 === 0 ? 2 : i % 7 === 0 ? 1 : 0)),
+        startTime: '06:00',
+        finishTime: '14:00'
+      },
+      {
+        date,
+        shift: 'Night',
+        crewOnShift: Math.max(0, nightRequired - (i % 10 === 0 ? 1 : 0)),
+        startTime: '14:00',
+        finishTime: '22:00'
+      }
+    );
+
+    breakRows.push(
+      { date, shift: 'Day', breakStart: '09:00', breakFinish: '09:15' },
+      { date, shift: 'Day', breakStart: '12:00', breakFinish: '12:30' },
+      { date, shift: 'Day', breakStart: '13:40', breakFinish: '13:55' },
+      { date, shift: 'Night', breakStart: '17:00', breakFinish: '17:15' },
+      { date, shift: 'Night', breakStart: '20:00', breakFinish: '20:30' },
+      { date, shift: 'Night', breakStart: '21:40', breakFinish: '21:55' }
+    );
+
+    runRows.push(
+      {
+        date,
+        shift: 'Day',
+        product: 'Teriyaki',
+        setUpStartTime: null,
+        productionStartTime: '06:10',
+        finishTime: '10:35',
+        unitsProduced: Math.round(2850 * dayTrend)
+      },
+      {
+        date,
+        shift: 'Day',
+        product: 'Honey Soy',
+        setUpStartTime: null,
+        productionStartTime: '10:55',
+        finishTime: '15:25',
+        unitsProduced: Math.round(2600 * dayTrend)
+      },
+      {
+        date,
+        shift: 'Night',
+        product: 'Peri Peri',
+        setUpStartTime: null,
+        productionStartTime: '14:15',
+        finishTime: '18:55',
+        unitsProduced: Math.round(2500 * nightTrend)
+      },
+      {
+        date,
+        shift: 'Night',
+        product: 'Lemon Herb',
+        setUpStartTime: null,
+        productionStartTime: '21:30',
+        finishTime: '00:25',
+        unitsProduced: Math.round(2200 * nightTrend)
+      }
+    );
+
+    const dayEquipmentId = pickFrom(dayEquipment, i, 0, fallbackEquipment);
+    const dayEquipmentAltId = pickFrom(dayEquipment, i, 2, fallbackEquipment);
+    const nightEquipmentId = pickFrom(nightEquipment, i, 0, fallbackEquipment);
+    const nightEquipmentAltId = pickFrom(nightEquipment, i, 3, fallbackEquipment);
+    const dayEquipmentName = stageNameById.get(dayEquipmentId) || 'Equipment';
+    const dayEquipmentAltName = stageNameById.get(dayEquipmentAltId) || 'Equipment';
+    const nightEquipmentName = stageNameById.get(nightEquipmentId) || 'Equipment';
+    const nightEquipmentAltName = stageNameById.get(nightEquipmentAltId) || 'Equipment';
+
+    const dayReasonCategory = i % 4 === 0 ? 'People' : 'Equipment';
+    const dayReasonDetail = dayReasonCategory === 'Equipment'
+      ? dayEquipmentName
+      : SAMPLE_DOWNTIME_REASON_PRESETS.People[i % SAMPLE_DOWNTIME_REASON_PRESETS.People.length];
+    const dayReasonNote = dayReasonCategory === 'Equipment' ? 'Planned maintenance' : '';
+
+    const dayReasonCategory2 = i % 5 === 0 ? 'Materials' : 'Equipment';
+    const dayReasonDetail2 = dayReasonCategory2 === 'Equipment'
+      ? dayEquipmentAltName
+      : SAMPLE_DOWNTIME_REASON_PRESETS.Materials[i % SAMPLE_DOWNTIME_REASON_PRESETS.Materials.length];
+    const dayReasonNote2 = dayReasonCategory2 === 'Equipment' ? 'Minor stoppage' : '';
+
+    const nightReasonCategory = i % 3 === 0 ? 'Donor Meat' : 'Equipment';
+    const nightReasonDetail = nightReasonCategory === 'Equipment'
+      ? nightEquipmentName
+      : SAMPLE_DOWNTIME_REASON_PRESETS['Donor Meat'][i % SAMPLE_DOWNTIME_REASON_PRESETS['Donor Meat'].length];
+    const nightReasonNote = nightReasonCategory === 'Equipment' ? 'Sensor reset' : '';
+
+    const nightReasonCategory2 = i % 6 === 0 ? 'Other' : 'Equipment';
+    const nightReasonDetail2 = nightReasonCategory2 === 'Equipment'
+      ? nightEquipmentAltName
+      : SAMPLE_DOWNTIME_REASON_PRESETS.Other[i % SAMPLE_DOWNTIME_REASON_PRESETS.Other.length];
+    const nightReasonNote2 = nightReasonCategory2 === 'Equipment' ? 'Label adjustment' : '';
+
+    downtimeRows.push(
+      {
+        date,
+        shift: 'Day',
+        downtimeStart: '08:10',
+        downtimeFinish: `08:${String(22 + (i % 8)).padStart(2, '0')}`,
+        equipmentStageId: dayReasonCategory === 'Equipment' ? dayEquipmentId : null,
+        reason: buildDowntimeReasonText(dayReasonCategory, dayReasonDetail, dayReasonNote)
+      },
+      {
+        date,
+        shift: 'Day',
+        downtimeStart: '11:20',
+        downtimeFinish: `11:${String(30 + (i % 10)).padStart(2, '0')}`,
+        equipmentStageId: dayReasonCategory2 === 'Equipment' ? dayEquipmentAltId : null,
+        reason: buildDowntimeReasonText(dayReasonCategory2, dayReasonDetail2, dayReasonNote2)
+      },
+      {
+        date,
+        shift: 'Night',
+        downtimeStart: '16:30',
+        downtimeFinish: `16:${String(42 + (i % 9)).padStart(2, '0')}`,
+        equipmentStageId: nightReasonCategory === 'Equipment' ? nightEquipmentId : null,
+        reason: buildDowntimeReasonText(nightReasonCategory, nightReasonDetail, nightReasonNote)
+      },
+      {
+        date,
+        shift: 'Night',
+        downtimeStart: '20:05',
+        downtimeFinish: `20:${String(18 + (i % 11)).padStart(2, '0')}`,
+        equipmentStageId: nightReasonCategory2 === 'Equipment' ? nightEquipmentAltId : null,
+        reason: buildDowntimeReasonText(nightReasonCategory2, nightReasonDetail2, nightReasonNote2)
+      }
+    );
+  }
+
+  return { shiftRows, breakRows, runRows, downtimeRows };
 }
 
 let lineGroupSchemaReady = false;
@@ -1896,6 +2099,250 @@ app.post('/api/lines/:lineId/clear-data', authMiddleware, requireRole('manager')
   });
 
   return res.json({ ok: true });
+}));
+
+app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  const lineId = req.params.lineId;
+  if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
+  const parsed = loadPermanentSampleDataSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid load sample payload' });
+
+  const lineRes = await dbQuery(
+    `SELECT id, name
+     FROM production_lines
+     WHERE id = $1 AND is_active = TRUE`,
+    [lineId]
+  );
+  if (!lineRes.rowCount) return res.status(404).json({ error: 'Line not found' });
+
+  const stageRows = (
+    await dbQuery(
+      `SELECT
+         id,
+         stage_name AS "stageName",
+         day_crew AS "dayCrew",
+         night_crew AS "nightCrew"
+       FROM line_stages
+       WHERE line_id = $1
+       ORDER BY stage_order ASC`,
+      [lineId]
+    )
+  ).rows;
+  const sample = buildPermanentSampleData(stageRows, { days: 84 });
+  const replaceExisting = parsed.data.replaceExisting !== false;
+  const shiftPayload = sample.shiftRows.map((row) => ({
+    date: row.date,
+    shift: row.shift,
+    crew_on_shift: row.crewOnShift,
+    start_time: row.startTime,
+    finish_time: row.finishTime
+  }));
+  const breakPayload = sample.breakRows.map((row) => ({
+    date: row.date,
+    shift: row.shift,
+    break_start: row.breakStart,
+    break_finish: row.breakFinish
+  }));
+  const runPayload = sample.runRows.map((row) => ({
+    date: row.date,
+    shift: row.shift,
+    product: row.product,
+    set_up_start_time: row.setUpStartTime || '',
+    production_start_time: row.productionStartTime,
+    finish_time: row.finishTime,
+    units_produced: row.unitsProduced
+  }));
+  const downtimePayload = sample.downtimeRows.map((row) => ({
+    date: row.date,
+    shift: row.shift,
+    downtime_start: row.downtimeStart,
+    downtime_finish: row.downtimeFinish,
+    equipment_stage_id: row.equipmentStageId || '',
+    reason: row.reason || ''
+  }));
+
+  const client = await pool.connect();
+  let shiftCount = 0;
+  let breakCount = 0;
+  let runCount = 0;
+  let downtimeCount = 0;
+  try {
+    await client.query('BEGIN');
+
+    if (replaceExisting) {
+      await client.query(`DELETE FROM shift_break_logs WHERE line_id = $1`, [lineId]);
+      await client.query(`DELETE FROM shift_logs WHERE line_id = $1`, [lineId]);
+      await client.query(`DELETE FROM run_logs WHERE line_id = $1`, [lineId]);
+      await client.query(`DELETE FROM downtime_logs WHERE line_id = $1`, [lineId]);
+    }
+
+    const shiftBreakInsert = await client.query(
+      `WITH shift_data AS (
+         SELECT
+           s.date::date AS date,
+           s.shift::text AS shift,
+           GREATEST(0, COALESCE(s.crew_on_shift, 0)) AS crew_on_shift,
+           s.start_time::time AS start_time,
+           s.finish_time::time AS finish_time
+         FROM jsonb_to_recordset($2::jsonb) AS s(
+           date text,
+           shift text,
+           crew_on_shift integer,
+           start_time text,
+           finish_time text
+         )
+       ),
+       inserted_shifts AS (
+         INSERT INTO shift_logs(line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id)
+         SELECT $1, date, shift, crew_on_shift, start_time, finish_time, $3
+         FROM shift_data
+         RETURNING id, date, shift
+       ),
+       break_data AS (
+         SELECT
+           b.date::date AS date,
+           b.shift::text AS shift,
+           b.break_start::time AS break_start,
+           b.break_finish::time AS break_finish
+         FROM jsonb_to_recordset($4::jsonb) AS b(
+           date text,
+           shift text,
+           break_start text,
+           break_finish text
+         )
+       ),
+       inserted_breaks AS (
+         INSERT INTO shift_break_logs(shift_log_id, line_id, date, shift, break_start, break_finish, submitted_by_user_id)
+         SELECT
+           s.id,
+           $1,
+           b.date,
+           b.shift,
+           b.break_start,
+           b.break_finish,
+           $3
+         FROM break_data b
+         INNER JOIN inserted_shifts s
+           ON s.date = b.date
+          AND s.shift = b.shift
+         RETURNING id
+       )
+       SELECT
+         (SELECT COUNT(*)::INT FROM inserted_shifts) AS "shiftCount",
+         (SELECT COUNT(*)::INT FROM inserted_breaks) AS "breakCount"`,
+      [lineId, JSON.stringify(shiftPayload), req.user.id, JSON.stringify(breakPayload)]
+    );
+    shiftCount = Number(shiftBreakInsert.rows?.[0]?.shiftCount || 0);
+    breakCount = Number(shiftBreakInsert.rows?.[0]?.breakCount || 0);
+
+    const runInsert = await client.query(
+      `WITH run_data AS (
+         SELECT
+           r.date::date AS date,
+           r.shift::text AS shift,
+           r.product::text AS product,
+           NULLIF(COALESCE(r.set_up_start_time, ''), '')::time AS set_up_start_time,
+           r.production_start_time::time AS production_start_time,
+           r.finish_time::time AS finish_time,
+           GREATEST(0, COALESCE(r.units_produced, 0)) AS units_produced
+         FROM jsonb_to_recordset($2::jsonb) AS r(
+           date text,
+           shift text,
+           product text,
+           set_up_start_time text,
+           production_start_time text,
+           finish_time text,
+           units_produced numeric
+         )
+       ),
+       inserted_runs AS (
+         INSERT INTO run_logs(
+           line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, submitted_by_user_id
+         )
+         SELECT
+           $1,
+           date,
+           shift,
+           product,
+           set_up_start_time,
+           production_start_time,
+           finish_time,
+           units_produced,
+           '{}'::jsonb,
+           $3
+         FROM run_data
+         RETURNING id
+       )
+       SELECT COUNT(*)::INT AS count FROM inserted_runs`,
+      [lineId, JSON.stringify(runPayload), req.user.id]
+    );
+    runCount = Number(runInsert.rows?.[0]?.count || 0);
+
+    const downtimeInsert = await client.query(
+      `WITH downtime_data AS (
+         SELECT
+           d.date::date AS date,
+           d.shift::text AS shift,
+           d.downtime_start::time AS downtime_start,
+           d.downtime_finish::time AS downtime_finish,
+           NULLIF(COALESCE(d.equipment_stage_id, ''), '')::uuid AS equipment_stage_id,
+           NULLIF(COALESCE(d.reason, ''), '') AS reason
+         FROM jsonb_to_recordset($2::jsonb) AS d(
+           date text,
+           shift text,
+           downtime_start text,
+           downtime_finish text,
+           equipment_stage_id text,
+           reason text
+         )
+       ),
+       inserted_downtime AS (
+         INSERT INTO downtime_logs(
+           line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
+         )
+         SELECT
+           $1,
+           date,
+           shift,
+           downtime_start,
+           downtime_finish,
+           equipment_stage_id,
+           reason,
+           $3
+         FROM downtime_data
+         RETURNING id
+       )
+       SELECT COUNT(*)::INT AS count FROM inserted_downtime`,
+      [lineId, JSON.stringify(downtimePayload), req.user.id]
+    );
+    downtimeCount = Number(downtimeInsert.rows?.[0]?.count || 0);
+
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
+  }
+
+  await writeAudit({
+    lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'LOAD_PERMANENT_SAMPLE_DATA',
+    details: `Permanent sample data loaded (${shiftCount} shifts, ${breakCount} breaks, ${runCount} runs, ${downtimeCount} downtime rows)`
+  });
+
+  return res.json({
+    ok: true,
+    counts: {
+      shifts: shiftCount,
+      breaks: breakCount,
+      runs: runCount,
+      downtime: downtimeCount
+    }
+  });
 }));
 
 app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {

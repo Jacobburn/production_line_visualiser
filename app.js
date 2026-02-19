@@ -1556,17 +1556,17 @@ function renderHomeLineCard(line, { groupKey = "", showDragHandle = false } = {}
         ><span aria-hidden="true">::</span></button>`
     : "";
   return `
-    <article class="line-card" data-line-tile="${line.id}" data-line-card-id="${line.id}" data-line-card-group="${safeGroupKey}">
+    <article class="line-card" data-line-tile="${line.id}" data-line-card-id="${line.id}" data-line-card-group="${safeGroupKey}" data-open-line="${line.id}">
       <div class="line-card-head">
         <h3>${htmlEscape(line.name)}</h3>
         ${dragHandle}
       </div>
-      <div class="line-card-callouts">${callouts}</div>
       ${tracker}
-      <div class="line-card-actions">
-        <button type="button" data-open-line="${line.id}">Open Line</button>
-        <button type="button" class="ghost-btn" data-edit-line="${line.id}">Edit</button>
-        <button type="button" class="danger" data-delete-line="${line.id}">Delete</button>
+      <div class="line-card-footer">
+        <div class="line-card-callouts">${callouts}</div>
+        <div class="line-card-actions">
+          <button type="button" class="table-edit-pill" data-edit-line="${line.id}">Edit</button>
+        </div>
       </div>
     </article>
   `;
@@ -2068,17 +2068,21 @@ function rowIsValidDateShift(date, shift) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(date || "")) && SHIFT_OPTIONS.includes(String(shift || ""));
 }
 
-async function apiRequest(path, { method = "GET", token = "", body } = {}) {
+async function apiRequest(path, { method = "GET", token = "", body, timeoutMs = API_REQUEST_TIMEOUT_MS } = {}) {
   dbLoadingRequestCount += 1;
   showStartupLoading("Loading production data...");
   try {
     const headers = {};
     if (token) headers.Authorization = `Bearer ${token}`;
     if (body !== undefined) headers["Content-Type"] = "application/json";
+    const requestTimeoutMs =
+      Number.isFinite(Number(timeoutMs)) && Number(timeoutMs) > 0
+        ? Number(timeoutMs)
+        : API_REQUEST_TIMEOUT_MS;
     const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
     const timeoutId =
       controller && typeof window !== "undefined"
-        ? window.setTimeout(() => controller.abort(), API_REQUEST_TIMEOUT_MS)
+        ? window.setTimeout(() => controller.abort(), requestTimeoutMs)
         : null;
     let response;
     let text = "";
@@ -2092,7 +2096,7 @@ async function apiRequest(path, { method = "GET", token = "", body } = {}) {
       text = await response.text();
     } catch (error) {
       if (error?.name === "AbortError") {
-        throw new Error(`Request timed out after ${Math.round(API_REQUEST_TIMEOUT_MS / 1000)}s.`);
+        throw new Error(`Request timed out after ${Math.round(requestTimeoutMs / 1000)}s.`);
       }
       throw error;
     } finally {
@@ -3391,6 +3395,7 @@ function bindHome() {
   const closeEditLineModalBtn = document.getElementById("closeEditLineModal");
   const editLineForm = document.getElementById("editLineForm");
   const editLineNameInput = document.getElementById("editLineName");
+  const editLineDeleteBtn = document.getElementById("editLineDeleteBtn");
   const cards = document.getElementById("lineCards");
   const openBuilderBtn = document.getElementById("openBuilder");
   const openBuilderSecondaryBtn = document.getElementById("openBuilderSecondary");
@@ -3790,6 +3795,52 @@ function bindHome() {
     editLineModal.classList.remove("open");
     editLineModal.setAttribute("aria-hidden", "true");
     editLineForm.reset();
+  };
+
+  const deleteLineById = async (lineId) => {
+    const line = appState.lines?.[lineId];
+    if (!line) return;
+    const entered = window.prompt(`Enter delete key for "${line.name}" (or admin password):`) || "";
+    if (entered !== "admin" && entered !== line.secretKey) {
+      alert("Invalid key/password. Line was not deleted.");
+      return;
+    }
+    try {
+      const session = await ensureManagerBackendSession();
+      const backendLineId = UUID_RE.test(String(lineId)) ? lineId : await ensureBackendLineId(lineId, session);
+      if (!backendLineId) throw new Error("Line is not synced to server.");
+      await apiRequest(`/api/lines/${backendLineId}`, {
+        method: "DELETE",
+        token: session.backendToken
+      });
+      addAudit(line, "DELETE_LINE", "Line deleted");
+      delete appState.lines[lineId];
+      appState.supervisors = (appState.supervisors || []).map((sup) => ({
+        ...sup,
+        assignedLineIds: (sup.assignedLineIds || []).filter((assignedId) => assignedId !== lineId),
+        assignedLineShifts: Object.fromEntries(
+          Object.entries(sup.assignedLineShifts || {}).filter(([assignedId]) => assignedId !== lineId)
+        )
+      }));
+      if (appState.supervisorSession) {
+        appState.supervisorSession.assignedLineIds = (appState.supervisorSession.assignedLineIds || []).filter(
+          (assignedId) => assignedId !== lineId
+        );
+        appState.supervisorSession.assignedLineShifts = Object.fromEntries(
+          Object.entries(appState.supervisorSession.assignedLineShifts || {}).filter(([assignedId]) => assignedId !== lineId)
+        );
+      }
+      appState.activeLineId = Object.keys(appState.lines)[0] || "";
+      state = appState.lines[appState.activeLineId] || null;
+      appState.activeView = "home";
+      closeEditLineModal();
+      saveState();
+      await refreshHostedState();
+      renderAll();
+    } catch (error) {
+      console.warn("Line delete sync failed:", error);
+      alert(`Could not delete line.\n${error?.message || "Please try again."}`);
+    }
   };
 
   goHomeBtn.addEventListener("click", () => {
@@ -6069,52 +6120,7 @@ function bindHome() {
       return;
     }
 
-    const deleteBtn = event.target.closest("[data-delete-line]");
-    if (deleteBtn) {
-      const id = deleteBtn.getAttribute("data-delete-line");
-      if (!id || !appState.lines[id]) return;
-      const line = appState.lines[id];
-      const entered = window.prompt(`Enter delete key for "${line.name}" (or admin password):`) || "";
-      if (entered !== "admin" && entered !== line.secretKey) {
-        alert("Invalid key/password. Line was not deleted.");
-        return;
-      }
-      try {
-        const session = await ensureManagerBackendSession();
-        const backendLineId = UUID_RE.test(String(id)) ? id : await ensureBackendLineId(id, session);
-        if (!backendLineId) throw new Error("Line is not synced to server.");
-        await apiRequest(`/api/lines/${backendLineId}`, {
-          method: "DELETE",
-          token: session.backendToken
-        });
-        addAudit(line, "DELETE_LINE", "Line deleted");
-        delete appState.lines[id];
-        appState.supervisors = (appState.supervisors || []).map((sup) => ({
-          ...sup,
-          assignedLineIds: (sup.assignedLineIds || []).filter((lineId) => lineId !== id),
-          assignedLineShifts: Object.fromEntries(
-            Object.entries(sup.assignedLineShifts || {}).filter(([lineId]) => lineId !== id)
-          )
-        }));
-        if (appState.supervisorSession) {
-          appState.supervisorSession.assignedLineIds = (appState.supervisorSession.assignedLineIds || []).filter((lineId) => lineId !== id);
-          appState.supervisorSession.assignedLineShifts = Object.fromEntries(
-            Object.entries(appState.supervisorSession.assignedLineShifts || {}).filter(([lineId]) => lineId !== id)
-          );
-        }
-        appState.activeLineId = Object.keys(appState.lines)[0] || "";
-        state = appState.lines[appState.activeLineId] || null;
-        appState.activeView = "home";
-        saveState();
-        await refreshHostedState();
-        renderAll();
-      } catch (error) {
-        console.warn("Line delete sync failed:", error);
-        alert(`Could not delete line.\n${error?.message || "Please try again."}`);
-      }
-      return;
-    }
-
+    if (event.target.closest("[data-line-card-drag-handle], [data-line-group-drag-handle]")) return;
     const btn = event.target.closest("[data-open-line]");
     if (!btn) return;
     const id = btn.getAttribute("data-open-line");
@@ -6130,6 +6136,19 @@ function bindHome() {
   editLineModal.addEventListener("click", (event) => {
     if (event.target === editLineModal) closeEditLineModal();
   });
+
+  if (editLineDeleteBtn) {
+    editLineDeleteBtn.addEventListener("click", async () => {
+      const lineId = editingLineId;
+      if (!lineId || !appState.lines?.[lineId]) return;
+      editLineDeleteBtn.disabled = true;
+      try {
+        await deleteLineById(lineId);
+      } finally {
+        editLineDeleteBtn.disabled = false;
+      }
+    });
+  }
 
   editLineForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -7501,6 +7520,32 @@ function bindDataControls() {
     saveState();
     renderAll();
   });
+
+  const loadPermanentSampleDataBtn = document.getElementById("loadPermanentSampleData");
+  if (loadPermanentSampleDataBtn) {
+    loadPermanentSampleDataBtn.addEventListener("click", async () => {
+      if (!state) return;
+      const confirmed = window.confirm(
+        `Are you sure you want to load permanent sample data for "${state.name}"?\n\nThis will replace all existing shift, break, run and downtime logs for this line.`
+      );
+      if (!confirmed) return;
+      try {
+        const session = await ensureManagerBackendSession();
+        const backendLineId = UUID_RE.test(String(state.id)) ? state.id : await ensureBackendLineId(state.id, session);
+        if (!backendLineId) throw new Error("Line is not synced to server.");
+        await apiRequest(`/api/lines/${backendLineId}/load-sample-data`, {
+          method: "POST",
+          token: session.backendToken,
+          body: { replaceExisting: true },
+          timeoutMs: 180000
+        });
+        await refreshHostedState();
+        renderAll();
+      } catch (error) {
+        alert(`Could not load permanent sample data.\n${error?.message || "Please try again."}`);
+      }
+    });
+  }
 
   document.getElementById("exportData").addEventListener("click", () => {
     downloadTextFile(`kebab-line-data-${Date.now()}.json`, JSON.stringify(state, null, 2), "application/json");

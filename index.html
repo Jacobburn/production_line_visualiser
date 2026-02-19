@@ -422,7 +422,10 @@
         </div>
         <form id="editLineForm" class="form-grid">
           <input id="editLineName" placeholder="Line name" required />
-          <button type="submit">Save Line Name</button>
+          <div class="form-submit-actions">
+            <button id="editLineDeleteBtn" class="danger" type="button">Delete Line</button>
+            <button type="submit">Save Line Name</button>
+          </div>
         </form>
       </div>
     </div>
@@ -691,6 +694,7 @@
               <h2>Data Controls</h2>
               <div class="action-row">
                 <button id="loadSampleData" type="button">Load Sample Data</button>
+                <button id="loadPermanentSampleData" type="button">Load Permanent Sample Data</button>
                 <button id="exportData" type="button">Export JSON</button>
                 <button id="exportLineCsv" class="ghost-btn" type="button">Export CSV Report</button>
                 <label class="import-label">

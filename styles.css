@@ -1100,8 +1100,24 @@ button {
   border-color: #7f8d9c;
 }
 
+.stage-card.group-main {
+  background: linear-gradient(180deg, #fdf7eb 0%, #f6ecd8 100%);
+}
+
 .stage-card.group-prep {
-  background: var(--line-a);
+  background: linear-gradient(180deg, #f2f7fb 0%, #eaf1f7 100%);
+}
+
+.stage-card.group-main .crew-badge {
+  border-color: #bca888;
+  background: #fff7ea;
+  color: #5c4628;
+}
+
+.stage-card.group-prep .crew-badge {
+  border-color: #7a8da2;
+  background: #f4f8fc;
+  color: #203348;
 }
 
 .stage-card.kind-transfer {
@@ -1152,7 +1168,7 @@ button {
 }
 
 .stage-card.bottleneck {
-  box-shadow: 0 0 0 3px rgba(225, 118, 26, 0.3), 0 10px 22px rgba(225, 118, 26, 0.2);
+  box-shadow: none;
 }
 
 .stage-card.live-downtime-warning {
@@ -4138,6 +4154,10 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   transition: box-shadow 0.16s ease, border-color 0.16s ease, transform 0.16s ease;
 }
 
+#homeView.dashboard-page .line-card[data-open-line] {
+  cursor: pointer;
+}
+
 #homeView.dashboard-page .line-card-head {
   display: flex;
   align-items: center;
@@ -4161,8 +4181,26 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   display: flex;
   flex-wrap: wrap;
   gap: 0.42rem;
-  margin: 0.15rem 0 0.8rem;
-  min-height: 28px;
+  margin: 0;
+  min-height: 0;
+}
+
+#homeView.dashboard-page .line-card-footer {
+  margin-top: 0.62rem;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+#homeView.dashboard-page .line-card-footer .line-card-callouts {
+  flex: 1 1 auto;
+}
+
+#homeView.dashboard-page .line-card-footer .line-card-actions {
+  margin-top: 0;
+  padding-top: 0;
+  flex: 0 0 auto;
 }
 
 #homeView.dashboard-page .line-callout-pill {
@@ -4328,12 +4366,11 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 #homeView.dashboard-page .line-card-actions {
-  margin-top: auto;
-  padding-top: 0.95rem;
   gap: 0.5rem;
+  justify-content: flex-end;
 }
 
-#homeView.dashboard-page .line-card-actions button {
+#homeView.dashboard-page .line-card-actions button:not(.table-edit-pill) {
   min-height: 40px;
   padding: 0 14px;
   font-size: 0.92rem;
@@ -4344,11 +4381,23 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   background: #f2f5f8;
 }
 
+#homeView.dashboard-page .line-card-actions .table-edit-pill {
+  border-color: #8fa3b8;
+  background: #f0f5fb;
+  color: #16293f;
+}
+
+#homeView.dashboard-page .line-card-actions .table-edit-pill:hover {
+  border-color: #8096ad;
+  background: #e9f0f8;
+  color: #132845;
+}
+
 #homeView.dashboard-page .line-card-actions .danger {
   background: #c92a1a;
 }
 
-#homeView.dashboard-page .line-card.line-card-live-active .line-card-actions button:not(.ghost-btn):not(.danger) {
+#homeView.dashboard-page .line-card.line-card-live-active .line-card-actions button:not(.ghost-btn):not(.danger):not(.table-edit-pill) {
   background: #1f7d52;
 }
 
@@ -4358,7 +4407,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   color: #244c39;
 }
 
-#homeView.dashboard-page .line-card.line-card-live-warning .line-card-actions button:not(.ghost-btn):not(.danger) {
+#homeView.dashboard-page .line-card.line-card-live-warning .line-card-actions button:not(.ghost-btn):not(.danger):not(.table-edit-pill) {
   background: #976019;
 }
 
@@ -4368,7 +4417,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   color: #6d4a1b;
 }
 
-#homeView.dashboard-page .line-card.line-card-live-critical .line-card-actions button:not(.ghost-btn):not(.danger) {
+#homeView.dashboard-page .line-card.line-card-live-critical .line-card-actions button:not(.ghost-btn):not(.danger):not(.table-edit-pill) {
   background: #842f2f;
 }
 
