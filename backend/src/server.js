@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import { Client } from 'pg';
 import { z } from 'zod';
 import { config } from './config.js';
 import { dbQuery, pool } from './db.js';
@@ -14,13 +15,33 @@ import {
 
 const app = express();
 
-app.use(cors({ origin: config.frontendOrigin === '*' ? true : config.frontendOrigin }));
+function normalizeCorsOrigin(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return raw.replace(/\/+$/, '');
+  }
+}
+
+const allowAllOrigins = (config.frontendOrigins || []).includes('*');
+const allowedOrigins = new Set((config.frontendOrigins || []).map((origin) => normalizeCorsOrigin(origin)).filter(Boolean));
+
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowAllOrigins) return callback(null, true);
+    const normalizedOrigin = normalizeCorsOrigin(origin);
+    return callback(null, allowedOrigins.has(normalizedOrigin));
+  }
+}));
 app.use(express.json({ limit: '1mb' }));
 
 const shiftValues = ['Day', 'Night', 'Full Day'];
 const supervisorShiftValues = ['Day', 'Night'];
 const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const optionalTime = z.string().regex(timeRegex).optional().or(z.literal('')).or(z.null());
+const optionalLogNotes = z.string().max(2000).optional().or(z.literal('')).or(z.null());
 
 const loginSchema = z.object({
   username: z.string().min(1),
@@ -44,6 +65,38 @@ const lineGroupReorderSchema = z.object({
   groupIds: z.array(z.string().uuid()).min(1)
 });
 
+const dataSourceCreateSchema = z.object({
+  sourceName: z.string().trim().min(1).max(160),
+  sourceKey: z.string().trim().min(1).max(160).optional().or(z.literal('')),
+  provider: z.enum(['sql', 'api']).optional().default('api'),
+  connectionMode: z.enum(['sql', 'api']).optional().default('api'),
+  machineNo: z.string().max(64).optional().or(z.literal('')).or(z.null()),
+  deviceName: z.string().max(160).optional().or(z.literal('')).or(z.null()),
+  deviceId: z.string().max(160).optional().or(z.literal('')).or(z.null()),
+  scaleNumber: z.string().max(64).optional().or(z.literal('')).or(z.null()),
+  apiBaseUrl: z.string().max(300).optional().or(z.literal('')).or(z.null()),
+  apiKey: z.string().max(300).optional().or(z.literal('')).or(z.null()),
+  apiSecret: z.string().max(300).optional().or(z.literal('')).or(z.null()),
+  sqlHost: z.string().max(255).optional().or(z.literal('')).or(z.null()),
+  sqlPort: z.number().int().min(1).max(65535).optional().nullable(),
+  sqlDatabase: z.string().max(160).optional().or(z.literal('')).or(z.null()),
+  sqlUsername: z.string().max(160).optional().or(z.literal('')).or(z.null()),
+  sqlPassword: z.string().max(300).optional().or(z.literal('')).or(z.null())
+});
+
+const dataSourceConnectionTestSchema = z.object({
+  provider: z.enum(['sql', 'api']).optional().default('api'),
+  connectionMode: z.enum(['sql', 'api']).optional().default('api'),
+  apiBaseUrl: z.string().max(300).optional().or(z.literal('')).or(z.null()),
+  apiKey: z.string().max(300).optional().or(z.literal('')).or(z.null()),
+  apiSecret: z.string().max(300).optional().or(z.literal('')).or(z.null()),
+  sqlHost: z.string().max(255).optional().or(z.literal('')).or(z.null()),
+  sqlPort: z.number().int().min(1).max(65535).optional().nullable(),
+  sqlDatabase: z.string().max(160).optional().or(z.literal('')).or(z.null()),
+  sqlUsername: z.string().max(160).optional().or(z.literal('')).or(z.null()),
+  sqlPassword: z.string().max(300).optional().or(z.literal('')).or(z.null())
+});
+
 const lineModelSchema = z.object({
   stages: z.array(
     z.object({
@@ -54,6 +107,7 @@ const lineModelSchema = z.object({
       dayCrew: z.number().int().min(0),
       nightCrew: z.number().int().min(0),
       maxThroughputPerCrew: z.number().min(0),
+      dataSourceId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
       x: z.number(),
       y: z.number(),
       w: z.number().positive(),
@@ -99,7 +153,8 @@ const shiftLogSchema = z.object({
   shift: z.enum(shiftValues),
   crewOnShift: z.number().int().min(0),
   startTime: z.string().regex(timeRegex),
-  finishTime: z.string().regex(timeRegex)
+  finishTime: z.string().regex(timeRegex),
+  notes: optionalLogNotes
 });
 
 const runLogSchema = z.object({
@@ -111,6 +166,7 @@ const runLogSchema = z.object({
   productionStartTime: z.string().regex(timeRegex),
   finishTime: z.string().regex(timeRegex),
   unitsProduced: z.number().nonnegative(),
+  notes: optionalLogNotes,
   runCrewingPattern: z.record(z.number().int().min(0)).optional().default({})
 });
 
@@ -121,7 +177,8 @@ const downtimeLogSchema = z.object({
   downtimeStart: z.string().regex(timeRegex),
   downtimeFinish: z.string().regex(timeRegex),
   equipmentStageId: z.string().uuid().nullable().optional(),
-  reason: z.string().max(250).optional().or(z.literal('')).or(z.null())
+  reason: z.string().max(250).optional().or(z.literal('')).or(z.null()),
+  notes: optionalLogNotes
 });
 
 const hasAtLeastOneField = (obj) => Object.values(obj).some((value) => value !== undefined);
@@ -147,7 +204,8 @@ const LINE_ORDER_BY_SQL = `
 const shiftLogUpdateSchema = z.object({
   crewOnShift: z.number().int().min(0).optional(),
   startTime: optionalTime.optional(),
-  finishTime: optionalTime.optional()
+  finishTime: optionalTime.optional(),
+  notes: optionalLogNotes
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const shiftBreakStartSchema = z.object({
@@ -165,6 +223,7 @@ const runLogUpdateSchema = z.object({
   productionStartTime: optionalTime.optional(),
   finishTime: optionalTime.optional(),
   unitsProduced: z.number().nonnegative().optional(),
+  notes: optionalLogNotes,
   runCrewingPattern: z.record(z.number().int().min(0)).optional()
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
@@ -172,7 +231,8 @@ const downtimeLogUpdateSchema = z.object({
   downtimeStart: optionalTime.optional(),
   downtimeFinish: optionalTime.optional(),
   equipmentStageId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
-  reason: z.string().max(250).optional().or(z.literal('')).or(z.null())
+  reason: z.string().max(250).optional().or(z.literal('')).or(z.null()),
+  notes: optionalLogNotes
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const clearLineDataSchema = z.object({
@@ -184,6 +244,186 @@ const loadPermanentSampleDataSchema = z.object({
 });
 
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+const DATA_SOURCE_CONNECTION_TEST_TIMEOUT_MS = 7000;
+
+function normalizeDataSourceKey(sourceName, sourceKey = '') {
+  const base = String(sourceKey || sourceName || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 160);
+  if (base) return base;
+  return `source-${Date.now()}`;
+}
+
+function optionalText(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed || null;
+}
+
+function normalizeDataSourceConnectionPayload(data = {}) {
+  const provider = data.provider === 'sql' ? 'sql' : 'api';
+  const connectionMode = data.connectionMode === 'sql' ? 'sql' : 'api';
+  const apiBaseUrl = optionalText(data.apiBaseUrl);
+  const apiKey = connectionMode === 'api' ? optionalText(data.apiKey) : null;
+  const apiSecret = connectionMode === 'api' ? optionalText(data.apiSecret) : null;
+  const sqlHost = connectionMode === 'sql' ? optionalText(data.sqlHost) : null;
+  const sqlPort = connectionMode === 'sql' && Number.isFinite(Number(data.sqlPort))
+    ? Math.max(1, Math.min(65535, Math.floor(Number(data.sqlPort))))
+    : null;
+  const sqlDatabase = connectionMode === 'sql' ? optionalText(data.sqlDatabase) : null;
+  const sqlUsername = connectionMode === 'sql' ? optionalText(data.sqlUsername) : null;
+  const sqlPassword = connectionMode === 'sql' ? optionalText(data.sqlPassword) : null;
+  return {
+    provider,
+    connectionMode,
+    apiBaseUrl,
+    apiKey,
+    apiSecret,
+    sqlHost,
+    sqlPort,
+    sqlDatabase,
+    sqlUsername,
+    sqlPassword
+  };
+}
+
+function dataSourceConnectionErrorMessage(error) {
+  const code = String(error?.code || '').toUpperCase();
+  if (code === 'ENOTFOUND') return 'Host could not be resolved.';
+  if (code === 'ECONNREFUSED') return 'Connection was refused by the remote host.';
+  if (code === 'ECONNRESET') return 'Connection was reset by the remote host.';
+  if (code === 'ETIMEDOUT') return 'Connection timed out.';
+  if (code === '28P01') return 'Authentication failed. Check username and password.';
+  if (code === '3D000') return 'Database does not exist or is not accessible.';
+  const message = String(error?.message || '').trim();
+  if (!message) return 'Connection failed.';
+  const compact = message.replace(/\s+/g, ' ');
+  return compact.length > 220 ? `${compact.slice(0, 217)}...` : compact;
+}
+
+async function testApiDataSourceConnection(payload = {}) {
+  const apiBaseUrl = String(payload.apiBaseUrl || '').trim();
+  const apiKey = String(payload.apiKey || '').trim();
+  const apiSecret = String(payload.apiSecret || '').trim();
+  if (!apiBaseUrl) {
+    return { ok: false, mode: 'api', message: 'API Base URL is required for API connection tests.' };
+  }
+  if (!apiKey) {
+    return { ok: false, mode: 'api', message: 'API key is required for API connection tests.' };
+  }
+
+  let targetUrl = '';
+  try {
+    targetUrl = new URL(apiBaseUrl).toString();
+  } catch {
+    return { ok: false, mode: 'api', message: 'API Base URL must be a valid absolute URL.' };
+  }
+
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutId = controller ? setTimeout(() => controller.abort(), DATA_SOURCE_CONNECTION_TEST_TIMEOUT_MS) : null;
+  try {
+    const headers = {
+      Authorization: `Bearer ${apiKey}`,
+      Accept: 'application/json,text/plain;q=0.9,*/*;q=0.8'
+    };
+    if (apiSecret) headers['X-API-Secret'] = apiSecret;
+    const response = await fetch(targetUrl, {
+      method: 'GET',
+      headers,
+      signal: controller ? controller.signal : undefined
+    });
+    if (response.ok) {
+      return {
+        ok: true,
+        mode: 'api',
+        statusCode: response.status,
+        message: `API responded with HTTP ${response.status}.`
+      };
+    }
+    const responseText = String(await response.text()).trim().replace(/\s+/g, ' ');
+    const suffix = responseText ? ` ${responseText.slice(0, 140)}` : '';
+    return {
+      ok: false,
+      mode: 'api',
+      statusCode: response.status,
+      message: `API returned HTTP ${response.status}.${suffix}`
+    };
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      return {
+        ok: false,
+        mode: 'api',
+        message: `Connection test timed out after ${Math.round(DATA_SOURCE_CONNECTION_TEST_TIMEOUT_MS / 1000)} seconds.`
+      };
+    }
+    return {
+      ok: false,
+      mode: 'api',
+      message: dataSourceConnectionErrorMessage(error)
+    };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+async function testSqlDataSourceConnection(payload = {}) {
+  const sqlHost = String(payload.sqlHost || '').trim();
+  const sqlDatabase = String(payload.sqlDatabase || '').trim();
+  const sqlUsername = String(payload.sqlUsername || '').trim();
+  const sqlPassword = String(payload.sqlPassword || '').trim();
+  const sqlPortRaw = Number(payload.sqlPort);
+  const sqlPort = Number.isFinite(sqlPortRaw) && sqlPortRaw > 0 ? Math.floor(sqlPortRaw) : 5432;
+  if (!sqlHost || !sqlDatabase || !sqlUsername || !sqlPassword) {
+    return {
+      ok: false,
+      mode: 'sql',
+      message: 'SQL host, database, username and password are required for SQL connection tests.'
+    };
+  }
+
+  const client = new Client({
+    host: sqlHost,
+    port: sqlPort,
+    database: sqlDatabase,
+    user: sqlUsername,
+    password: sqlPassword,
+    application_name: 'kebab-line-data-source-test',
+    connectionTimeoutMillis: DATA_SOURCE_CONNECTION_TEST_TIMEOUT_MS,
+    query_timeout: DATA_SOURCE_CONNECTION_TEST_TIMEOUT_MS,
+    statement_timeout: DATA_SOURCE_CONNECTION_TEST_TIMEOUT_MS
+  });
+
+  try {
+    await client.connect();
+    await client.query('SELECT 1');
+    return {
+      ok: true,
+      mode: 'sql',
+      message: `SQL connection successful (${sqlHost}:${sqlPort}/${sqlDatabase}).`
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      mode: 'sql',
+      message: dataSourceConnectionErrorMessage(error)
+    };
+  } finally {
+    try {
+      await client.end();
+    } catch {
+      // Ignore close errors; the probe result already captures the primary failure.
+    }
+  }
+}
+
+async function testDataSourceConnection(payload = {}) {
+  const connectionMode = String(payload.connectionMode || '').trim().toLowerCase() === 'sql' ? 'sql' : 'api';
+  return connectionMode === 'sql'
+    ? testSqlDataSourceConnection(payload)
+    : testApiDataSourceConnection(payload);
+}
 
 const SAMPLE_DOWNTIME_REASON_PRESETS = {
   'Donor Meat': ['Stock Out', 'Late Delivery', 'Quality Hold', 'Temperature Hold'],
@@ -228,6 +468,7 @@ async function fetchSupervisorsWithAssignments() {
          u.is_active AS "isActive"
        FROM users u
        WHERE u.role = 'supervisor'
+         AND u.is_active = TRUE
        ORDER BY u.created_at DESC`
     ),
     dbQuery(
@@ -292,6 +533,36 @@ async function fetchLineGroups() {
      FROM line_groups
      WHERE is_active = TRUE
      ORDER BY display_order ASC, LOWER(name) ASC, created_at ASC`
+  );
+  return result.rows;
+}
+
+async function fetchDataSources() {
+  const result = await dbQuery(
+    `SELECT
+       id,
+       source_key AS "sourceKey",
+       source_name AS "sourceName",
+       machine_no AS "machineNo",
+       device_name AS "deviceName",
+       device_id AS "deviceId",
+       scale_number AS "scaleNumber",
+       provider,
+       connection_mode AS "connectionMode",
+       COALESCE(api_base_url, '') AS "apiBaseUrl",
+       (COALESCE(api_key, '') <> '') AS "hasApiKey",
+       (
+         COALESCE(sql_host, '') <> ''
+         AND COALESCE(sql_database, '') <> ''
+         AND COALESCE(sql_username, '') <> ''
+         AND COALESCE(sql_password, '') <> ''
+       ) AS "hasSqlCredentials",
+       is_active AS "isActive",
+       created_at AS "createdAt",
+       updated_at AS "updatedAt"
+     FROM data_sources
+     WHERE is_active = TRUE
+     ORDER BY LOWER(source_name) ASC, created_at ASC`
   );
   return result.rows;
 }
@@ -637,6 +908,149 @@ async function ensureLineGroupSchema() {
   return lineGroupSchemaPromise;
 }
 
+let dataSourceSchemaReady = false;
+let dataSourceSchemaPromise = null;
+
+async function ensureDataSourceSchema() {
+  if (dataSourceSchemaReady) return;
+  if (dataSourceSchemaPromise) return dataSourceSchemaPromise;
+  dataSourceSchemaPromise = (async () => {
+    await dbQuery(
+      `CREATE TABLE IF NOT EXISTS data_sources (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         source_key TEXT NOT NULL UNIQUE,
+         source_name TEXT NOT NULL,
+         machine_no TEXT,
+         device_name TEXT,
+         device_id TEXT,
+         scale_number TEXT,
+         provider TEXT NOT NULL DEFAULT 'sql',
+         connection_mode TEXT NOT NULL DEFAULT 'api',
+         api_base_url TEXT,
+         api_key TEXT,
+         api_secret TEXT,
+         sql_host TEXT,
+         sql_port INTEGER,
+         sql_database TEXT,
+         sql_username TEXT,
+         sql_password TEXT,
+         is_active BOOLEAN NOT NULL DEFAULT TRUE,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS connection_mode TEXT NOT NULL DEFAULT 'api'`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS api_base_url TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS api_key TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS api_secret TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS sql_host TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS sql_port INTEGER`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS sql_database TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS sql_username TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE data_sources
+       ADD COLUMN IF NOT EXISTS sql_password TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE line_stages
+       ADD COLUMN IF NOT EXISTS data_source_id UUID REFERENCES data_sources(id) ON DELETE SET NULL`
+    );
+    await dbQuery(
+      `CREATE UNIQUE INDEX IF NOT EXISTS idx_line_stages_data_source_unique
+       ON line_stages(data_source_id)
+       WHERE data_source_id IS NOT NULL`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_data_sources_active_name
+       ON data_sources(is_active, LOWER(source_name), created_at)`
+    );
+    await dbQuery(
+      `INSERT INTO data_sources(
+         source_key,
+         source_name,
+         machine_no,
+         device_name,
+         device_id,
+         scale_number,
+         provider,
+         connection_mode,
+         is_active
+       )
+       VALUES
+         ($1, $2, $3, $4, $5, $6, $7, $8, TRUE),
+         ($9, $10, $11, $12, $13, $14, $15, $16, TRUE),
+         ($17, $18, $19, $20, $21, $22, $23, $24, TRUE)
+       ON CONFLICT (source_key) DO UPDATE
+       SET
+         source_name = EXCLUDED.source_name,
+         machine_no = EXCLUDED.machine_no,
+         device_name = EXCLUDED.device_name,
+         device_id = EXCLUDED.device_id,
+         scale_number = EXCLUDED.scale_number,
+         provider = EXCLUDED.provider,
+         connection_mode = EXCLUDED.connection_mode,
+         is_active = EXCLUDED.is_active,
+         updated_at = NOW()`,
+      [
+        'bizerba-proseal-line-1',
+        'ProSeal Line 1 - MASTER',
+        '1',
+        'ProSeal Line 1 - MASTER',
+        '{2081B032-ECC1-4350-88A4-51867EBDFBDE}',
+        '1',
+        'sql',
+        'sql',
+        'bizerba-multivac-line',
+        'Multivac Line - MASTER',
+        '3',
+        'Multivac Line - MASTER',
+        '{4341C2FD-EFBC-4b14-A0CC-3E59C1750D1E}',
+        '1',
+        'sql',
+        'sql',
+        'bizerba-ulma-line',
+        'Ulma Line - MASTER',
+        '4',
+        'Ulma Line -  MASTER',
+        '{EE6A8E2F-9068-4bda-9DAF-83C81A322FA0}',
+        '1',
+        'sql',
+        'sql'
+      ]
+    );
+    dataSourceSchemaReady = true;
+  })()
+    .catch((error) => {
+      dataSourceSchemaPromise = null;
+      throw error;
+    });
+  return dataSourceSchemaPromise;
+}
+
 app.get('/api/health', asyncRoute(async (_req, res) => {
   await dbQuery('SELECT 1');
   res.json({ ok: true, env: config.nodeEnv, timestamp: new Date().toISOString() });
@@ -673,6 +1087,173 @@ app.get('/api/me', authMiddleware, asyncRoute(async (req, res) => {
 app.get('/api/line-groups', authMiddleware, requireRole('manager'), asyncRoute(async (_req, res) => {
   await ensureLineGroupSchema();
   res.json({ lineGroups: await fetchLineGroups() });
+}));
+
+app.get('/api/data-sources', authMiddleware, requireRole('manager'), asyncRoute(async (_req, res) => {
+  await ensureDataSourceSchema();
+  res.json({ dataSources: await fetchDataSources() });
+}));
+
+app.post('/api/data-sources', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureDataSourceSchema();
+  const parsed = dataSourceCreateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid data source payload' });
+
+  const sourceName = parsed.data.sourceName.trim();
+  const sourceKey = normalizeDataSourceKey(sourceName, parsed.data.sourceKey || '');
+  const machineNo = optionalText(parsed.data.machineNo);
+  const deviceName = optionalText(parsed.data.deviceName);
+  const deviceId = optionalText(parsed.data.deviceId);
+  const scaleNumber = optionalText(parsed.data.scaleNumber);
+  const {
+    provider,
+    connectionMode,
+    apiBaseUrl,
+    apiKey,
+    apiSecret,
+    sqlHost,
+    sqlPort,
+    sqlDatabase,
+    sqlUsername,
+    sqlPassword
+  } = normalizeDataSourceConnectionPayload(parsed.data);
+
+  if (connectionMode === 'api' && !apiKey) {
+    return res.status(400).json({ error: 'API key is required for API connection mode.' });
+  }
+  if (connectionMode === 'sql' && (!sqlHost || !sqlDatabase || !sqlUsername || !sqlPassword)) {
+    return res.status(400).json({ error: 'SQL host, database, username and password are required for SQL connection mode.' });
+  }
+
+  try {
+    const inserted = await dbQuery(
+      `INSERT INTO data_sources(
+         source_key,
+         source_name,
+         machine_no,
+         device_name,
+         device_id,
+         scale_number,
+         provider,
+         connection_mode,
+         api_base_url,
+         api_key,
+         api_secret,
+         sql_host,
+         sql_port,
+         sql_database,
+         sql_username,
+         sql_password,
+         is_active,
+         updated_at
+       )
+       VALUES (
+         $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,TRUE,NOW()
+       )
+       RETURNING id`,
+      [
+        sourceKey,
+        sourceName,
+        machineNo,
+        deviceName,
+        deviceId,
+        scaleNumber,
+        provider,
+        connectionMode,
+        apiBaseUrl,
+        apiKey,
+        apiSecret,
+        sqlHost,
+        sqlPort,
+        sqlDatabase,
+        sqlUsername,
+        sqlPassword
+      ]
+    );
+    const insertedId = inserted.rows?.[0]?.id;
+    const result = await dbQuery(
+      `SELECT
+         id,
+         source_key AS "sourceKey",
+         source_name AS "sourceName",
+         machine_no AS "machineNo",
+         device_name AS "deviceName",
+         device_id AS "deviceId",
+         scale_number AS "scaleNumber",
+         provider,
+         connection_mode AS "connectionMode",
+         COALESCE(api_base_url, '') AS "apiBaseUrl",
+         (COALESCE(api_key, '') <> '') AS "hasApiKey",
+         (
+           COALESCE(sql_host, '') <> ''
+           AND COALESCE(sql_database, '') <> ''
+           AND COALESCE(sql_username, '') <> ''
+           AND COALESCE(sql_password, '') <> ''
+         ) AS "hasSqlCredentials",
+         is_active AS "isActive",
+         created_at AS "createdAt",
+         updated_at AS "updatedAt"
+       FROM data_sources
+       WHERE id = $1`,
+      [insertedId]
+    );
+    return res.status(201).json({ dataSource: result.rows[0] || null });
+  } catch (error) {
+    if (String(error?.message || '').includes('duplicate key')) {
+      return res.status(409).json({ error: 'Data source key already exists. Please use a unique source key.' });
+    }
+    throw error;
+  }
+}));
+
+app.post('/api/data-sources/test', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureDataSourceSchema();
+  const parsed = dataSourceConnectionTestSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid data source test payload' });
+
+  const payload = normalizeDataSourceConnectionPayload(parsed.data);
+  const test = await testDataSourceConnection(payload);
+  return res.json({ test });
+}));
+
+app.post('/api/data-sources/:dataSourceId/test', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureDataSourceSchema();
+  const dataSourceId = String(req.params.dataSourceId || '').trim();
+  if (!z.string().uuid().safeParse(dataSourceId).success) {
+    return res.status(400).json({ error: 'Invalid data source id' });
+  }
+  const result = await dbQuery(
+    `SELECT
+       id::TEXT AS id,
+       source_name AS "sourceName",
+       provider,
+       connection_mode AS "connectionMode",
+       COALESCE(api_base_url, '') AS "apiBaseUrl",
+       COALESCE(api_key, '') AS "apiKey",
+       COALESCE(api_secret, '') AS "apiSecret",
+       COALESCE(sql_host, '') AS "sqlHost",
+       sql_port AS "sqlPort",
+       COALESCE(sql_database, '') AS "sqlDatabase",
+       COALESCE(sql_username, '') AS "sqlUsername",
+       COALESCE(sql_password, '') AS "sqlPassword"
+     FROM data_sources
+     WHERE id = $1
+       AND is_active = TRUE
+     LIMIT 1`,
+    [dataSourceId]
+  );
+  const source = result.rows?.[0];
+  if (!source) return res.status(404).json({ error: 'Data source not found' });
+
+  const payload = normalizeDataSourceConnectionPayload(source);
+  const test = await testDataSourceConnection(payload);
+  return res.json({
+    test: {
+      ...test,
+      dataSourceId: source.id,
+      sourceName: source.sourceName
+    }
+  });
 }));
 
 app.post('/api/line-groups', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
@@ -979,6 +1560,7 @@ app.patch('/api/lines/reorder', authMiddleware, requireRole('manager'), asyncRou
 
 app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   await ensureLineGroupSchema();
+  await ensureDataSourceSchema();
   const linesQuery = req.user.role === 'manager'
     ? `SELECT
          l.id,
@@ -1043,10 +1625,16 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   const lineRows = linesResult.rows;
   const lineIds = lineRows.map((line) => line.id);
   if (!lineIds.length) {
-    const payload = { lines: [], supervisors: [], lineGroups: [] };
+    const payload = { lines: [], supervisors: [], lineGroups: [], dataSources: [] };
     if (req.user.role === 'manager') {
-      payload.supervisors = await fetchSupervisorsWithAssignments();
-      payload.lineGroups = await fetchLineGroups();
+      const [supervisors, lineGroups, dataSources] = await Promise.all([
+        fetchSupervisorsWithAssignments(),
+        fetchLineGroups(),
+        fetchDataSources()
+      ]);
+      payload.supervisors = supervisors;
+      payload.lineGroups = lineGroups;
+      payload.dataSources = dataSources;
     } else if (req.user.role === 'supervisor') {
       payload.supervisorAssignments = await fetchSupervisorAssignments(req.user.id);
     }
@@ -1065,6 +1653,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          day_crew AS "dayCrew",
          night_crew AS "nightCrew",
          max_throughput_per_crew AS "maxThroughputPerCrew",
+         COALESCE(data_source_id::TEXT, '') AS "dataSourceId",
          x, y, w, h
        FROM line_stages
        WHERE line_id = ANY($1::UUID[])
@@ -1092,6 +1681,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(shift_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM shift_logs
@@ -1106,6 +1696,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(shift_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM shift_logs
@@ -1179,6 +1770,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(run_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM run_logs
@@ -1196,6 +1788,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(run_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM run_logs
@@ -1225,6 +1818,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
+             COALESCE(downtime_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM downtime_logs
@@ -1240,6 +1834,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
+             COALESCE(downtime_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM downtime_logs
@@ -1271,6 +1866,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       dayCrew: row.dayCrew,
       nightCrew: row.nightCrew,
       maxThroughputPerCrew: row.maxThroughputPerCrew,
+      dataSourceId: row.dataSourceId,
       x: row.x,
       y: row.y,
       w: row.w,
@@ -1373,10 +1969,16 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     downtimeRows: downtimeByLine.get(line.id) || []
   }));
 
-  const payload = { lines, supervisors: [], lineGroups: [] };
+  const payload = { lines, supervisors: [], lineGroups: [], dataSources: [] };
   if (req.user.role === 'manager') {
-    payload.supervisors = await fetchSupervisorsWithAssignments();
-    payload.lineGroups = await fetchLineGroups();
+    const [supervisors, lineGroups, dataSources] = await Promise.all([
+      fetchSupervisorsWithAssignments(),
+      fetchLineGroups(),
+      fetchDataSources()
+    ]);
+    payload.supervisors = supervisors;
+    payload.lineGroups = lineGroups;
+    payload.dataSources = dataSources;
   } else if (req.user.role === 'supervisor') {
     payload.supervisorAssignments = await fetchSupervisorAssignments(req.user.id);
   }
@@ -1615,6 +2217,7 @@ app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manage
 
 app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
   await ensureLineGroupSchema();
+  await ensureDataSourceSchema();
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
@@ -1657,6 +2260,7 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
     dbQuery(
       `SELECT id, stage_order AS "stageOrder", stage_name AS "stageName", stage_type AS "stageType",
               day_crew AS "dayCrew", night_crew AS "nightCrew", max_throughput_per_crew AS "maxThroughputPerCrew",
+              COALESCE(data_source_id::TEXT, '') AS "dataSourceId",
               x, y, w, h
        FROM line_stages
        WHERE line_id = $1
@@ -1692,6 +2296,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(shift_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM shift_logs
@@ -1705,6 +2310,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(shift_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM shift_logs
@@ -1775,6 +2381,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(run_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM run_logs
@@ -1791,6 +2398,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+             COALESCE(run_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM run_logs
@@ -1819,6 +2427,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
+             COALESCE(downtime_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM downtime_logs
@@ -1833,6 +2442,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
+             COALESCE(downtime_logs.notes, '') AS notes,
              COALESCE(u.name, u.username, '') AS "submittedBy",
              submitted_at AS "submittedAt"
            FROM downtime_logs
@@ -1862,6 +2472,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
 }));
 
 app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureDataSourceSchema();
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   const parsed = lineModelSchema.safeParse(req.body || {});
@@ -1879,8 +2490,8 @@ app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyn
     for (const stage of parsed.data.stages) {
       await client.query(
         `INSERT INTO line_stages(
-           line_id, stage_order, stage_name, stage_type, day_crew, night_crew, max_throughput_per_crew, x, y, w, h
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+           line_id, stage_order, stage_name, stage_type, day_crew, night_crew, max_throughput_per_crew, data_source_id, x, y, w, h
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [
           lineId,
           stage.stageOrder,
@@ -1889,6 +2500,7 @@ app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyn
           stage.dayCrew,
           stage.nightCrew,
           stage.maxThroughputPerCrew,
+          stage.dataSourceId ? stage.dataSourceId : null,
           stage.x,
           stage.y,
           stage.w,
@@ -1909,6 +2521,12 @@ app.put('/api/lines/:lineId/model', authMiddleware, requireRole('manager'), asyn
     return res.json({ ok: true });
   } catch (error) {
     await client.query('ROLLBACK');
+    if (error?.code === '23505' && String(error?.constraint || '') === 'idx_line_stages_data_source_unique') {
+      return res.status(409).json({ error: 'Data source is already connected to another equipment stage.' });
+    }
+    if (error?.code === '23503' && String(error?.constraint || '').includes('line_stages_data_source_id_fkey')) {
+      return res.status(400).json({ error: 'Data source not found.' });
+    }
     throw error;
   } finally {
     client.release();
@@ -2352,9 +2970,18 @@ app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
-    `INSERT INTO shift_logs(line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
-     RETURNING id, line_id AS "lineId", date, shift, crew_on_shift AS "crewOnShift", start_time AS "startTime", finish_time AS "finishTime", submitted_at AS "submittedAt"`,
+    `INSERT INTO shift_logs(line_id, date, shift, crew_on_shift, start_time, finish_time, notes, submitted_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, ''), $8)
+     RETURNING
+       id,
+       line_id AS "lineId",
+       date,
+       shift,
+       crew_on_shift AS "crewOnShift",
+       start_time AS "startTime",
+       finish_time AS "finishTime",
+       COALESCE(notes, '') AS notes,
+       submitted_at AS "submittedAt"`,
     [
       parsed.data.lineId,
       parsed.data.date,
@@ -2362,6 +2989,7 @@ app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.crewOnShift,
       parsed.data.startTime,
       parsed.data.finishTime,
+      String(parsed.data.notes ?? '').trim(),
       req.user.id
     ]
   );
@@ -2525,9 +3153,9 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
 
   const result = await dbQuery(
     `INSERT INTO run_logs(
-       line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, submitted_by_user_id
+       line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, notes, submitted_by_user_id
      )
-     VALUES ($1, $2, $3, $4, NULLIF($5, '')::time, $6, $7, $8, $9::jsonb, $10)
+     VALUES ($1, $2, $3, $4, NULLIF($5, '')::time, $6, $7, $8, $9::jsonb, COALESCE($10, ''), $11)
      RETURNING
        id,
        line_id AS "lineId",
@@ -2539,6 +3167,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
        to_char(finish_time, 'HH24:MI') AS "finishTime",
        units_produced AS "unitsProduced",
        COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+       COALESCE(notes, '') AS notes,
        submitted_at AS "submittedAt"`,
     [
       parsed.data.lineId,
@@ -2550,6 +3179,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.finishTime,
       parsed.data.unitsProduced,
       JSON.stringify(parsed.data.runCrewingPattern || {}),
+      String(parsed.data.notes ?? '').trim(),
       req.user.id
     ]
   );
@@ -2576,9 +3206,16 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   }
 
   const result = await dbQuery(
-    `INSERT INTO downtime_logs(line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), $8)
-     RETURNING id, line_id AS "lineId", date, shift, reason, submitted_at AS "submittedAt"`,
+    `INSERT INTO downtime_logs(line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, notes, submitted_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), COALESCE($8, ''), $9)
+     RETURNING
+       id,
+       line_id AS "lineId",
+       date,
+       shift,
+       reason,
+       COALESCE(notes, '') AS notes,
+       submitted_at AS "submittedAt"`,
     [
       parsed.data.lineId,
       parsed.data.date,
@@ -2587,6 +3224,7 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.downtimeFinish,
       parsed.data.equipmentStageId || null,
       parsed.data.reason || '',
+      String(parsed.data.notes ?? '').trim(),
       req.user.id
     ]
   );
@@ -2624,13 +3262,19 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
   }
 
   const data = parsed.data;
+  const notesProvided = Object.prototype.hasOwnProperty.call(data, 'notes');
+  const notesValue = notesProvided ? String(data.notes ?? '').trim() : '';
   const result = await dbQuery(
     `UPDATE shift_logs
      SET
        crew_on_shift = COALESCE($2, crew_on_shift),
        start_time = COALESCE(NULLIF($3, '')::time, start_time),
        finish_time = COALESCE(NULLIF($4, '')::time, finish_time),
-       submitted_by_user_id = $5,
+       notes = CASE
+         WHEN $5::boolean IS FALSE THEN notes
+         ELSE $6
+       END,
+       submitted_by_user_id = $7,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -2641,12 +3285,15 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
        crew_on_shift AS "crewOnShift",
        to_char(start_time, 'HH24:MI') AS "startTime",
        to_char(finish_time, 'HH24:MI') AS "finishTime",
+       COALESCE(notes, '') AS notes,
        submitted_at AS "submittedAt"`,
     [
       logId,
       data.crewOnShift,
       data.startTime ?? null,
       data.finishTime ?? null,
+      notesProvided,
+      notesValue,
       req.user.id
     ]
   );
@@ -2684,6 +3331,8 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
   }
 
   const data = parsed.data;
+  const notesProvided = Object.prototype.hasOwnProperty.call(data, 'notes');
+  const notesValue = notesProvided ? String(data.notes ?? '').trim() : '';
   const result = await dbQuery(
     `UPDATE run_logs
      SET
@@ -2693,7 +3342,11 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        finish_time = COALESCE(NULLIF($5, '')::time, finish_time),
        units_produced = COALESCE($6, units_produced),
        run_crewing_pattern = COALESCE($7::jsonb, run_crewing_pattern),
-       submitted_by_user_id = $8,
+       notes = CASE
+         WHEN $8::boolean IS FALSE THEN notes
+         ELSE $9
+       END,
+       submitted_by_user_id = $10,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -2707,6 +3360,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        to_char(finish_time, 'HH24:MI') AS "finishTime",
        units_produced AS "unitsProduced",
        COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+       COALESCE(notes, '') AS notes,
        submitted_at AS "submittedAt"`,
     [
       logId,
@@ -2716,6 +3370,8 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
       data.finishTime ?? null,
       data.unitsProduced,
       data.runCrewingPattern === undefined ? null : JSON.stringify(data.runCrewingPattern || {}),
+      notesProvided,
+      notesValue,
       req.user.id
     ]
   );
@@ -2760,6 +3416,8 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   }
   const reasonProvided = Object.prototype.hasOwnProperty.call(data, 'reason');
   const reasonValue = reasonProvided ? String(data.reason ?? '').trim() : '';
+  const notesProvided = Object.prototype.hasOwnProperty.call(data, 'notes');
+  const notesValue = notesProvided ? String(data.notes ?? '').trim() : '';
   const result = await dbQuery(
     `UPDATE downtime_logs
      SET
@@ -2774,7 +3432,11 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
          WHEN $6::boolean IS FALSE THEN reason
          ELSE NULLIF($7, '')
        END,
-       submitted_by_user_id = $8,
+       notes = CASE
+         WHEN $8::boolean IS FALSE THEN notes
+         ELSE $9
+       END,
+       submitted_by_user_id = $10,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -2786,6 +3448,7 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
        to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
        COALESCE(equipment_stage_id::TEXT, '') AS equipment,
        COALESCE(reason, '') AS reason,
+       COALESCE(notes, '') AS notes,
        submitted_at AS "submittedAt"`,
     [
       logId,
@@ -2795,6 +3458,8 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
       equipmentStageValue,
       reasonProvided,
       reasonValue,
+      notesProvided,
+      notesValue,
       req.user.id
     ]
   );

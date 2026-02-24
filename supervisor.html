@@ -3,14 +3,14 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Production Line Visualiser</title>
+    <title>Production Line Supervisor App</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Montserrat:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="styles.css" />
     <script>
       (function applyApiBase() {
-        window.PRODUCTION_LINE_APP_VARIANT = "manager";
+        window.PRODUCTION_LINE_APP_VARIANT = "supervisor";
         const storageKey = "production-line-api-base";
         const localApiBase = "http://localhost:4000";
         const hostedApiBase = window.location.origin;
@@ -229,15 +229,6 @@
                 </div>
               </section>
 
-              <section class="dash-card data-sources-card manager-settings-card">
-                <h2>Data Sources</h2>
-                <p class="muted">Live SQL equipment feeds available for assignment to line stages.</p>
-                <div class="action-row data-sources-actions">
-                  <button id="connectDataSourceBtn" type="button">Connect Data Source</button>
-                </div>
-                <div id="dataSourcesList" class="table-wrap"></div>
-              </section>
-
               <section class="dash-card manager-actions-card manager-primary-card">
                 <h2>Actions</h2>
                 <p class="muted">All open and historical actions across supervisors. Reassign ownership as needed.</p>
@@ -252,10 +243,8 @@
               <form id="supervisorLoginForm" class="form-grid">
                 <input id="supervisorUser" placeholder="Username" required />
                 <input id="supervisorPass" type="password" placeholder="Password" required />
-                <button id="supervisorTestLoginBtn" class="ghost-btn" type="button">Test Login</button>
                 <button type="submit">Log In</button>
               </form>
-              <p class="muted">Demo credentials: supervisor / supervisor123</p>
             </section>
 
             <section id="supervisorAppSection" class="panel hidden">
@@ -640,100 +629,6 @@
       </div>
     </div>
 
-    <div id="connectDataSourceModal" class="modal-overlay" aria-hidden="true">
-      <div class="modal-card stage-settings-modal-card connect-data-source-modal-card" role="dialog" aria-modal="true" aria-labelledby="connectDataSourceTitle">
-        <div class="modal-head">
-          <div class="modal-title-block">
-            <h2 id="connectDataSourceTitle">Connect Data Source</h2>
-            <p class="muted">Enter connection details so we can start integrating this feed.</p>
-          </div>
-          <button id="closeConnectDataSourceModal" class="ghost-btn" type="button">Close</button>
-        </div>
-        <form id="connectDataSourceForm" class="form-grid connect-data-source-form">
-          <label>
-            Source Name
-            <input id="connectDataSourceName" maxlength="160" placeholder="e.g. ProSeal Line 2 - MASTER" required />
-          </label>
-          <label>
-            Source Key (optional)
-            <input id="connectDataSourceKey" maxlength="160" placeholder="Auto-generated if blank" />
-          </label>
-          <label>
-            Provider
-            <select id="connectDataSourceProvider">
-              <option value="sql">SQL</option>
-              <option value="api">API</option>
-            </select>
-          </label>
-          <label>
-            Connection Mode
-            <select id="connectDataSourceMode">
-              <option value="api">API Key</option>
-              <option value="sql">SQL Credentials</option>
-            </select>
-          </label>
-          <label>
-            Machine No (optional)
-            <input id="connectDataSourceMachineNo" maxlength="64" />
-          </label>
-          <label>
-            Device Name (optional)
-            <input id="connectDataSourceDeviceName" maxlength="160" />
-          </label>
-          <label>
-            Device ID (optional)
-            <input id="connectDataSourceDeviceId" maxlength="160" />
-          </label>
-          <label>
-            Scale Number (optional)
-            <input id="connectDataSourceScaleNumber" maxlength="64" />
-          </label>
-          <div id="connectDataSourceApiFields" class="connect-data-source-field-group">
-            <label>
-              API Base URL
-              <input id="connectDataSourceApiBaseUrl" type="url" maxlength="300" placeholder="https://example.com/api" />
-            </label>
-            <label>
-              API Key
-              <input id="connectDataSourceApiKey" type="password" maxlength="300" placeholder="Enter API key" />
-            </label>
-            <label>
-              API Secret (optional)
-              <input id="connectDataSourceApiSecret" type="password" maxlength="300" placeholder="Enter API secret" />
-            </label>
-          </div>
-          <div id="connectDataSourceSqlFields" class="connect-data-source-field-group hidden">
-            <label>
-              SQL Host
-              <input id="connectDataSourceSqlHost" maxlength="255" placeholder="db.example.com" />
-            </label>
-            <label>
-              SQL Port
-              <input id="connectDataSourceSqlPort" type="number" min="1" max="65535" step="1" placeholder="5432" />
-            </label>
-            <label>
-              SQL Database
-              <input id="connectDataSourceSqlDatabase" maxlength="160" placeholder="production_line" />
-            </label>
-            <label>
-              SQL Username
-              <input id="connectDataSourceSqlUsername" maxlength="160" />
-            </label>
-            <label>
-              SQL Password
-              <input id="connectDataSourceSqlPassword" type="password" maxlength="300" />
-            </label>
-          </div>
-          <p id="connectDataSourceHelp" class="muted connect-data-source-help"></p>
-          <p id="connectDataSourceTestResult" class="muted connect-data-source-help connect-data-source-test-result" aria-live="polite"></p>
-          <div class="form-submit-actions">
-            <button id="connectDataSourceTestBtn" class="ghost-btn" type="button">Test Connection</button>
-            <button type="submit">Save Data Source</button>
-          </div>
-        </form>
-      </div>
-    </div>
-
     <div id="lineWorkspace" class="app-shell hidden">
       <header class="dashboard-topbar manager-workspace-topbar">
         <div class="home-title-block">
@@ -1087,13 +982,6 @@
               <option value="transfer">Transfer</option>
             </select>
           </label>
-          <label>
-            Connect To Data Source
-            <select id="stageSettingsDataSource">
-              <option value="">Not connected</option>
-            </select>
-          </label>
-          <p id="stageSettingsDataSourceHint" class="muted stage-data-source-hint"></p>
           <label>
             Day Crew
             <input id="stageSettingsCrewDay" type="number" min="0" step="1" />

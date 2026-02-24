@@ -27,6 +27,28 @@ function parseNumberEnv(name, fallback, { min = Number.NEGATIVE_INFINITY } = {})
   return parsed;
 }
 
+function normalizeOrigin(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  if (raw === '*') return '*';
+  try {
+    return new URL(raw).origin;
+  } catch {
+    return raw.replace(/\/+$/, '');
+  }
+}
+
+function parseFrontendOrigins() {
+  const raw = firstNonEmptyEnv(['FRONTEND_ORIGINS', 'FRONTEND_ORIGIN'], '*');
+  const trimmed = String(raw || '').trim();
+  if (!trimmed || trimmed === '*') return ['*'];
+  const origins = trimmed
+    .split(',')
+    .map((entry) => normalizeOrigin(entry))
+    .filter(Boolean);
+  return origins.length ? Array.from(new Set(origins)) : ['*'];
+}
+
 function inferDatabaseProvider(connectionString) {
   try {
     const url = new URL(connectionString);
@@ -55,6 +77,7 @@ const inferredProvider = inferDatabaseProvider(databaseUrl);
 const databaseProvider = rawProvider === 'supabase' || rawProvider === 'postgres'
   ? rawProvider
   : inferredProvider;
+const frontendOrigins = parseFrontendOrigins();
 
 export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
@@ -63,7 +86,8 @@ export const config = {
   databaseUrl,
   jwtSecret: validatedJwtSecret(),
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '12h',
-  frontendOrigin: process.env.FRONTEND_ORIGIN || '*',
+  frontendOrigins,
+  frontendOrigin: frontendOrigins[0] || '*',
   dbPoolMax: parseNumberEnv('DB_POOL_MAX', 10, { min: 1 }),
   dbIdleTimeoutMs: parseNumberEnv('DB_IDLE_TIMEOUT_MS', 30000, { min: 0 }),
   dbConnectionTimeoutMs: parseNumberEnv('DB_CONNECTION_TIMEOUT_MS', 10000, { min: 1000 }),

@@ -3,6 +3,11 @@ const STORAGE_BACKUP_KEY = "kebab-line-data-v2-backup";
 const AUTH_STORAGE_KEY = "kebab-line-auth-v1";
 const ROUTE_STORAGE_KEY = "kebab-line-route-v1";
 const HOME_UI_STORAGE_KEY = "kebab-line-home-ui-v1";
+const SUPERVISOR_ACTIONS_STORAGE_KEY = "kebab-line-supervisor-actions-v1";
+const APP_VARIANT = (() => {
+  const raw = String(window.PRODUCTION_LINE_APP_VARIANT || "").trim().toLowerCase();
+  return raw === "supervisor" ? "supervisor" : "manager";
+})();
 const API_BASE_URL = `${
   window.PRODUCTION_LINE_API_BASE ||
   "http://localhost:4000"
@@ -43,9 +48,9 @@ const PERMANENT_STAGE_TEMPLATE = Object.freeze({
   pack: { crew: 2, maxThroughput: 25 }
 });
 
-const SHIFT_COLUMNS = ["Date", "Shift", "Crew On Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Submitted By", "Action"];
-const RUN_COLUMNS = ["Date", "Assigned Shift", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Submitted By", "Action"];
-const DOWN_COLUMNS = ["Date", "Assigned Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Submitted By", "Action"];
+const SHIFT_COLUMNS = ["Date", "Shift", "Crew On Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Notes", "Submitted By", "Action"];
+const RUN_COLUMNS = ["Date", "Assigned Shift", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Notes", "Submitted By", "Action"];
+const DOWN_COLUMNS = ["Date", "Assigned Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Notes", "Submitted By", "Action"];
 const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
 const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "Utilisation (%)", "Net Run Rate (u/min)", "Bottleneck", "Staffing"];
 const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
@@ -70,15 +75,91 @@ const DEFAULT_SUPERVISORS = [
   { id: "sup-2", name: "Day Lead", username: "daylead", password: "day123", mode: "even", shifts: ["Day"] },
   { id: "sup-3", name: "Night Lead", username: "nightlead", password: "night123", mode: "odd", shifts: ["Night"] }
 ];
+const ACTION_PRIORITY_OPTIONS = ["Low", "Medium", "High", "Critical"];
+const ACTION_STATUS_OPTIONS = ["Open", "In Progress", "Blocked", "Completed"];
+const ACTION_STATUS_SORT_ORDER = Object.freeze({
+  Blocked: 0,
+  Open: 1,
+  "In Progress": 2,
+  Completed: 3
+});
+const ACTION_REASON_CATEGORIES = Object.freeze(Array.from(new Set(["Equipment", ...Object.keys(DOWNTIME_REASON_PRESETS)])));
+const ACTION_SPECIAL_ASSIGNMENTS = Object.freeze([
+  { username: "maintenance", label: "Maintenance" },
+  { username: "continuous-improvement", label: "Continuous Improvement" }
+]);
+const ACTION_SPECIAL_ASSIGNMENT_LABELS = Object.freeze(
+  ACTION_SPECIAL_ASSIGNMENTS.reduce((acc, assignment) => {
+    acc[assignment.username] = assignment.label;
+    return acc;
+  }, {})
+);
+const ACTION_PRIORITY_SCORES = Object.freeze({
+  Low: 1,
+  Medium: 2,
+  High: 3,
+  Critical: 4
+});
+const MANAGER_ACTION_URGENCY_GROUPS = Object.freeze([
+  { key: "overdue", label: "Overdue", tone: "critical" },
+  { key: "urgent", label: "Urgent", tone: "high" },
+  { key: "due-soon", label: "Due Soon", tone: "medium" },
+  { key: "unscheduled", label: "Unscheduled", tone: "neutral" },
+  { key: "planned", label: "Planned", tone: "low" },
+  { key: "completed", label: "Completed", tone: "done" }
+]);
+const MANAGER_ACTION_URGENCY_GROUP_MAP = Object.freeze(
+  MANAGER_ACTION_URGENCY_GROUPS.reduce((acc, group, index) => {
+    acc[group.key] = {
+      ...group,
+      order: index
+    };
+    return acc;
+  }, {})
+);
+const ACTION_SAMPLE_TEMPLATES = Object.freeze([
+  {
+    title: "Verify startup readiness",
+    description: "Confirm pre-start checks are complete and record any blockers.",
+    priority: "Medium",
+    dueInDays: 1
+  },
+  {
+    title: "Investigate downtime spikes",
+    description: "Review today's downtime reasons and propose corrective actions.",
+    priority: "High",
+    dueInDays: 2
+  },
+  {
+    title: "Close shift handover gaps",
+    description: "Capture handover notes and assign follow-up items for next shift.",
+    priority: "Low",
+    dueInDays: 3
+  }
+]);
+const PRODUCT_CATALOG_STORAGE_KEY = "kebab-line-product-catalog-v1";
+const PRODUCT_CATALOG_MANAGER_DATALIST_ID = "productCatalogManagerRunProducts";
+const PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID = "productCatalogSupervisorRunProducts";
+const PRODUCT_CATALOG_COLUMN_COUNT = 12;
+const PRODUCT_CATALOG_ALL_LINES_TOKEN = "*";
+const PRODUCT_CATALOG_ID_ATTR = "data-product-id";
+const PRODUCT_CATALOG_LINES_ATTR = "data-product-line-ids";
+const DATA_SOURCE_PROVIDER_LABELS = {
+  sql: "SQL",
+  api: "API"
+};
 
 let appState = loadState();
 let state = appState.lines[appState.activeLineId] || null;
 let visualiserDragMoved = false;
 let managerLogInlineEdit = { lineId: "", type: "", logId: "" };
+let managerActionTicketEditId = "";
 let supervisorShiftTileEditId = "";
 let runCrewingPatternModalState = null;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 appState.lineGroups = normalizeLineGroups(appState.lineGroups);
+appState.dataSources = normalizeDataSources(appState.dataSources);
+appState.supervisorActions = normalizeSupervisorActions(appState.supervisorActions);
 let lineModelSyncTimer = null;
 const deferredLineModelSyncIds = new Set();
 let lineShiftTrackerResizeTimer = null;
@@ -93,10 +174,23 @@ let managerBackendSession = {
   backendStageMap: {},
   role: "manager"
 };
+const dataSourceConnectionTestState = new Map();
+
+function enforceAppVariantState() {
+  if (APP_VARIANT === "supervisor") {
+    appState.appMode = "supervisor";
+    appState.activeView = "home";
+    return;
+  }
+  appState.appMode = "manager";
+}
+
 clearLegacyStateStorage();
 restoreAuthSessionsFromStorage();
 restoreHomeUiState();
+restoreSupervisorActionsFromStorage();
 restoreRouteFromHash();
+enforceAppVariantState();
 state = appState.lines[appState.activeLineId] || null;
 
 function setManagerLogInlineEdit(lineId = "", type = "", logId = "") {
@@ -117,6 +211,18 @@ function isManagerLogInlineEditRow(lineId, type, logId) {
     managerLogInlineEdit.type === String(type || "") &&
     managerLogInlineEdit.logId === String(logId || "")
   );
+}
+
+function setManagerActionTicketEdit(actionId = "") {
+  managerActionTicketEditId = String(actionId || "");
+}
+
+function clearManagerActionTicketEdit() {
+  setManagerActionTicketEdit("");
+}
+
+function isManagerActionTicketEditRow(actionId) {
+  return managerActionTicketEditId === String(actionId || "");
 }
 
 function clone(value) {
@@ -168,6 +274,38 @@ function persistHomeUiState() {
   });
 }
 
+function readSupervisorActionsStorage() {
+  try {
+    const raw = window.localStorage.getItem(SUPERVISOR_ACTIONS_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSupervisorActionsStorage(actions) {
+  try {
+    const normalized = normalizeSupervisorActions(actions);
+    if (normalized.length) {
+      window.localStorage.setItem(SUPERVISOR_ACTIONS_STORAGE_KEY, JSON.stringify(normalized));
+    } else {
+      window.localStorage.removeItem(SUPERVISOR_ACTIONS_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures (private mode, quota, disabled storage).
+  }
+}
+
+function restoreSupervisorActionsFromStorage() {
+  appState.supervisorActions = normalizeSupervisorActions(readSupervisorActionsStorage());
+}
+
+function persistSupervisorActions() {
+  writeSupervisorActionsStorage(appState.supervisorActions);
+}
+
 function readRouteStorage() {
   try {
     const raw = window.localStorage.getItem(ROUTE_STORAGE_KEY);
@@ -200,7 +338,7 @@ function applyRouteSnapshot(route) {
   const lineId = String(route.lineId || "");
   if (lineId) appState.activeLineId = lineId;
 
-  if (route.supervisorMainTab === "supervisorDay" || route.supervisorMainTab === "supervisorData") {
+  if (["supervisorDay", "supervisorData", "supervisorActions"].includes(route.supervisorMainTab)) {
     appState.supervisorMainTab = route.supervisorMainTab;
   }
   const supervisorTab = String(route.supervisorTab || "");
@@ -217,11 +355,13 @@ function applyRouteSnapshot(route) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(dashboardDate)) appState.dashboardDate = dashboardDate;
   const dashboardShift = String(route.dashboardShift || "");
   if (SHIFT_OPTIONS.includes(dashboardShift)) appState.dashboardShift = dashboardShift;
+  enforceAppVariantState();
 }
 
 function currentRouteSnapshot() {
+  const routeMode = APP_VARIANT === "supervisor" ? "supervisor" : "manager";
   return {
-    mode: appState.appMode === "supervisor" ? "supervisor" : "manager",
+    mode: routeMode,
     view: appState.activeView === "line" ? "line" : "home",
     lineId: appState.activeView === "line" ? String(appState.activeLineId || "") : "",
     supervisorMainTab: appState.supervisorMainTab || "supervisorDay",
@@ -542,6 +682,154 @@ function normalizeLineGroups(lineGroups) {
     .sort((a, b) => (a.displayOrder - b.displayOrder) || a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
 }
 
+function normalizeDataSourceProvider(provider) {
+  const value = String(provider || "").trim().toLowerCase();
+  if (value === "api") return "api";
+  if (value === "sql") return "sql";
+  return "api";
+}
+
+function dataSourceKeyFromName(name, fallback = "data-source") {
+  const slug = String(name || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 160);
+  if (slug) return slug;
+  return `${fallback}-${Date.now()}`;
+}
+
+function normalizeDataSources(dataSources) {
+  const source = Array.isArray(dataSources) ? dataSources : [];
+  const seen = new Set();
+  return source
+    .map((dataSource, index) => {
+      const id = String(dataSource?.id || "").trim();
+      if (!id || seen.has(id)) return null;
+      seen.add(id);
+      const sourceName = String(dataSource?.sourceName || dataSource?.name || "").trim();
+      const sourceKey = String(dataSource?.sourceKey || dataSource?.key || "").trim();
+      const machineNo = String(dataSource?.machineNo || "").trim();
+      const deviceName = String(dataSource?.deviceName || "").trim();
+      const deviceId = String(dataSource?.deviceId || "").trim();
+      const scaleNumber = String(dataSource?.scaleNumber || "").trim();
+      const provider = normalizeDataSourceProvider(dataSource?.provider);
+      const connectionMode = String(dataSource?.connectionMode || provider || "api").trim().toLowerCase() === "sql" ? "sql" : "api";
+      const apiBaseUrl = String(dataSource?.apiBaseUrl || "").trim();
+      const hasApiKey = Boolean(dataSource?.hasApiKey);
+      const hasSqlCredentials = Boolean(dataSource?.hasSqlCredentials);
+      const isActive = dataSource?.isActive !== false;
+      const displayOrderRaw = Number(dataSource?.displayOrder);
+      const displayOrder = Number.isFinite(displayOrderRaw) ? Math.max(0, Math.floor(displayOrderRaw)) : index;
+      return {
+        id,
+        sourceKey,
+        sourceName: sourceName || sourceKey || `Data Source ${index + 1}`,
+        machineNo,
+        deviceName,
+        deviceId,
+        scaleNumber,
+        provider,
+        connectionMode,
+        apiBaseUrl,
+        hasApiKey,
+        hasSqlCredentials,
+        isActive,
+        displayOrder
+      };
+    })
+    .filter(Boolean)
+    .sort(
+      (a, b) =>
+        (a.displayOrder - b.displayOrder)
+        || a.sourceName.localeCompare(b.sourceName, undefined, { sensitivity: "base", numeric: true })
+    );
+}
+
+function dataSourceById(dataSourceId) {
+  const targetId = String(dataSourceId || "").trim();
+  if (!targetId) return null;
+  return (appState.dataSources || []).find((source) => source.id === targetId) || null;
+}
+
+function dataSourceDisplayLabel(dataSource) {
+  if (!dataSource) return "Unknown source";
+  const machineSuffix = dataSource.machineNo ? ` (Machine ${dataSource.machineNo})` : "";
+  return `${dataSource.sourceName || "Data Source"}${machineSuffix}`;
+}
+
+function dataSourceAssignments(lines = appState.lines) {
+  const map = new Map();
+  Object.values(lines || {}).forEach((line) => {
+    const lineId = String(line?.id || "").trim();
+    const lineName = String(line?.name || "Production Line").trim() || "Production Line";
+    (line?.stages || []).forEach((stage, index) => {
+      const sourceId = String(stage?.dataSourceId || "").trim();
+      if (!sourceId) return;
+      const entry = {
+        sourceId,
+        lineId,
+        lineName,
+        stageId: String(stage?.id || "").trim(),
+        stageName: stageDisplayName(stage, index)
+      };
+      if (!map.has(sourceId)) map.set(sourceId, []);
+      map.get(sourceId).push(entry);
+    });
+  });
+  return map;
+}
+
+function rememberDataSourceConnectionTest(sourceId, result = null) {
+  const safeSourceId = String(sourceId || "").trim();
+  if (!safeSourceId) return;
+  if (!result || typeof result !== "object") {
+    dataSourceConnectionTestState.delete(safeSourceId);
+    return;
+  }
+  dataSourceConnectionTestState.set(safeSourceId, {
+    ok: Boolean(result.ok),
+    message: String(result.message || "").trim(),
+    testedAt: new Date().toISOString()
+  });
+}
+
+function dataSourceConnectionTestFor(sourceId) {
+  const safeSourceId = String(sourceId || "").trim();
+  if (!safeSourceId) return null;
+  return dataSourceConnectionTestState.get(safeSourceId) || null;
+}
+
+function dataSourceConnectionTestLabel(testState) {
+  if (!testState) return { text: "Not tested", css: "" };
+  const testedAt = new Date(testState.testedAt || "");
+  const hasTime = Number.isFinite(testedAt.getTime());
+  const timeText = hasTime
+    ? testedAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+  if (testState.ok) {
+    return {
+      text: timeText ? `Passed ${timeText}` : "Passed",
+      css: " is-success"
+    };
+  }
+  return {
+    text: timeText ? `Failed ${timeText}` : "Failed",
+    css: " is-failed"
+  };
+}
+
+function conflictingDataSourceAssignment(sourceId, lineId, stageId, assignments = null) {
+  const safeSourceId = String(sourceId || "").trim();
+  if (!safeSourceId) return null;
+  const safeLineId = String(lineId || "").trim();
+  const safeStageId = String(stageId || "").trim();
+  const assignmentMap = assignments instanceof Map ? assignments : dataSourceAssignments();
+  const list = assignmentMap.get(safeSourceId) || [];
+  return list.find((item) => !(item.lineId === safeLineId && item.stageId === safeStageId)) || null;
+}
+
 function sortLinesByName(lines) {
   return (Array.isArray(lines) ? lines.slice() : []).sort((a, b) =>
     String(a?.name || "").localeCompare(String(b?.name || ""), undefined, { sensitivity: "base", numeric: true })
@@ -620,6 +908,392 @@ function normalizeSupervisors(supervisors, lines) {
     .filter(Boolean);
 }
 
+function normalizeActionPriority(priority) {
+  const value = String(priority || "").trim();
+  return ACTION_PRIORITY_OPTIONS.includes(value) ? value : "Medium";
+}
+
+function normalizeActionStatus(status) {
+  const value = String(status || "").trim();
+  return ACTION_STATUS_OPTIONS.includes(value) ? value : "Open";
+}
+
+function normalizeActionReasonCategory(category) {
+  const value = String(category || "").trim();
+  return ACTION_REASON_CATEGORIES.includes(value) ? value : "";
+}
+
+function actionStatusSortRank(status) {
+  const normalized = normalizeActionStatus(status);
+  return Object.prototype.hasOwnProperty.call(ACTION_STATUS_SORT_ORDER, normalized)
+    ? ACTION_STATUS_SORT_ORDER[normalized]
+    : ACTION_STATUS_OPTIONS.length;
+}
+
+function setActionEquipmentOptions(selectNode, line, selectedValue = "") {
+  if (!selectNode) return;
+  const stages = line?.stages?.length ? line.stages : [];
+  const options = stages.map((stage, index) => ({
+    value: String(stage?.id || "").trim(),
+    label: stageDisplayName(stage, index)
+  }));
+  selectNode.innerHTML = [
+    `<option value="">Related Equipment (optional)</option>`,
+    ...options.map((option) => `<option value="${htmlEscape(option.value)}">${htmlEscape(option.label)}</option>`)
+  ].join("");
+  if (selectedValue && options.some((option) => option.value === selectedValue)) {
+    selectNode.value = selectedValue;
+  } else {
+    selectNode.value = "";
+  }
+}
+
+function setActionReasonCategoryOptions(selectNode, selectedValue = "") {
+  if (!selectNode) return;
+  const safeSelected = normalizeActionReasonCategory(selectedValue);
+  selectNode.innerHTML = [
+    `<option value="">Downtime Category (optional)</option>`,
+    ...ACTION_REASON_CATEGORIES.map((category) => `<option value="${htmlEscape(category)}">${htmlEscape(category)}</option>`)
+  ].join("");
+  selectNode.value = safeSelected;
+}
+
+function setActionReasonDetailOptions(selectNode, line, category, selectedValue = "") {
+  if (!selectNode) return;
+  const safeCategory = normalizeActionReasonCategory(category);
+  const options = safeCategory ? downtimeDetailOptions(line, safeCategory) : [];
+  const placeholder = safeCategory ? (safeCategory === "Equipment" ? "Downtime Reason / Stage" : "Downtime Reason") : "Downtime Reason (optional)";
+  selectNode.innerHTML = [
+    `<option value="">${htmlEscape(placeholder)}</option>`,
+    ...options.map((option) => `<option value="${htmlEscape(option.value)}">${htmlEscape(option.label)}</option>`)
+  ].join("");
+  selectNode.disabled = !safeCategory;
+  if (selectedValue && options.some((option) => option.value === selectedValue)) {
+    selectNode.value = selectedValue;
+  } else {
+    selectNode.value = "";
+  }
+}
+
+function actionRelationSummary(action, line) {
+  const equipmentId = String(action?.relatedEquipmentId || "").trim();
+  const reasonCategory = normalizeActionReasonCategory(action?.relatedReasonCategory);
+  const reasonDetail = String(action?.relatedReasonDetail || "").trim();
+  const equipmentLabel = equipmentId ? stageNameByIdForLine(line, equipmentId) || equipmentId : "";
+  const reasonDetailLabel = reasonCategory ? downtimeDetailLabel(line, reasonCategory, reasonDetail) : "";
+  const parts = [];
+  if (equipmentLabel) parts.push(`Equipment: ${equipmentLabel}`);
+  if (reasonCategory) {
+    const reasonText = [reasonCategory, reasonDetailLabel].filter(Boolean).join(" > ");
+    if (reasonText) parts.push(`Downtime: ${reasonText}`);
+  }
+  return parts.join(" | ");
+}
+
+function normalizeSupervisorAction(action, index = 0) {
+  if (!action || typeof action !== "object") return null;
+  const supervisorUsername = String(action.supervisorUsername || "").trim().toLowerCase();
+  if (!supervisorUsername) return null;
+  const id = String(action.id || "").trim() || `action-${Date.now()}-${index}`;
+  const dueDateRaw = String(action.dueDate || "").trim();
+  const relatedReasonCategory = normalizeActionReasonCategory(action.relatedReasonCategory);
+  const relatedReasonDetailRaw = String(action.relatedReasonDetail || "").trim();
+  const relatedReasonDetail = relatedReasonCategory && relatedReasonDetailRaw ? relatedReasonDetailRaw : "";
+  return {
+    id,
+    supervisorUsername,
+    supervisorName: String(action.supervisorName || supervisorUsername).trim() || supervisorUsername,
+    lineId: String(action.lineId || "").trim(),
+    title: String(action.title || "Untitled action").trim() || "Untitled action",
+    description: String(action.description || action.notes || "").trim(),
+    priority: normalizeActionPriority(action.priority),
+    status: normalizeActionStatus(action.status),
+    dueDate: /^\d{4}-\d{2}-\d{2}$/.test(dueDateRaw) ? dueDateRaw : "",
+    relatedEquipmentId: String(action.relatedEquipmentId || "").trim(),
+    relatedReasonCategory,
+    relatedReasonDetail,
+    createdAt: String(action.createdAt || "").trim() || nowIso(),
+    createdBy: String(action.createdBy || "System").trim() || "System"
+  };
+}
+
+function normalizeSupervisorActions(actions) {
+  const source = Array.isArray(actions) ? actions : [];
+  const seen = new Set();
+  return source
+    .map((action, index) => normalizeSupervisorAction(action, index))
+    .filter((action) => {
+      if (!action) return false;
+      if (seen.has(action.id)) return false;
+      seen.add(action.id);
+      return true;
+    });
+}
+
+function ensureSupervisorActionsState() {
+  appState.supervisorActions = normalizeSupervisorActions(appState.supervisorActions);
+  return appState.supervisorActions;
+}
+
+function sampleActionSeedId(username, index) {
+  const safeUsername = String(username || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `action-seed-${safeUsername || "supervisor"}-${index + 1}`;
+}
+
+function dayOffsetISO(baseDateIso, daysToAdd) {
+  const date = parseDateLocal(baseDateIso || todayISO());
+  date.setDate(date.getDate() + Math.max(0, Math.floor(num(daysToAdd))));
+  return formatDateLocal(date);
+}
+
+function seedSampleActionsForSupervisors() {
+  const actions = ensureSupervisorActionsState();
+  const existingIds = new Set(actions.map((action) => String(action.id || "").trim()).filter(Boolean));
+  let changed = false;
+  (appState.supervisors || []).forEach((sup) => {
+    const username = String(sup?.username || "").trim().toLowerCase();
+    if (!username) return;
+    const supervisorName = String(sup?.name || username).trim() || username;
+    const lineShiftMap = normalizeSupervisorLineShifts(sup?.assignedLineShifts, appState.lines || {}, sup?.assignedLineIds || []);
+    const lineIds = Object.keys(lineShiftMap);
+    ACTION_SAMPLE_TEMPLATES.forEach((template, index) => {
+      const seedId = sampleActionSeedId(username, index);
+      if (existingIds.has(seedId)) return;
+      const lineId = lineIds.length ? lineIds[index % lineIds.length] : "";
+      const seededAction = normalizeSupervisorAction(
+        {
+          id: seedId,
+          supervisorUsername: username,
+          supervisorName,
+          lineId,
+          title: template.title,
+          description: template.description,
+          priority: template.priority,
+          status: "Open",
+          dueDate: dayOffsetISO(todayISO(), template.dueInDays),
+          createdAt: nowIso(),
+          createdBy: "System"
+        },
+        actions.length
+      );
+      if (!seededAction) return;
+      actions.push(seededAction);
+      existingIds.add(seedId);
+      changed = true;
+    });
+  });
+  if (changed) {
+    appState.supervisorActions = actions
+      .filter(Boolean)
+      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    persistSupervisorActions();
+  }
+  return changed;
+}
+
+function supervisorActionsForUsername(username) {
+  const key = String(username || "").trim().toLowerCase();
+  if (!key) return [];
+  return ensureSupervisorActionsState()
+    .filter((action) => action.supervisorUsername === key)
+    .slice()
+    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+}
+
+function actionTicketToneKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "") || "none";
+}
+
+function renderSupervisorActionTickets(actions, { emptyMessage = "No actions yet. Use Lodge Action to add one." } = {}) {
+  const rows = Array.isArray(actions) ? actions : [];
+  if (!rows.length) return `<p class="muted pending-log-empty">${htmlEscape(emptyMessage)}</p>`;
+  return `
+    <div class="pending-log-wrap supervisor-action-ticket-wrap">
+      <div class="pending-log-list supervisor-action-ticket-list">
+        ${rows
+          .map((action) => {
+            const lineName = action.lineId && appState.lines[action.lineId] ? appState.lines[action.lineId].name : "Unassigned";
+            const line = action.lineId && appState.lines[action.lineId] ? appState.lines[action.lineId] : null;
+            const createdLabel = String(action.createdAt || "").replace("T", " ").slice(0, 16) || "-";
+            const createdBy = String(action.createdBy || action.supervisorName || "System").trim() || "System";
+            const dueLabel = String(action.dueDate || "").trim() || "No due date";
+            const description = String(action.description || "").trim() || "No description provided.";
+            const relationText = actionRelationSummary(action, line);
+            const title = String(action.title || "").trim() || "Untitled action";
+            const priority = normalizeActionPriority(action.priority);
+            const status = normalizeActionStatus(action.status);
+            const ticketIdRaw = String(action.id || "").trim();
+            const ticketId = ticketIdRaw ? ticketIdRaw.slice(-6).toUpperCase() : "N/A";
+            return `
+              <article class="pending-log-item supervisor-action-ticket">
+                <div class="pending-log-meta">
+                  <h5>
+                    ${htmlEscape(title)}
+                    <span class="supervisor-action-ticket-id">#${htmlEscape(ticketId)}</span>
+                  </h5>
+                  <p class="supervisor-action-ticket-line">${htmlEscape(lineName)} | Due ${htmlEscape(dueLabel)} | Created ${htmlEscape(createdLabel)} by ${htmlEscape(createdBy)}</p>
+                  ${relationText ? `<p class="supervisor-action-ticket-relation">Related: ${htmlEscape(relationText)}</p>` : ""}
+                  <p class="supervisor-action-ticket-description">${htmlEscape(description)}</p>
+                </div>
+                <div class="pending-log-actions supervisor-action-ticket-badges">
+                  <span class="supervisor-action-ticket-badge priority-${actionTicketToneKey(priority)}">${htmlEscape(priority)}</span>
+                  <span class="supervisor-action-ticket-badge status-${actionTicketToneKey(status)}">${htmlEscape(status)}</span>
+                </div>
+              </article>
+            `;
+          })
+          .join("")}
+      </div>
+    </div>
+  `;
+}
+
+function actionAssignmentLabel(username, fallbackLabel = "") {
+  const key = String(username || "").trim().toLowerCase();
+  if (!key) return "Unassigned";
+  if (ACTION_SPECIAL_ASSIGNMENT_LABELS[key]) return ACTION_SPECIAL_ASSIGNMENT_LABELS[key];
+  const supervisor = supervisorByUsername(key);
+  if (supervisor?.name) return String(supervisor.name).trim() || key;
+  const fallback = String(fallbackLabel || "").trim();
+  return fallback || key;
+}
+
+function actionDueDayDelta(isoDueDate, referenceIsoDate = todayISO()) {
+  const dueDate = String(isoDueDate || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) return null;
+  const baseRaw = String(referenceIsoDate || "").trim();
+  const baseDate = /^\d{4}-\d{2}-\d{2}$/.test(baseRaw) ? baseRaw : todayISO();
+  const due = parseDateLocal(dueDate);
+  const base = parseDateLocal(baseDate);
+  due.setHours(0, 0, 0, 0);
+  base.setHours(0, 0, 0, 0);
+  return Math.round((due.getTime() - base.getTime()) / 86400000);
+}
+
+function managerActionUrgencyMeta(action, referenceIsoDate = todayISO()) {
+  const priority = normalizeActionPriority(action?.priority);
+  const status = normalizeActionStatus(action?.status);
+  const priorityScore = num(ACTION_PRIORITY_SCORES[priority]);
+  const dueDays = actionDueDayDelta(action?.dueDate, referenceIsoDate);
+  const hasDueDate = Number.isFinite(dueDays);
+  const isCompleted = status === "Completed";
+  const isBlocked = status === "Blocked";
+  let urgencyScore = priorityScore;
+  if (isBlocked) urgencyScore += 2;
+  if (!isCompleted) {
+    if (hasDueDate) {
+      if (dueDays < 0) urgencyScore += 3;
+      else if (dueDays === 0) urgencyScore += 2;
+      else if (dueDays <= 2) urgencyScore += 1;
+      else if (dueDays >= 7) urgencyScore -= 1;
+    } else if (priority === "Critical") {
+      urgencyScore += 1;
+    }
+  } else {
+    urgencyScore = 0;
+  }
+  urgencyScore = Math.max(0, Math.min(10, urgencyScore));
+
+  let groupKey = "planned";
+  if (isCompleted) groupKey = "completed";
+  else if (hasDueDate && dueDays < 0) groupKey = "overdue";
+  else if (isBlocked || priority === "Critical" || (hasDueDate && dueDays === 0)) groupKey = "urgent";
+  else if (hasDueDate && dueDays <= 3) groupKey = "due-soon";
+  else if (!hasDueDate) groupKey = "unscheduled";
+  const group = MANAGER_ACTION_URGENCY_GROUP_MAP[groupKey] || MANAGER_ACTION_URGENCY_GROUP_MAP.planned;
+
+  let urgencyLabel = "Low";
+  let urgencyTone = "low";
+  if (isCompleted) {
+    urgencyLabel = "Complete";
+    urgencyTone = "done";
+  } else if (hasDueDate && dueDays < 0) {
+    urgencyLabel = `${Math.abs(dueDays)}d Overdue`;
+    urgencyTone = "critical";
+  } else if (isBlocked) {
+    urgencyLabel = "Blocked";
+    urgencyTone = "critical";
+  } else if (dueDays === 0) {
+    urgencyLabel = "Due Today";
+    urgencyTone = "high";
+  } else if (urgencyScore >= 7) {
+    urgencyLabel = "Critical";
+    urgencyTone = "critical";
+  } else if (urgencyScore >= 5) {
+    urgencyLabel = "High";
+    urgencyTone = "high";
+  } else if (urgencyScore >= 3) {
+    urgencyLabel = "Medium";
+    urgencyTone = "medium";
+  }
+
+  let dueHint = "No due date";
+  if (isCompleted) dueHint = "Completed";
+  else if (hasDueDate && dueDays < 0) dueHint = `Overdue by ${Math.abs(dueDays)} day${Math.abs(dueDays) === 1 ? "" : "s"}`;
+  else if (hasDueDate && dueDays === 0) dueHint = "Due today";
+  else if (hasDueDate && dueDays === 1) dueHint = "Due tomorrow";
+  else if (hasDueDate) dueHint = `Due in ${dueDays} days`;
+
+  return {
+    dueDays,
+    urgencyScore,
+    urgencyLabel,
+    urgencyTone,
+    dueHint,
+    groupKey: group.key,
+    groupLabel: group.label,
+    groupTone: group.tone,
+    groupOrder: num(group.order)
+  };
+}
+
+function compareManagerActionItems(left, right) {
+  const leftMeta = left?.urgency || {};
+  const rightMeta = right?.urgency || {};
+  const groupDelta = num(leftMeta.groupOrder) - num(rightMeta.groupOrder);
+  if (groupDelta !== 0) return groupDelta;
+  const urgencyDelta = num(rightMeta.urgencyScore) - num(leftMeta.urgencyScore);
+  if (urgencyDelta !== 0) return urgencyDelta;
+  const leftDue = Number.isFinite(leftMeta.dueDays) ? leftMeta.dueDays : Number.POSITIVE_INFINITY;
+  const rightDue = Number.isFinite(rightMeta.dueDays) ? rightMeta.dueDays : Number.POSITIVE_INFINITY;
+  if (leftDue !== rightDue) return leftDue - rightDue;
+  const createdDelta = String(right?.action?.createdAt || "").localeCompare(String(left?.action?.createdAt || ""));
+  if (createdDelta !== 0) return createdDelta;
+  return String(left?.action?.title || "").localeCompare(String(right?.action?.title || ""), undefined, { sensitivity: "base" });
+}
+
+function groupManagerActionsForDisplay(actions, referenceIsoDate = todayISO()) {
+  const baseRows = Array.isArray(actions) ? actions : [];
+  const items = baseRows
+    .map((action) => ({
+      action,
+      urgency: managerActionUrgencyMeta(action, referenceIsoDate)
+    }))
+    .sort(compareManagerActionItems);
+  const groups = MANAGER_ACTION_URGENCY_GROUPS.map((group) => ({
+    ...group,
+    actions: []
+  }));
+  const groupMap = groups.reduce((acc, group) => {
+    acc[group.key] = group;
+    return acc;
+  }, {});
+  items.forEach((item) => {
+    const key = item?.urgency?.groupKey || "planned";
+    const target = groupMap[key] || groupMap.planned;
+    if (target) target.actions.push(item);
+  });
+  return groups.filter((group) => group.actions.length);
+}
+
 function supervisorByUsername(username) {
   const key = String(username || "").trim().toLowerCase();
   return (appState.supervisors || []).find((sup) => sup.username === key) || null;
@@ -639,7 +1313,9 @@ function normalizeSupervisorSession(session, supervisors, lines) {
       if (lines[localId] && UUID_RE.test(String(backendId || ""))) backendLineMap[localId] = String(backendId);
     });
   }
+  const supervisorName = String(sup?.name || session?.name || session?.username || "").trim();
   return {
+    name: supervisorName || String(sup?.username || session.username || "").trim().toLowerCase(),
     username: sup?.username || String(session.username || "").trim().toLowerCase(),
     assignedLineIds,
     assignedLineShifts,
@@ -1012,10 +1688,289 @@ function downloadTextFile(fileName, text, mimeType = "text/plain;charset=utf-8")
   URL.revokeObjectURL(url);
 }
 
+function productCatalogCellText(row, columnIndex) {
+  const cell = row?.cells?.[columnIndex];
+  if (!cell) return "";
+  const inlineInput = cell.querySelector("input[data-product-inline-input]");
+  if (inlineInput) return String(inlineInput.value || "").trim();
+  return String(cell.textContent || "").trim();
+}
+
+function createProductCatalogRowId() {
+  return `prod-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeProductCatalogLineIds(lineIds) {
+  const source = Array.isArray(lineIds) ? lineIds : String(lineIds || "").split(",");
+  const normalized = [];
+  let allowAll = false;
+  source.forEach((rawId) => {
+    const lineId = String(rawId || "").trim();
+    if (!lineId) return;
+    if (lineId === PRODUCT_CATALOG_ALL_LINES_TOKEN) {
+      allowAll = true;
+      return;
+    }
+    if (!normalized.includes(lineId)) normalized.push(lineId);
+  });
+  if (allowAll) return [PRODUCT_CATALOG_ALL_LINES_TOKEN];
+  return normalized;
+}
+
+function ensureProductCatalogRowId(row) {
+  if (!row) return "";
+  let rowId = String(row.getAttribute(PRODUCT_CATALOG_ID_ATTR) || "").trim();
+  if (!rowId) {
+    rowId = createProductCatalogRowId();
+    row.setAttribute(PRODUCT_CATALOG_ID_ATTR, rowId);
+  }
+  return rowId;
+}
+
+function getProductCatalogLineIdsFromRow(row) {
+  if (!row) return [];
+  if (!row.hasAttribute(PRODUCT_CATALOG_LINES_ATTR)) return [PRODUCT_CATALOG_ALL_LINES_TOKEN];
+  const raw = String(row.getAttribute(PRODUCT_CATALOG_LINES_ATTR) || "").trim();
+  if (!raw) return [];
+  return normalizeProductCatalogLineIds(raw);
+}
+
+function setProductCatalogLineIdsForRow(row, lineIds) {
+  if (!row) return;
+  const normalized = normalizeProductCatalogLineIds(lineIds);
+  row.setAttribute(PRODUCT_CATALOG_LINES_ATTR, normalized.join(","));
+}
+
+function productCatalogMatchesLine(entryLineIds, lineId) {
+  const targetLineId = String(lineId || "").trim();
+  if (!targetLineId) return true;
+  const normalized = normalizeProductCatalogLineIds(entryLineIds);
+  if (normalized.includes(PRODUCT_CATALOG_ALL_LINES_TOKEN)) return true;
+  return normalized.includes(targetLineId);
+}
+
+function listProductCatalogEntries(options = {}) {
+  const table = document.getElementById("productCatalogTable");
+  const rows = Array.from(table?.tBodies?.[0]?.rows || []);
+  const filterLineId = String(options?.lineId || "").trim();
+  return rows
+    .map((row) => {
+      const values = Array.from({ length: PRODUCT_CATALOG_COLUMN_COUNT }, (_, i) => productCatalogCellText(row, i));
+      return {
+        id: ensureProductCatalogRowId(row),
+        row,
+        values,
+        code: values[0],
+        desc1: values[1],
+        desc2: values[2],
+        lineIds: getProductCatalogLineIdsFromRow(row)
+      };
+    })
+    .filter((entry) => (entry.code || entry.desc1 || entry.desc2) && productCatalogMatchesLine(entry.lineIds, filterLineId));
+}
+
+function listProductCatalogNames(options = {}) {
+  const seen = new Set();
+  const names = [];
+  listProductCatalogEntries(options).forEach((entry) => {
+    const value = String(entry.desc1 || entry.code || "").trim();
+    if (!value) return;
+    const key = value.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    names.push(value);
+  });
+  return names;
+}
+
+function isCatalogProductName(value, options = {}) {
+  const target = String(value || "").trim().toLowerCase();
+  if (!target) return false;
+  return listProductCatalogNames(options).some((name) => name.toLowerCase() === target);
+}
+
+function normalizeStoredProductCatalogEntry(entry) {
+  if (!entry || typeof entry !== "object") return null;
+  const rowId = String(entry.id || "").trim() || createProductCatalogRowId();
+  const valuesSource = Array.isArray(entry.values) ? entry.values : [];
+  const values = Array.from({ length: PRODUCT_CATALOG_COLUMN_COUNT }, (_, index) => {
+    const fallback = index === 0 ? entry.code : index === 1 ? entry.desc1 : index === 2 ? entry.desc2 : "";
+    return String(valuesSource[index] ?? fallback ?? "").trim();
+  });
+  if (!values[0] && !values[1] && !values[2]) return null;
+  return {
+    id: rowId,
+    values,
+    lineIds: normalizeProductCatalogLineIds(entry.lineIds)
+  };
+}
+
+function readProductCatalogStorage() {
+  try {
+    const raw = window.localStorage.getItem(PRODUCT_CATALOG_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map(normalizeStoredProductCatalogEntry).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function writeProductCatalogStorage(entries) {
+  try {
+    const payload = Array.isArray(entries) ? entries.map(normalizeStoredProductCatalogEntry).filter(Boolean) : [];
+    window.localStorage.setItem(PRODUCT_CATALOG_STORAGE_KEY, JSON.stringify(payload));
+  } catch {
+    // Ignore storage failures (private mode, quota, disabled storage).
+  }
+}
+
+function serializeProductCatalogTable(table) {
+  const rows = Array.from(table?.tBodies?.[0]?.rows || []);
+  return rows
+    .map((row) => {
+      const values = Array.from({ length: PRODUCT_CATALOG_COLUMN_COUNT }, (_, i) => productCatalogCellText(row, i));
+      if (!values[0] && !values[1] && !values[2]) return null;
+      return {
+        id: ensureProductCatalogRowId(row),
+        values,
+        lineIds: getProductCatalogLineIdsFromRow(row)
+      };
+    })
+    .filter(Boolean);
+}
+
+function renderProductCatalogTableRows(table, entries) {
+  if (!table) return;
+  const tbody = table.tBodies?.[0] || table.createTBody();
+  const safeEntries = (Array.isArray(entries) ? entries : []).map(normalizeStoredProductCatalogEntry).filter(Boolean);
+  tbody.innerHTML = safeEntries
+    .map((entry) => {
+      const values = Array.from({ length: PRODUCT_CATALOG_COLUMN_COUNT }, (_, index) => String(entry.values?.[index] || "").trim());
+      const lineIds = normalizeProductCatalogLineIds(entry.lineIds);
+      return `
+        <tr ${PRODUCT_CATALOG_ID_ATTR}="${htmlEscape(entry.id)}" ${PRODUCT_CATALOG_LINES_ATTR}="${htmlEscape(lineIds.join(","))}">
+          ${values.map((value) => `<td>${htmlEscape(value)}</td>`).join("")}
+        </tr>
+      `;
+    })
+    .join("");
+}
+
+function hydrateProductCatalogTableFromStorage(table) {
+  if (!table) return;
+  const storedEntries = readProductCatalogStorage();
+  if (storedEntries.length) {
+    renderProductCatalogTableRows(table, storedEntries);
+    return;
+  }
+  const fallbackEntries = serializeProductCatalogTable(table).map((entry) => ({
+    ...entry,
+    lineIds: entry.lineIds.length ? entry.lineIds : [PRODUCT_CATALOG_ALL_LINES_TOKEN]
+  }));
+  renderProductCatalogTableRows(table, fallbackEntries);
+  if (fallbackEntries.length) writeProductCatalogStorage(fallbackEntries);
+}
+
+function persistProductCatalogTable(table) {
+  if (!table) return;
+  writeProductCatalogStorage(serializeProductCatalogTable(table));
+}
+
+function ensureRunProductDatalistById(datalistId) {
+  let datalist = document.getElementById(datalistId);
+  if (!datalist) {
+    datalist = document.createElement("datalist");
+    datalist.id = datalistId;
+    document.body.append(datalist);
+  }
+  return datalist;
+}
+
+function listProductCatalogOptions(options = {}) {
+  const seen = new Set();
+  const deduped = [];
+  listProductCatalogEntries(options).forEach((entry) => {
+    const value = String(entry.desc1 || entry.code || "").trim();
+    if (!value) return;
+    const key = value.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    deduped.push({
+      value,
+      label: [entry.code, entry.desc2].filter(Boolean).join(" | ")
+    });
+  });
+  return deduped;
+}
+
+function selectedSupervisorProductCatalogLineId() {
+  const lineSelect = document.getElementById("supervisorLineSelect");
+  return String(lineSelect?.value || appState.supervisorSelectedLineId || "").trim();
+}
+
+function syncRunProductInputsFromCatalog() {
+  const managerInput = document.querySelector('#runForm [name="product"]');
+  if (managerInput) {
+    const managerDatalist = ensureRunProductDatalistById(PRODUCT_CATALOG_MANAGER_DATALIST_ID);
+    managerDatalist.innerHTML = listProductCatalogOptions()
+      .map((item) => `<option value="${htmlEscape(item.value)}">${htmlEscape(item.label || item.value)}</option>`)
+      .join("");
+    managerInput.setAttribute("list", PRODUCT_CATALOG_MANAGER_DATALIST_ID);
+    managerInput.setAttribute("autocomplete", "off");
+  }
+
+  const supervisorInput = document.getElementById("superRunProduct");
+  if (supervisorInput) {
+    const supervisorDatalist = ensureRunProductDatalistById(PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID);
+    const supervisorLineId = selectedSupervisorProductCatalogLineId();
+    const supervisorOptions = supervisorLineId ? listProductCatalogOptions({ lineId: supervisorLineId }) : [];
+    supervisorDatalist.innerHTML = supervisorOptions
+      .map((item) => `<option value="${htmlEscape(item.value)}">${htmlEscape(item.label || item.value)}</option>`)
+      .join("");
+    supervisorInput.setAttribute("list", PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID);
+    supervisorInput.setAttribute("autocomplete", "off");
+  }
+}
+
+function setProductRowAssignmentSummary(rowNode) {
+  if (!rowNode) return;
+  const summaryNode = rowNode.querySelector("[data-product-row-line-summary]");
+  if (!summaryNode) return;
+  const assignedLineIds = getProductCatalogLineIdsFromRow(rowNode);
+  if (assignedLineIds.includes(PRODUCT_CATALOG_ALL_LINES_TOKEN)) {
+    summaryNode.textContent = "All lines";
+    summaryNode.title = "Assigned to all lines";
+    return;
+  }
+  if (!assignedLineIds.length) {
+    summaryNode.textContent = "No lines";
+    summaryNode.title = "No line assignment";
+    return;
+  }
+  const names = assignedLineIds.map((lineId) => String(appState.lines?.[lineId]?.name || "").trim()).filter(Boolean);
+  if (names.length === 1) {
+    summaryNode.textContent = names[0];
+    summaryNode.title = names[0];
+    return;
+  }
+  const count = names.length || assignedLineIds.length;
+  summaryNode.textContent = `${count} lines`;
+  summaryNode.title = names.length ? names.join(", ") : `${count} line assignments`;
+}
+
+function refreshProductRowAssignmentSummaries(table) {
+  Array.from(table?.tBodies?.[0]?.rows || []).forEach((rowNode) => {
+    setProductRowAssignmentSummary(rowNode);
+  });
+}
+
 function loadState() {
   return {
     activeView: "home",
     appMode: "manager",
+    managerHomeTab: "dashboard",
     dashboardDate: todayISO(),
     dashboardShift: "Day",
     supervisorMobileMode: false,
@@ -1026,6 +1981,8 @@ function loadState() {
     supervisorSelectedShift: "Full Day",
     supervisorSession: null,
     supervisors: [],
+    dataSources: [],
+    supervisorActions: [],
     lineGroups: [],
     homeLineGroupExpanded: {},
     activeLineId: "",
@@ -1079,6 +2036,7 @@ function persistAuthSessions() {
     supervisor:
       supervisorToken && supervisorUsername
         ? {
+            name: String(supervisorSession?.name || "").trim(),
             username: supervisorUsername,
             backendToken: supervisorToken,
             assignedLineIds: Array.isArray(supervisorSession?.assignedLineIds) ? supervisorSession.assignedLineIds : [],
@@ -1105,9 +2063,11 @@ function restoreAuthSessionsFromStorage() {
   }
   const supervisorToken = String(stored?.supervisor?.backendToken || "").trim();
   const supervisorUsername = String(stored?.supervisor?.username || "").trim().toLowerCase();
+  const supervisorName = String(stored?.supervisor?.name || "").trim();
   if (!supervisorToken || !supervisorUsername) return;
   const supervisorSession = normalizeSupervisorSession(
     {
+      name: supervisorName,
       username: supervisorUsername,
       assignedLineIds: Array.isArray(stored?.supervisor?.assignedLineIds) ? stored.supervisor.assignedLineIds : [],
       assignedLineShifts:
@@ -1125,6 +2085,7 @@ function restoreAuthSessionsFromStorage() {
     appState.lines
   );
   appState.supervisorSession = supervisorSession || {
+    name: supervisorName || supervisorUsername,
     username: supervisorUsername,
     assignedLineIds: [],
     assignedLineShifts: {},
@@ -1163,6 +2124,7 @@ function requestLineModelSync(lineId, { force = false } = {}) {
 }
 
 function saveState(options = {}) {
+  enforceAppVariantState();
   if (state && state.id) {
     appState.lines[state.id] = state;
     appState.activeLineId = state.id;
@@ -1170,6 +2132,7 @@ function saveState(options = {}) {
   }
   persistAuthSessions();
   persistHomeUiState();
+  persistSupervisorActions();
   syncRouteToHash();
 }
 
@@ -1259,6 +2222,7 @@ function makeStagesFromBuilder(rows) {
       maxThroughput: Math.max(0, num(row.maxThroughput)),
       group: row.group || "main",
       kind: row.group === "transfer" ? "transfer" : undefined,
+      dataSourceId: "",
       x: num(row.x),
       y: num(row.y),
       w: num(row.w),
@@ -1693,6 +2657,77 @@ function renderGroupedHomeLineCards(lineList, lineGroups) {
     grouped: true,
     html: sections.join("")
   };
+}
+
+function renderManagerDataSourcesList(rootNode) {
+  if (!rootNode) return;
+  const sources = (appState.dataSources || []).filter((source) => source.isActive !== false);
+  const assignments = dataSourceAssignments(appState.lines);
+  const activeSourceIds = new Set(sources.map((source) => source.id));
+  Array.from(dataSourceConnectionTestState.keys()).forEach((sourceId) => {
+    if (!activeSourceIds.has(sourceId)) dataSourceConnectionTestState.delete(sourceId);
+  });
+  if (!sources.length) {
+    rootNode.innerHTML = `<p class="data-source-empty">No data sources are configured yet.</p>`;
+    return;
+  }
+
+  rootNode.innerHTML = `
+    <table>
+      <thead>
+        <tr>
+          <th>Source</th>
+          <th>Machine</th>
+          <th>Provider</th>
+          <th>Connection</th>
+          <th>Device ID</th>
+          <th>Status</th>
+          <th>Assigned Equipment</th>
+          <th>Last Test</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${sources
+          .map((source) => {
+            const sourceAssignments = assignments.get(source.id) || [];
+            const primaryAssignment = sourceAssignments[0] || null;
+            const isConflict = sourceAssignments.length > 1;
+            const statusClass = isConflict ? " is-conflict" : primaryAssignment ? " is-used" : "";
+            const statusText = isConflict ? `${sourceAssignments.length} assigned` : primaryAssignment ? "Connected" : "Available";
+            const assignmentText = isConflict
+              ? sourceAssignments.map((entry) => `${entry.lineName} - ${entry.stageName}`).join("; ")
+              : primaryAssignment
+                ? `${primaryAssignment.lineName} - ${primaryAssignment.stageName}`
+                : "Unassigned";
+            const provider = DATA_SOURCE_PROVIDER_LABELS[source.provider] || String(source.provider || "SQL").toUpperCase();
+            const machineText = source.machineNo || source.scaleNumber || "-";
+            const connectionConfigured = source.connectionMode === "sql" ? source.hasSqlCredentials : source.hasApiKey;
+            const connectionLabel = source.connectionMode === "sql"
+              ? (connectionConfigured ? "SQL Configured" : "SQL Pending")
+              : (connectionConfigured ? "API Key Set" : "API Pending");
+            const sourceTitleParts = [source.deviceName, source.sourceKey].filter(Boolean);
+            const testState = dataSourceConnectionTestFor(source.id);
+            const testPill = dataSourceConnectionTestLabel(testState);
+            const testTitle = testState?.message ? ` title="${htmlEscape(testState.message)}"` : "";
+            return `
+              <tr>
+                <td title="${htmlEscape(sourceTitleParts.join(" | "))}">${htmlEscape(source.sourceName)}</td>
+                <td>${htmlEscape(machineText)}</td>
+                <td>${htmlEscape(provider)}</td>
+                <td><span class="data-source-connection-pill${connectionConfigured ? " is-configured" : ""}">${htmlEscape(connectionLabel)}</span></td>
+                <td>${htmlEscape(source.deviceId || "-")}</td>
+                <td><span class="data-source-status-pill${statusClass}">${htmlEscape(statusText)}</span></td>
+                <td>${htmlEscape(assignmentText)}</td>
+                <td><span class="data-source-test-pill${testPill.css}"${testTitle}>${htmlEscape(testPill.text)}</span></td>
+                <td class="data-source-actions-cell"><button type="button" class="ghost-btn data-source-test-btn" data-data-source-test="${htmlEscape(source.id)}">Test</button></td>
+              </tr>
+            `;
+          })
+          .join("")}
+      </tbody>
+    </table>
+  `;
 }
 
 function stageLiveDowntimePillHtml(liveDown) {
@@ -2252,6 +3287,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
           crew: Math.max(0, num(stage.dayCrew)),
           group: mappedType.group,
           kind: mappedType.kind,
+          dataSourceId: String(stage.dataSourceId || "").trim(),
           match: String(stage.stageName || "")
             .toLowerCase()
             .split(/[^a-z0-9]+/)
@@ -2286,11 +3322,17 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
       }))
     : [];
 
-  line.shiftRows = Array.isArray(logs?.shiftRows) ? logs.shiftRows : [];
+  line.shiftRows = Array.isArray(logs?.shiftRows)
+    ? logs.shiftRows.map((row) => ({
+        ...row,
+        notes: String(row?.notes || "")
+      }))
+    : [];
   line.breakRows = Array.isArray(logs?.breakRows) ? logs.breakRows : [];
   line.runRows = Array.isArray(logs?.runRows)
     ? logs.runRows.map((row) => ({
         ...row,
+        notes: String(row?.notes || ""),
         runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
         shift: ""
       }))
@@ -2301,6 +3343,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
         return {
           ...row,
           shift: "",
+          notes: String(row?.notes || ""),
           reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
           reasonDetail: row?.reasonDetail || parsedReason.reasonDetail,
           reasonNote: row?.reasonNote || parsedReason.reasonNote
@@ -2318,6 +3361,21 @@ async function refreshHostedState(preferredSession = null) {
   try {
     const activeSession = preferredSession || (await ensureManagerBackendSession());
     if (!activeSession?.backendToken) throw new Error("Missing backend token.");
+    if (
+      activeSession?.role === "supervisor" &&
+      appState.supervisorSession &&
+      !String(appState.supervisorSession.name || "").trim()
+    ) {
+      try {
+        const mePayload = await apiRequest("/api/me", { token: activeSession.backendToken });
+        const meName = String(mePayload?.user?.name || "").trim();
+        const meUsername = String(mePayload?.user?.username || "").trim().toLowerCase();
+        if (meName) appState.supervisorSession.name = meName;
+        if (meUsername) appState.supervisorSession.username = meUsername;
+      } catch (profileError) {
+        console.warn("Could not load supervisor profile details:", profileError);
+      }
+    }
     let snapshot = null;
     let snapshotError = null;
     for (let attempt = 1; attempt <= 2; attempt += 1) {
@@ -2402,11 +3460,16 @@ async function refreshHostedState(preferredSession = null) {
       }))
     );
     appState.lineGroups = snapshotLineGroups.length ? snapshotLineGroups : derivedLineGroups;
+    if (Array.isArray(snapshot?.dataSources)) {
+      appState.dataSources = normalizeDataSources(snapshot.dataSources);
+    }
     const ids = Object.keys(hostedLines);
     appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0] || "";
     state = appState.lines[appState.activeLineId] || null;
 
-    const supervisors = Array.isArray(snapshot?.supervisors) ? snapshot.supervisors : [];
+    const supervisors = Array.isArray(snapshot?.supervisors)
+      ? snapshot.supervisors.filter((sup) => sup && sup.isActive !== false)
+      : [];
     const hasSnapshotSupervisorAssignments = Object.prototype.hasOwnProperty.call(snapshot || {}, "supervisorAssignments");
     const snapshotSupervisorLineShifts = hasSnapshotSupervisorAssignments
       ? normalizeSupervisorLineShifts(snapshot?.supervisorAssignments?.assignedLineShifts, hostedLines, snapshot?.supervisorAssignments?.assignedLineIds || [])
@@ -2428,12 +3491,14 @@ async function refreshHostedState(preferredSession = null) {
       if (current) {
         appState.supervisorSession = {
           ...appState.supervisorSession,
+          name: String(current.name || current.username || appState.supervisorSession.name || appState.supervisorSession.username || "").trim(),
           assignedLineIds: current.assignedLineIds.slice(),
           assignedLineShifts: clone(current.assignedLineShifts || {})
         };
       } else if (hasSnapshotSupervisorAssignments) {
         appState.supervisorSession = {
           ...appState.supervisorSession,
+          name: String(appState.supervisorSession.name || appState.supervisorSession.username || "").trim(),
           assignedLineIds: Object.keys(snapshotSupervisorLineShifts),
           assignedLineShifts: clone(snapshotSupervisorLineShifts),
           backendLineMap: { ...activeSession.backendLineMap },
@@ -2447,6 +3512,7 @@ async function refreshHostedState(preferredSession = null) {
         );
         appState.supervisorSession = {
           ...appState.supervisorSession,
+          name: String(appState.supervisorSession.name || appState.supervisorSession.username || "").trim(),
           assignedLineIds: Object.keys(retainedLineShifts),
           assignedLineShifts: retainedLineShifts,
           backendLineMap: { ...activeSession.backendLineMap },
@@ -2577,7 +3643,8 @@ async function syncManagerDowntimeLog(payload) {
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
       equipmentStageId: backendEquipmentId || null,
-      reason: payload.reason || ""
+      reason: payload.reason || "",
+      notes: String(payload.notes || "")
     }
   });
   return response?.downtimeLog || null;
@@ -2627,7 +3694,8 @@ async function patchManagerDowntimeLog(logId, payload) {
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
       equipmentStageId: backendEquipmentId || null,
-      reason: payload.reason || ""
+      reason: payload.reason || "",
+      notes: String(payload.notes || "")
     }
   });
   return response?.downtimeLog || null;
@@ -2668,6 +3736,7 @@ async function saveLineModelToBackend(lineId) {
     dayCrew: Math.max(0, num(line?.crewsByShift?.Day?.[stage.id]?.crew ?? stage.crew)),
     nightCrew: Math.max(0, num(line?.crewsByShift?.Night?.[stage.id]?.crew ?? stage.crew)),
     maxThroughputPerCrew: Math.max(0, num(line?.stageSettings?.[stage.id]?.maxThroughput)),
+    dataSourceId: UUID_RE.test(String(stage?.dataSourceId || "").trim()) ? String(stage.dataSourceId).trim() : "",
     x: num(stage.x),
     y: num(stage.y),
     w: Math.max(2, num(stage.w)),
@@ -2686,6 +3755,38 @@ async function saveLineModelToBackend(lineId) {
     method: "PUT",
     token: session.backendToken,
     body: { stages, guides }
+  });
+}
+
+async function createDataSourceOnBackend(payload) {
+  const session = await ensureManagerBackendSession();
+  return apiRequest("/api/data-sources", {
+    method: "POST",
+    token: session.backendToken,
+    body: payload
+  });
+}
+
+async function testDataSourceConnectionOnBackend(payload) {
+  const session = await ensureManagerBackendSession();
+  return apiRequest("/api/data-sources/test", {
+    method: "POST",
+    token: session.backendToken,
+    body: payload,
+    timeoutMs: 20000
+  });
+}
+
+async function testSavedDataSourceConnectionOnBackend(dataSourceId) {
+  const session = await ensureManagerBackendSession();
+  const safeDataSourceId = String(dataSourceId || "").trim();
+  if (!UUID_RE.test(safeDataSourceId)) {
+    throw new Error("Invalid data source id.");
+  }
+  return apiRequest(`/api/data-sources/${encodeURIComponent(safeDataSourceId)}/test`, {
+    method: "POST",
+    token: session.backendToken,
+    timeoutMs: 20000
   });
 }
 
@@ -2794,7 +3895,8 @@ async function syncSupervisorDowntimeLog(session, payload) {
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
       equipmentStageId: backendEquipmentId || null,
-      reason: payload.reason || ""
+      reason: payload.reason || "",
+      notes: String(payload.notes || "")
     }
   });
   return response?.downtimeLog || null;
@@ -2811,7 +3913,8 @@ async function patchSupervisorDowntimeLog(session, logId, payload) {
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
       equipmentStageId: backendEquipmentId || null,
-      reason: payload.reason || ""
+      reason: payload.reason || "",
+      notes: String(payload.notes || "")
     }
   });
   return response?.downtimeLog || null;
@@ -3389,6 +4492,7 @@ function bindHome() {
   const supervisorPassInput = document.getElementById("supervisorPass");
   const supervisorTestLoginBtn = document.getElementById("supervisorTestLoginBtn");
   const supervisorLogoutBtn = document.getElementById("supervisorLogout");
+  const managerSettingsTabBtn = document.getElementById("managerSettingsTabBtn");
   const supervisorMobileModeBtn = document.getElementById("supervisorMobileMode");
   const supervisorLineSelect = document.getElementById("supervisorLineSelect");
   const svDateInputs = Array.from(document.querySelectorAll("[data-sv-date]"));
@@ -3398,6 +4502,16 @@ function bindHome() {
   const supervisorShiftForm = document.getElementById("supervisorShiftForm");
   const supervisorRunForm = document.getElementById("supervisorRunForm");
   const supervisorDownForm = document.getElementById("supervisorDownForm");
+  const supervisorActionForm = document.getElementById("supervisorActionForm");
+  const supervisorActionLineInput = document.getElementById("supervisorActionLine");
+  const supervisorActionPriorityInput = document.getElementById("supervisorActionPriority");
+  const supervisorActionStatusInput = document.getElementById("supervisorActionStatus");
+  const supervisorActionDueDateInput = document.getElementById("supervisorActionDueDate");
+  const supervisorActionEquipmentInput = document.getElementById("supervisorActionEquipment");
+  const supervisorActionReasonCategoryInput = document.getElementById("supervisorActionReasonCategory");
+  const supervisorActionReasonDetailInput = document.getElementById("supervisorActionReasonDetail");
+  const supervisorActionTitleInput = document.getElementById("supervisorActionTitle");
+  const supervisorActionDescriptionInput = document.getElementById("supervisorActionDescription");
   const superShiftLogIdInput = document.getElementById("superShiftLogId");
   const superShiftOpenBreakIdInput = document.getElementById("superShiftOpenBreakId");
   const superShiftBreakTimeInput = document.getElementById("superShiftBreakTime");
@@ -3416,14 +4530,21 @@ function bindHome() {
   const superDownOpenList = document.getElementById("superDownOpenList");
   const supervisorDownReasonCategory = document.getElementById("superDownReasonCategory");
   const supervisorDownReasonDetail = document.getElementById("superDownReasonDetail");
+  const managerActionList = document.getElementById("managerActionList");
   const manageSupervisorsBtn = document.getElementById("manageSupervisorsBtn");
   const manageLineGroupsBtn = document.getElementById("manageLineGroupsBtn");
+  const manageProductCatalogBtn = document.getElementById("manageProductCatalogBtn");
+  const connectDataSourceBtn = document.getElementById("connectDataSourceBtn");
+  const dataSourcesList = document.getElementById("dataSourcesList");
   const addSupervisorBtn = document.getElementById("addSupervisorBtn");
   const manageSupervisorsModal = document.getElementById("manageSupervisorsModal");
   const closeManageSupervisorsModalBtn = document.getElementById("closeManageSupervisorsModal");
   const supervisorManagerList = document.getElementById("supervisorManagerList");
   const manageLineGroupsModal = document.getElementById("manageLineGroupsModal");
   const closeManageLineGroupsModalBtn = document.getElementById("closeManageLineGroupsModal");
+  const manageProductCatalogModal = document.getElementById("manageProductCatalogModal");
+  const closeManageProductCatalogModalBtn = document.getElementById("closeManageProductCatalogModal");
+  const manageProductCatalogContent = document.getElementById("manageProductCatalogContent");
   const lineGroupManagerList = document.getElementById("lineGroupManagerList");
   const lineGroupCreateForm = document.getElementById("lineGroupCreateForm");
   const newLineGroupNameInput = document.getElementById("newLineGroupName");
@@ -3442,6 +4563,39 @@ function bindHome() {
   const editLineForm = document.getElementById("editLineForm");
   const editLineNameInput = document.getElementById("editLineName");
   const editLineDeleteBtn = document.getElementById("editLineDeleteBtn");
+  const connectDataSourceModal = document.getElementById("connectDataSourceModal");
+  const closeConnectDataSourceModalBtn = document.getElementById("closeConnectDataSourceModal");
+  const connectDataSourceForm = document.getElementById("connectDataSourceForm");
+  const connectDataSourceNameInput = document.getElementById("connectDataSourceName");
+  const connectDataSourceKeyInput = document.getElementById("connectDataSourceKey");
+  const connectDataSourceProviderInput = document.getElementById("connectDataSourceProvider");
+  const connectDataSourceModeInput = document.getElementById("connectDataSourceMode");
+  const connectDataSourceMachineNoInput = document.getElementById("connectDataSourceMachineNo");
+  const connectDataSourceDeviceNameInput = document.getElementById("connectDataSourceDeviceName");
+  const connectDataSourceDeviceIdInput = document.getElementById("connectDataSourceDeviceId");
+  const connectDataSourceScaleNumberInput = document.getElementById("connectDataSourceScaleNumber");
+  const connectDataSourceApiFields = document.getElementById("connectDataSourceApiFields");
+  const connectDataSourceApiBaseUrlInput = document.getElementById("connectDataSourceApiBaseUrl");
+  const connectDataSourceApiKeyInput = document.getElementById("connectDataSourceApiKey");
+  const connectDataSourceApiSecretInput = document.getElementById("connectDataSourceApiSecret");
+  const connectDataSourceSqlFields = document.getElementById("connectDataSourceSqlFields");
+  const connectDataSourceSqlHostInput = document.getElementById("connectDataSourceSqlHost");
+  const connectDataSourceSqlPortInput = document.getElementById("connectDataSourceSqlPort");
+  const connectDataSourceSqlDatabaseInput = document.getElementById("connectDataSourceSqlDatabase");
+  const connectDataSourceSqlUsernameInput = document.getElementById("connectDataSourceSqlUsername");
+  const connectDataSourceSqlPasswordInput = document.getElementById("connectDataSourceSqlPassword");
+  const connectDataSourceHelp = document.getElementById("connectDataSourceHelp");
+  const connectDataSourceTestResult = document.getElementById("connectDataSourceTestResult");
+  const connectDataSourceTestBtn = document.getElementById("connectDataSourceTestBtn");
+  const productCatalogTable = document.getElementById("productCatalogTable");
+  const addProductBtn = document.getElementById("addProductBtn");
+  const productLineAssignModal = document.getElementById("productLineAssignModal");
+  const closeProductLineAssignModalBtn = document.getElementById("closeProductLineAssignModal");
+  const productLineAssignProductLabel = document.getElementById("productLineAssignProduct");
+  const productLineAssignList = document.getElementById("productLineAssignList");
+  const productLineAssignSelectAllBtn = document.getElementById("productLineAssignSelectAll");
+  const productLineAssignClearAllBtn = document.getElementById("productLineAssignClearAll");
+  const productLineAssignSaveBtn = document.getElementById("productLineAssignSave");
   const cards = document.getElementById("lineCards");
   const openBuilderBtn = document.getElementById("openBuilder");
   const openBuilderSecondaryBtn = document.getElementById("openBuilderSecondary");
@@ -3456,7 +4610,170 @@ function bindHome() {
   let dragState = null;
   let editingSupervisorId = "";
   let editingLineId = "";
+  let assigningProductRowId = "";
   let suppressSupervisorSelectionReset = false;
+  const PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT = 12;
+  const PRODUCT_CATALOG_NUMERIC_COLUMNS = new Set([6, 7, 9, 10, 11, 12]);
+
+  const setProductRowEditingState = (rowNode, editing) => {
+    if (!rowNode) return;
+    rowNode.classList.toggle("product-row-editing", editing);
+    rowNode.setAttribute("data-product-editing", editing ? "true" : "false");
+    const editBtn = rowNode.querySelector("[data-product-row-edit]");
+    if (editBtn) {
+      editBtn.textContent = editing ? "Save" : "Edit";
+      editBtn.classList.toggle("is-save", editing);
+    }
+  };
+
+  const beginProductRowInlineEdit = (rowNode) => {
+    if (!rowNode) return;
+    const cells = Array.from(rowNode.cells || []).slice(0, PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT);
+    cells.forEach((cell, index) => {
+      if (cell.querySelector("input[data-product-inline-input]")) return;
+      const currentValue = String(cell.textContent || "").trim();
+      const input = document.createElement("input");
+      input.className = "table-inline-input";
+      input.type = "text";
+      input.value = currentValue;
+      input.setAttribute("data-product-inline-input", String(index + 1));
+      if (PRODUCT_CATALOG_NUMERIC_COLUMNS.has(index + 1)) input.setAttribute("inputmode", "decimal");
+      cell.innerHTML = "";
+      cell.append(input);
+    });
+    setProductRowEditingState(rowNode, true);
+  };
+
+  const finalizeProductRowInlineEdit = (rowNode) => {
+    if (!rowNode) return false;
+    const descInput = rowNode.querySelector('input[data-product-inline-input="2"]');
+    const descValue = String(descInput?.value || "").trim();
+    if (!descValue) {
+      alert("Desc 1 is required.");
+      descInput?.focus();
+      return false;
+    }
+    const cells = Array.from(rowNode.cells || []).slice(0, PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT);
+    cells.forEach((cell) => {
+      const input = cell.querySelector("input[data-product-inline-input]");
+      if (!input) return;
+      cell.textContent = String(input.value || "").trim();
+    });
+    setProductRowEditingState(rowNode, false);
+    persistProductCatalogTable(productCatalogTable);
+    syncRunProductInputsFromCatalog();
+    return true;
+  };
+
+  const findProductCatalogRowById = (rowId) =>
+    Array.from(productCatalogTable?.tBodies?.[0]?.rows || []).find(
+      (rowNode) => String(rowNode.getAttribute(PRODUCT_CATALOG_ID_ATTR) || "") === String(rowId || "")
+    ) || null;
+
+  const buildProductCatalogRow = (values = [], lineIds = []) => {
+    const rowNode = document.createElement("tr");
+    const safeValues = Array.from({ length: PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT }, (_, index) => String(values[index] || "").trim());
+    safeValues.forEach((value) => {
+      const cell = document.createElement("td");
+      cell.textContent = value;
+      rowNode.append(cell);
+    });
+    rowNode.setAttribute(PRODUCT_CATALOG_ID_ATTR, createProductCatalogRowId());
+    setProductCatalogLineIdsForRow(rowNode, lineIds);
+    return rowNode;
+  };
+
+  const closeProductLineAssignModal = () => {
+    if (!productLineAssignModal) return;
+    productLineAssignModal.classList.remove("open");
+    productLineAssignModal.setAttribute("aria-hidden", "true");
+    assigningProductRowId = "";
+  };
+
+  const openProductLineAssignModal = (rowNode) => {
+    if (!rowNode || !productLineAssignModal || !productLineAssignList) return;
+    const rowId = ensureProductCatalogRowId(rowNode);
+    assigningProductRowId = rowId;
+    const productLabel = String(productCatalogCellText(rowNode, 1) || productCatalogCellText(rowNode, 0) || "Unnamed Product").trim();
+    if (productLineAssignProductLabel) {
+      productLineAssignProductLabel.textContent = productLabel;
+      productLineAssignProductLabel.title = productLabel;
+    }
+    const lines = sortLinesByDisplayOrder(Object.values(appState.lines || {}));
+    const assignedLineIds = new Set(getProductCatalogLineIdsFromRow(rowNode));
+    const isAllLines = assignedLineIds.has(PRODUCT_CATALOG_ALL_LINES_TOKEN);
+    productLineAssignList.innerHTML = lines.length
+      ? lines
+          .map(
+            (line) => `
+              <label class="product-line-assign-row">
+                <input type="checkbox" value="${htmlEscape(line.id)}" ${isAllLines || assignedLineIds.has(line.id) ? "checked" : ""} />
+                <span>${htmlEscape(line.name)}</span>
+              </label>
+            `
+          )
+          .join("")
+      : `<p class="muted">No production lines available.</p>`;
+    productLineAssignModal.classList.add("open");
+    productLineAssignModal.setAttribute("aria-hidden", "false");
+  };
+
+  const saveProductLineAssignments = () => {
+    if (!productCatalogTable || !productLineAssignList) return;
+    const rowNode = findProductCatalogRowById(assigningProductRowId);
+    if (!rowNode) {
+      closeProductLineAssignModal();
+      return;
+    }
+    const lines = sortLinesByDisplayOrder(Object.values(appState.lines || {}));
+    const allLineIds = lines.map((line) => String(line.id || ""));
+    const selectedLineIds = Array.from(productLineAssignList.querySelectorAll('input[type="checkbox"]:checked'))
+      .map((input) => String(input.value || "").trim())
+      .filter(Boolean);
+    const normalizedSelected = normalizeProductCatalogLineIds(selectedLineIds);
+    const nextLineIds =
+      allLineIds.length && normalizedSelected.length === allLineIds.length
+        ? [PRODUCT_CATALOG_ALL_LINES_TOKEN]
+        : normalizedSelected;
+    setProductCatalogLineIdsForRow(rowNode, nextLineIds);
+    setProductRowAssignmentSummary(rowNode);
+    persistProductCatalogTable(productCatalogTable);
+    syncRunProductInputsFromCatalog();
+    closeProductLineAssignModal();
+  };
+
+  const ensureProductCatalogActionColumn = () => {
+    if (!productCatalogTable) return;
+    const headerRow = productCatalogTable.tHead?.rows?.[0];
+    if (headerRow && !headerRow.querySelector("[data-product-action-head]")) {
+      const headerCell = document.createElement("th");
+      headerCell.textContent = "Action";
+      headerCell.setAttribute("data-product-action-head", "true");
+      headerRow.append(headerCell);
+    }
+    const bodyRows = Array.from(productCatalogTable.tBodies?.[0]?.rows || []);
+    bodyRows.forEach((rowNode) => {
+      ensureProductCatalogRowId(rowNode);
+      setProductCatalogLineIdsForRow(rowNode, getProductCatalogLineIdsFromRow(rowNode));
+      if (!rowNode.getAttribute("data-product-editing")) rowNode.setAttribute("data-product-editing", "false");
+      let actionCell = rowNode.querySelector("[data-product-action-cell]");
+      if (!actionCell) {
+        actionCell = document.createElement("td");
+        actionCell.setAttribute("data-product-action-cell", "true");
+        rowNode.append(actionCell);
+      }
+      if (!actionCell.querySelector("[data-product-row-edit]")) {
+        actionCell.innerHTML = `
+          <div class="table-action-stack">
+            <button type="button" class="table-edit-pill" data-product-row-edit="true">Edit</button>
+            <button type="button" class="table-edit-pill" data-product-row-lines="true">Lines</button>
+          </div>
+          <div class="product-row-line-summary" data-product-row-line-summary></div>
+        `;
+      }
+      setProductRowAssignmentSummary(rowNode);
+    });
+  };
 
   const stripLeadingStageNumber = (name) => String(name || "").replace(/^\s*\d+\.\s*/, "").trim();
   const seedBuilderFromTemplate = () => ({
@@ -3588,6 +4905,29 @@ function bindHome() {
     const category = String(supervisorDownReasonCategory?.value || "");
     if (!supervisorDownReasonDetail) return;
     setDowntimeDetailOptions(supervisorDownReasonDetail, line, category, supervisorDownReasonDetail.value || "");
+  };
+
+  const selectedSupervisorActionLine = () => {
+    const lineId = String(supervisorActionLineInput?.value || "").trim();
+    return lineId && appState.lines[lineId] ? appState.lines[lineId] : null;
+  };
+
+  const refreshSupervisorActionRelationOptions = () => {
+    const line = selectedSupervisorActionLine();
+    if (supervisorActionEquipmentInput) {
+      setActionEquipmentOptions(supervisorActionEquipmentInput, line, supervisorActionEquipmentInput.value || "");
+    }
+    if (supervisorActionReasonCategoryInput) {
+      setActionReasonCategoryOptions(supervisorActionReasonCategoryInput, supervisorActionReasonCategoryInput.value || "");
+    }
+    if (supervisorActionReasonDetailInput) {
+      setActionReasonDetailOptions(
+        supervisorActionReasonDetailInput,
+        line,
+        String(supervisorActionReasonCategoryInput?.value || ""),
+        supervisorActionReasonDetailInput.value || ""
+      );
+    }
   };
 
   const renderSupervisorManagerList = () => {
@@ -3771,6 +5111,159 @@ function bindHome() {
     manageLineGroupsModal.setAttribute("aria-hidden", "true");
   };
 
+  const openManageProductCatalogModal = () => {
+    if (!manageProductCatalogModal) return;
+    if (productCatalogTable) {
+      ensureProductCatalogActionColumn();
+      refreshProductRowAssignmentSummaries(productCatalogTable);
+      syncRunProductInputsFromCatalog();
+    }
+    manageProductCatalogModal.classList.add("open");
+    manageProductCatalogModal.setAttribute("aria-hidden", "false");
+  };
+
+  const closeManageProductCatalogModal = () => {
+    if (!manageProductCatalogModal) return;
+    manageProductCatalogModal.classList.remove("open");
+    manageProductCatalogModal.setAttribute("aria-hidden", "true");
+    closeProductLineAssignModal();
+  };
+
+  const setConnectDataSourceTestFeedback = (message = "", tone = "") => {
+    if (!connectDataSourceTestResult) return;
+    connectDataSourceTestResult.textContent = String(message || "").trim();
+    connectDataSourceTestResult.classList.toggle("is-success", tone === "success");
+    connectDataSourceTestResult.classList.toggle("is-error", tone === "error");
+    if (!message) connectDataSourceTestResult.classList.remove("is-success", "is-error");
+  };
+
+  const connectDataSourceFormPayload = () => {
+    const sourceName = String(connectDataSourceNameInput?.value || "").trim();
+    const sourceKeyInput = String(connectDataSourceKeyInput?.value || "").trim();
+    const sourceKey = sourceKeyInput || dataSourceKeyFromName(sourceName, "source");
+    const provider = normalizeDataSourceProvider(connectDataSourceProviderInput?.value || "api");
+    const connectionMode = connectDataSourceModeInput?.value === "sql" ? "sql" : "api";
+    const machineNo = String(connectDataSourceMachineNoInput?.value || "").trim();
+    const deviceName = String(connectDataSourceDeviceNameInput?.value || "").trim();
+    const deviceId = String(connectDataSourceDeviceIdInput?.value || "").trim();
+    const scaleNumber = String(connectDataSourceScaleNumberInput?.value || "").trim();
+    const apiBaseUrl = String(connectDataSourceApiBaseUrlInput?.value || "").trim();
+    const apiKey = String(connectDataSourceApiKeyInput?.value || "").trim();
+    const apiSecret = String(connectDataSourceApiSecretInput?.value || "").trim();
+    const sqlHost = String(connectDataSourceSqlHostInput?.value || "").trim();
+    const sqlPortRaw = Number(connectDataSourceSqlPortInput?.value);
+    const sqlPort = Number.isFinite(sqlPortRaw) && sqlPortRaw > 0 ? Math.floor(sqlPortRaw) : null;
+    const sqlDatabase = String(connectDataSourceSqlDatabaseInput?.value || "").trim();
+    const sqlUsername = String(connectDataSourceSqlUsernameInput?.value || "").trim();
+    const sqlPassword = String(connectDataSourceSqlPasswordInput?.value || "").trim();
+    return {
+      sourceName,
+      sourceKey,
+      provider,
+      connectionMode,
+      machineNo,
+      deviceName,
+      deviceId,
+      scaleNumber,
+      apiBaseUrl,
+      apiKey,
+      apiSecret,
+      sqlHost,
+      sqlPort,
+      sqlDatabase,
+      sqlUsername,
+      sqlPassword
+    };
+  };
+
+  const validateConnectDataSourcePayload = (
+    payload,
+    {
+      requireName = true,
+      requireApiBaseUrl = false
+    } = {}
+  ) => {
+    if (requireName && !payload.sourceName) {
+      return {
+        ok: false,
+        message: "Source name is required.",
+        focusNode: connectDataSourceNameInput
+      };
+    }
+    if (payload.connectionMode === "api") {
+      if (requireApiBaseUrl && !payload.apiBaseUrl) {
+        return {
+          ok: false,
+          message: "API Base URL is required to test API connections.",
+          focusNode: connectDataSourceApiBaseUrlInput
+        };
+      }
+      if (!payload.apiKey) {
+        return {
+          ok: false,
+          message: "API Key is required for API connection mode.",
+          focusNode: connectDataSourceApiKeyInput
+        };
+      }
+      return { ok: true };
+    }
+
+    if (!payload.sqlHost || !payload.sqlDatabase || !payload.sqlUsername || !payload.sqlPassword) {
+      return {
+        ok: false,
+        message: "SQL connection mode requires host, database, username and password.",
+        focusNode: connectDataSourceSqlHostInput
+      };
+    }
+    return { ok: true };
+  };
+
+  const syncConnectDataSourceModeState = () => {
+    const mode = connectDataSourceModeInput?.value === "sql" ? "sql" : "api";
+    if (connectDataSourceApiFields) connectDataSourceApiFields.classList.toggle("hidden", mode !== "api");
+    if (connectDataSourceSqlFields) connectDataSourceSqlFields.classList.toggle("hidden", mode !== "sql");
+    if (connectDataSourceApiKeyInput) connectDataSourceApiKeyInput.required = mode === "api";
+    if (connectDataSourceSqlHostInput) connectDataSourceSqlHostInput.required = mode === "sql";
+    if (connectDataSourceSqlDatabaseInput) connectDataSourceSqlDatabaseInput.required = mode === "sql";
+    if (connectDataSourceSqlUsernameInput) connectDataSourceSqlUsernameInput.required = mode === "sql";
+    if (connectDataSourceSqlPasswordInput) connectDataSourceSqlPasswordInput.required = mode === "sql";
+    if (connectDataSourceHelp) {
+      connectDataSourceHelp.textContent =
+        mode === "sql"
+          ? "Enter SQL host, database, username and password to configure this source."
+          : "Enter API key details to configure this source.";
+    }
+    setConnectDataSourceTestFeedback();
+  };
+
+  const resetConnectDataSourceForm = () => {
+    if (!connectDataSourceForm) return;
+    connectDataSourceForm.reset();
+    if (connectDataSourceProviderInput) connectDataSourceProviderInput.value = "api";
+    if (connectDataSourceModeInput) connectDataSourceModeInput.value = "api";
+    if (connectDataSourceSqlPortInput) connectDataSourceSqlPortInput.value = "5432";
+    if (connectDataSourceTestBtn) {
+      connectDataSourceTestBtn.disabled = false;
+      connectDataSourceTestBtn.textContent = "Test Connection";
+    }
+    setConnectDataSourceTestFeedback();
+    syncConnectDataSourceModeState();
+  };
+
+  const openConnectDataSourceModal = () => {
+    if (!connectDataSourceModal) return;
+    resetConnectDataSourceForm();
+    connectDataSourceModal.classList.add("open");
+    connectDataSourceModal.setAttribute("aria-hidden", "false");
+    connectDataSourceNameInput?.focus();
+  };
+
+  const closeConnectDataSourceModal = () => {
+    if (!connectDataSourceModal) return;
+    connectDataSourceModal.classList.remove("open");
+    connectDataSourceModal.setAttribute("aria-hidden", "true");
+  };
+
   const saveLineGroupAssignment = async (lineId, nextGroupId) => {
     const line = appState.lines?.[lineId];
     if (!line) return;
@@ -3896,10 +5389,19 @@ function bindHome() {
   });
 
   const switchAppMode = (mode, { goHome = false } = {}) => {
-    appState.appMode = mode;
+    const nextMode = mode === "supervisor" ? "supervisor" : "manager";
+    if (APP_VARIANT === "manager" && nextMode !== "manager") return;
+    if (APP_VARIANT === "supervisor" && nextMode !== "supervisor") return;
+    appState.appMode = nextMode;
     if (goHome) appState.activeView = "home";
     saveState();
     renderAll();
+  };
+
+  const setManagerHomeTab = (tab) => {
+    appState.managerHomeTab = tab === "settings" ? "settings" : "dashboard";
+    saveState();
+    renderHome();
   };
 
   modeManagerBtn.addEventListener("click", () => {
@@ -3918,6 +5420,13 @@ function bindHome() {
   if (lineModeSupervisorBtn) {
     lineModeSupervisorBtn.addEventListener("click", () => {
       switchAppMode("supervisor", { goHome: true });
+    });
+  }
+
+  if (managerSettingsTabBtn) {
+    managerSettingsTabBtn.addEventListener("click", () => {
+      if (appState.appMode !== "manager" || !managerBackendSession.backendToken) return;
+      setManagerHomeTab(appState.managerHomeTab === "settings" ? "dashboard" : "settings");
     });
   }
 
@@ -3998,7 +5507,9 @@ function bindHome() {
       managerBackendSession.role = "manager";
       persistManagerBackendSession();
       appState.appMode = "manager";
+      appState.managerHomeTab = "dashboard";
       appState.activeView = "home";
+      clearManagerActionTicketEdit();
       saveState();
       await refreshHostedState(managerBackendSession);
       renderAll();
@@ -4007,7 +5518,7 @@ function bindHome() {
       if (message.toLowerCase().includes("invalid")) {
         alert("Invalid manager credentials.");
       } else {
-        alert(`Could not connect to login service.\n${message || "Please try again."}`);
+        alert(`Could not connect to login service at ${API_BASE_URL}.\n${message || "Please try again."}`);
       }
     }
   });
@@ -4038,6 +5549,7 @@ function bindHome() {
         return;
       }
       appState.supervisorSession = {
+        name: String(loginPayload?.user?.name || loginPayload?.user?.username || username).trim(),
         username: loginPayload.user.username,
         assignedLineIds: [],
         assignedLineShifts: {},
@@ -4054,7 +5566,7 @@ function bindHome() {
       if (message.toLowerCase().includes("invalid")) {
         alert("Invalid supervisor credentials.");
       } else {
-        alert(`Could not connect to login service.\n${message || "Please try again."}`);
+        alert(`Could not connect to login service at ${API_BASE_URL}.\n${message || "Please try again."}`);
       }
     }
   });
@@ -4064,7 +5576,9 @@ function bindHome() {
       appState.supervisorSession = null;
     } else {
       clearManagerBackendSession();
+      appState.managerHomeTab = "dashboard";
       appState.activeView = "home";
+      clearManagerActionTicketEdit();
     }
     saveState();
     renderAll();
@@ -4148,10 +5662,23 @@ function bindHome() {
     if (!visualAllowedShifts.includes(appState.supervisorSelectedShift)) {
       appState.supervisorSelectedShift = visualAllowedShifts.includes("Full Day") ? "Full Day" : visualAllowedShifts[0] || "Day";
     }
+    syncRunProductInputsFromCatalog();
     refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
     saveState();
     renderHome();
   });
+
+  if (supervisorActionLineInput) {
+    supervisorActionLineInput.addEventListener("change", () => {
+      refreshSupervisorActionRelationOptions();
+    });
+  }
+
+  if (supervisorActionReasonCategoryInput) {
+    supervisorActionReasonCategoryInput.addEventListener("change", () => {
+      refreshSupervisorActionRelationOptions();
+    });
+  }
 
   svDateInputs.forEach((svDateInput) => {
     svDateInput.addEventListener("change", () => {
@@ -4207,6 +5734,131 @@ function bindHome() {
     });
   });
 
+  if (managerActionList) {
+    managerActionList.addEventListener("change", (event) => {
+      const categorySelect = event.target.closest("[data-manager-action-reason-category]");
+      if (!categorySelect) return;
+      const row = categorySelect.closest("[data-manager-action-row]") || categorySelect.closest("tr");
+      const reasonDetailSelect = row?.querySelector("[data-manager-action-reason-detail]");
+      if (!reasonDetailSelect) return;
+      const lineId = String(row?.getAttribute("data-manager-line-id") || "").trim();
+      const line = lineId && appState.lines[lineId] ? appState.lines[lineId] : null;
+      setActionReasonDetailOptions(reasonDetailSelect, line, String(categorySelect.value || ""), reasonDetailSelect.value || "");
+    });
+
+    managerActionList.addEventListener("click", (event) => {
+      const editBtn = event.target.closest("[data-manager-action-edit]");
+      if (editBtn) {
+        if (appState.appMode !== "manager" || !managerBackendSession.backendToken) return;
+        const actionId = String(editBtn.getAttribute("data-manager-action-edit") || "").trim();
+        if (!actionId) return;
+        setManagerActionTicketEdit(actionId);
+        renderHome();
+        return;
+      }
+
+      const deleteBtn = event.target.closest("[data-manager-action-delete]");
+      if (deleteBtn) {
+        if (appState.appMode !== "manager" || !managerBackendSession.backendToken) return;
+        const actionId = String(deleteBtn.getAttribute("data-manager-action-delete") || "").trim();
+        if (!actionId) return;
+        const actions = ensureSupervisorActionsState();
+        const actionIndex = actions.findIndex((item) => String(item?.id || "") === actionId);
+        if (actionIndex < 0) {
+          alert("Action could not be found.");
+          return;
+        }
+        const action = actions[actionIndex];
+        const actionTitle = String(action?.title || "this action").trim() || "this action";
+        if (!window.confirm(`Delete "${actionTitle}"?`)) return;
+        actions.splice(actionIndex, 1);
+        if (isManagerActionTicketEditRow(actionId)) clearManagerActionTicketEdit();
+        appState.supervisorActions = normalizeSupervisorActions(actions);
+        saveState();
+        renderHome();
+        return;
+      }
+
+      const saveBtn = event.target.closest("[data-manager-action-reassign]");
+      if (!saveBtn) return;
+      if (appState.appMode !== "manager" || !managerBackendSession.backendToken) return;
+      const actionId = String(saveBtn.getAttribute("data-manager-action-reassign") || "").trim();
+      if (!actionId) return;
+      const row = saveBtn.closest("[data-manager-action-row]") || saveBtn.closest("tr");
+      const supervisorSelect = row?.querySelector("[data-manager-action-supervisor]");
+      if (!supervisorSelect) return;
+      const prioritySelect = row?.querySelector("[data-manager-action-priority]");
+      const statusSelect = row?.querySelector("[data-manager-action-status]");
+      const dueDateInput = row?.querySelector("[data-manager-action-due-date]");
+      const relatedEquipmentSelect = row?.querySelector("[data-manager-action-related-equipment]");
+      const relatedReasonCategorySelect = row?.querySelector("[data-manager-action-reason-category]");
+      const relatedReasonDetailSelect = row?.querySelector("[data-manager-action-reason-detail]");
+      const nextUsername = String(supervisorSelect.value || "").trim().toLowerCase();
+      const actions = ensureSupervisorActionsState();
+      const action = actions.find((item) => String(item?.id || "") === actionId);
+      if (!action) {
+        alert("Action could not be found.");
+        return;
+      }
+      const previousUsername = String(action.supervisorUsername || "").trim().toLowerCase();
+      const previousPriority = normalizeActionPriority(action.priority);
+      const previousStatus = normalizeActionStatus(action.status);
+      const previousDueDateRaw = String(action.dueDate || "").trim();
+      const previousDueDate = /^\d{4}-\d{2}-\d{2}$/.test(previousDueDateRaw) ? previousDueDateRaw : "";
+      const previousRelatedEquipmentId = String(action.relatedEquipmentId || "").trim();
+      const previousRelatedReasonCategory = normalizeActionReasonCategory(action.relatedReasonCategory);
+      const previousRelatedReasonDetail = previousRelatedReasonCategory ? String(action.relatedReasonDetail || "").trim() : "";
+      const nextPriority = normalizeActionPriority(prioritySelect?.value);
+      const nextStatus = normalizeActionStatus(statusSelect?.value);
+      const nextDueDateRaw = String(dueDateInput?.value || "").trim();
+      const nextDueDate = /^\d{4}-\d{2}-\d{2}$/.test(nextDueDateRaw) ? nextDueDateRaw : "";
+      const line = action.lineId && appState.lines[action.lineId] ? appState.lines[action.lineId] : null;
+      const nextRelatedEquipmentId = String(relatedEquipmentSelect?.value || "").trim();
+      const validEquipmentIds = new Set((line?.stages || []).map((stage) => String(stage?.id || "").trim()).filter(Boolean));
+      if (nextRelatedEquipmentId && !validEquipmentIds.has(nextRelatedEquipmentId)) {
+        alert("Select valid related equipment.");
+        return;
+      }
+      const nextRelatedReasonCategory = normalizeActionReasonCategory(relatedReasonCategorySelect?.value);
+      const nextRelatedReasonDetailRaw = String(relatedReasonDetailSelect?.value || "").trim();
+      let nextRelatedReasonDetail = "";
+      if (nextRelatedReasonCategory) {
+        const validReasonDetails = new Set(
+          downtimeDetailOptions(line, nextRelatedReasonCategory).map((option) => String(option?.value || "").trim()).filter(Boolean)
+        );
+        if (nextRelatedReasonDetailRaw && !validReasonDetails.has(nextRelatedReasonDetailRaw)) {
+          alert("Select valid downtime reason.");
+          return;
+        }
+        nextRelatedReasonDetail = nextRelatedReasonDetailRaw;
+      }
+      if (
+        previousUsername === nextUsername &&
+        previousPriority === nextPriority &&
+        previousStatus === nextStatus &&
+        previousDueDate === nextDueDate &&
+        previousRelatedEquipmentId === nextRelatedEquipmentId &&
+        previousRelatedReasonCategory === nextRelatedReasonCategory &&
+        previousRelatedReasonDetail === nextRelatedReasonDetail
+      ) {
+        clearManagerActionTicketEdit();
+        renderHome();
+        return;
+      }
+      action.supervisorUsername = nextUsername;
+      action.supervisorName = actionAssignmentLabel(nextUsername, action.supervisorName);
+      action.priority = nextPriority;
+      action.status = nextStatus;
+      action.dueDate = nextDueDate;
+      action.relatedEquipmentId = nextRelatedEquipmentId;
+      action.relatedReasonCategory = nextRelatedReasonCategory;
+      action.relatedReasonDetail = nextRelatedReasonDetail;
+      clearManagerActionTicketEdit();
+      saveState();
+      renderHome();
+    });
+  }
+
   manageSupervisorsBtn.addEventListener("click", openManageSupervisorsModal);
   closeManageSupervisorsModalBtn.addEventListener("click", closeManageSupervisorsModal);
   manageSupervisorsModal.addEventListener("click", (event) => {
@@ -4223,6 +5875,177 @@ function bindHome() {
     manageLineGroupsModal.addEventListener("click", (event) => {
       if (event.target === manageLineGroupsModal) closeManageLineGroupsModal();
     });
+  }
+  if (manageProductCatalogBtn) {
+    manageProductCatalogBtn.addEventListener("click", openManageProductCatalogModal);
+  }
+  if (closeManageProductCatalogModalBtn) {
+    closeManageProductCatalogModalBtn.addEventListener("click", closeManageProductCatalogModal);
+  }
+  if (manageProductCatalogModal) {
+    manageProductCatalogModal.addEventListener("click", (event) => {
+      if (event.target === manageProductCatalogModal) closeManageProductCatalogModal();
+    });
+  }
+  if (connectDataSourceBtn) {
+    connectDataSourceBtn.addEventListener("click", openConnectDataSourceModal);
+  }
+  if (closeConnectDataSourceModalBtn) {
+    closeConnectDataSourceModalBtn.addEventListener("click", closeConnectDataSourceModal);
+  }
+  if (connectDataSourceModal) {
+    connectDataSourceModal.addEventListener("click", (event) => {
+      if (event.target === connectDataSourceModal) closeConnectDataSourceModal();
+    });
+  }
+  if (connectDataSourceModeInput) {
+    connectDataSourceModeInput.addEventListener("change", syncConnectDataSourceModeState);
+  }
+  if (connectDataSourceProviderInput && connectDataSourceModeInput) {
+    connectDataSourceProviderInput.addEventListener("change", () => {
+      const provider = normalizeDataSourceProvider(connectDataSourceProviderInput.value);
+      if (provider === "sql") connectDataSourceModeInput.value = "sql";
+      if (provider === "api") connectDataSourceModeInput.value = "api";
+      syncConnectDataSourceModeState();
+    });
+  }
+  if (connectDataSourceNameInput && connectDataSourceKeyInput) {
+    connectDataSourceNameInput.addEventListener("blur", () => {
+      if (String(connectDataSourceKeyInput.value || "").trim()) return;
+      const name = String(connectDataSourceNameInput.value || "").trim();
+      if (!name) return;
+      connectDataSourceKeyInput.value = dataSourceKeyFromName(name, "source");
+    });
+  }
+
+  const runModalDataSourceConnectionTest = async () => {
+    const payload = connectDataSourceFormPayload();
+    const validation = validateConnectDataSourcePayload(payload, {
+      requireName: false,
+      requireApiBaseUrl: payload.connectionMode === "api"
+    });
+    if (!validation.ok) {
+      setConnectDataSourceTestFeedback(validation.message || "Connection test validation failed.", "error");
+      validation.focusNode?.focus();
+      return;
+    }
+    if (connectDataSourceTestBtn) {
+      connectDataSourceTestBtn.disabled = true;
+      connectDataSourceTestBtn.textContent = "Testing...";
+    }
+    setConnectDataSourceTestFeedback("Testing connection...");
+    try {
+      const response = await testDataSourceConnectionOnBackend(payload);
+      const test = response?.test || null;
+      if (test?.ok) {
+        setConnectDataSourceTestFeedback(`Connection successful. ${String(test.message || "").trim()}`.trim(), "success");
+      } else {
+        setConnectDataSourceTestFeedback(
+          `Connection failed. ${String(test?.message || "Please review your settings and retry.").trim()}`.trim(),
+          "error"
+        );
+      }
+    } catch (error) {
+      setConnectDataSourceTestFeedback(`Connection failed. ${error?.message || "Please try again."}`, "error");
+    } finally {
+      if (connectDataSourceTestBtn) {
+        connectDataSourceTestBtn.disabled = false;
+        connectDataSourceTestBtn.textContent = "Test Connection";
+      }
+    }
+  };
+
+  const runSavedDataSourceConnectionTest = async (dataSourceId) => {
+    const safeDataSourceId = String(dataSourceId || "").trim();
+    if (!UUID_RE.test(safeDataSourceId)) {
+      alert("Invalid data source id.");
+      return;
+    }
+    const source = dataSourceById(safeDataSourceId);
+    const sourceLabel = source?.sourceName || "Data source";
+    try {
+      const response = await testSavedDataSourceConnectionOnBackend(safeDataSourceId);
+      const test = response?.test || null;
+      if (test) rememberDataSourceConnectionTest(safeDataSourceId, test);
+      renderManagerDataSourcesList(dataSourcesList);
+      if (test?.ok) {
+        alert(`${sourceLabel} connection passed.\n${String(test.message || "Connection successful.")}`);
+      } else {
+        alert(`${sourceLabel} connection failed.\n${String(test?.message || "Please review the data source credentials.")}`);
+      }
+    } catch (error) {
+      console.warn("Data source connection test failed:", error);
+      rememberDataSourceConnectionTest(safeDataSourceId, {
+        ok: false,
+        message: String(error?.message || "Connection test failed.")
+      });
+      renderManagerDataSourcesList(dataSourcesList);
+      alert(`Could not test data source connection.\n${error?.message || "Please try again."}`);
+    }
+  };
+
+  if (connectDataSourceTestBtn) {
+    connectDataSourceTestBtn.addEventListener("click", runModalDataSourceConnectionTest);
+  }
+
+  if (connectDataSourceForm) {
+    connectDataSourceForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const payload = connectDataSourceFormPayload();
+      const validation = validateConnectDataSourcePayload(payload, {
+        requireName: true,
+        requireApiBaseUrl: false
+      });
+      if (!validation.ok) {
+        alert(validation.message || "Data source details are incomplete.");
+        validation.focusNode?.focus();
+        return;
+      }
+      try {
+        await createDataSourceOnBackend(payload);
+        closeConnectDataSourceModal();
+        await refreshHostedState();
+        renderHome();
+      } catch (error) {
+        console.warn("Data source create failed:", error);
+        alert(`Could not connect data source.\n${error?.message || "Please try again."}`);
+      }
+    });
+    syncConnectDataSourceModeState();
+  }
+  if (dataSourcesList) {
+    dataSourcesList.addEventListener("click", async (event) => {
+      const testBtn = event.target.closest("[data-data-source-test]");
+      if (!testBtn) return;
+      const dataSourceId = String(testBtn.getAttribute("data-data-source-test") || "").trim();
+      if (!dataSourceId) return;
+      await runSavedDataSourceConnectionTest(dataSourceId);
+    });
+  }
+  if (closeProductLineAssignModalBtn) {
+    closeProductLineAssignModalBtn.addEventListener("click", closeProductLineAssignModal);
+  }
+  if (productLineAssignModal) {
+    productLineAssignModal.addEventListener("click", (event) => {
+      if (event.target === productLineAssignModal) closeProductLineAssignModal();
+    });
+  }
+  if (productLineAssignSelectAllBtn) {
+    productLineAssignSelectAllBtn.addEventListener("click", () => {
+      productLineAssignList?.querySelectorAll('input[type="checkbox"]')?.forEach((input) => {
+        input.checked = true;
+      });
+    });
+  }
+  if (productLineAssignClearAllBtn) {
+    productLineAssignClearAllBtn.addEventListener("click", () => {
+      productLineAssignList?.querySelectorAll('input[type="checkbox"]')?.forEach((input) => {
+        input.checked = false;
+      });
+    });
+  }
+  if (productLineAssignSaveBtn) {
+    productLineAssignSaveBtn.addEventListener("click", saveProductLineAssignments);
   }
   if (lineGroupCreateForm) {
     lineGroupCreateForm.addEventListener("submit", async (event) => {
@@ -4308,6 +6131,63 @@ function bindHome() {
         console.warn("Line group delete failed:", error);
         alert(`Could not delete line group.\n${error?.message || "Please try again."}`);
       }
+    });
+  }
+
+  if (productCatalogTable) {
+    hydrateProductCatalogTableFromStorage(productCatalogTable);
+    const productCatalogWrap = productCatalogTable.closest(".products-table-wrap");
+    if (manageProductCatalogContent && productCatalogWrap && !manageProductCatalogContent.contains(productCatalogWrap)) {
+      manageProductCatalogContent.append(productCatalogWrap);
+    }
+    ensureProductCatalogActionColumn();
+    refreshProductRowAssignmentSummaries(productCatalogTable);
+    syncRunProductInputsFromCatalog();
+    productCatalogTable.addEventListener("click", (event) => {
+      const editBtn = event.target.closest("[data-product-row-edit]");
+      const linesBtn = event.target.closest("[data-product-row-lines]");
+      if (linesBtn) {
+        const rowNode = linesBtn.closest("tr");
+        if (!rowNode) return;
+        openProductLineAssignModal(rowNode);
+        return;
+      }
+      if (!editBtn) return;
+      const rowNode = editBtn.closest("tr");
+      if (!rowNode) return;
+      const isEditing = rowNode.getAttribute("data-product-editing") === "true";
+      if (isEditing) {
+        finalizeProductRowInlineEdit(rowNode);
+        return;
+      }
+      const openRows = Array.from(productCatalogTable.querySelectorAll('tbody tr[data-product-editing="true"]')).filter(
+        (openRow) => openRow !== rowNode
+      );
+      for (const openRow of openRows) {
+        const saved = finalizeProductRowInlineEdit(openRow);
+        if (!saved) return;
+      }
+      beginProductRowInlineEdit(rowNode);
+    });
+  }
+  if (addProductBtn && productCatalogTable) {
+    addProductBtn.disabled = false;
+    addProductBtn.textContent = "Add Product";
+    addProductBtn.addEventListener("click", () => {
+      const openRows = Array.from(productCatalogTable.querySelectorAll('tbody tr[data-product-editing="true"]'));
+      for (const openRow of openRows) {
+        const saved = finalizeProductRowInlineEdit(openRow);
+        if (!saved) return;
+      }
+      const rowNode = buildProductCatalogRow(Array(PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT).fill(""), []);
+      const tbody = productCatalogTable.tBodies?.[0] || productCatalogTable.createTBody();
+      tbody.prepend(rowNode);
+      ensureProductCatalogActionColumn();
+      setProductRowEditingState(rowNode, false);
+      setProductRowAssignmentSummary(rowNode);
+      beginProductRowInlineEdit(rowNode);
+      const firstInput = rowNode.querySelector('input[data-product-inline-input="2"]') || rowNode.querySelector('input[data-product-inline-input="1"]');
+      firstInput?.focus();
     });
   }
 
@@ -4469,6 +6349,7 @@ function bindHome() {
       sup.name = name;
       sup.username = username;
       if (appState.supervisorSession?.username === previousUsername) {
+        appState.supervisorSession.name = name;
         appState.supervisorSession.username = username;
       }
       closeEditSupervisorModal();
@@ -4560,7 +6441,7 @@ function bindHome() {
 
   const supervisorActorName = (session) => {
     const sup = supervisorByUsername(session?.username || "");
-    return sup?.name || session?.username || "supervisor";
+    return sup?.name || session?.name || session?.username || "supervisor";
   };
 
   const resolveSupervisorLineContext = (lineIdOverride = "") => {
@@ -4594,6 +6475,92 @@ function bindHome() {
   supervisorShiftForm.addEventListener("submit", (event) => event.preventDefault());
   supervisorRunForm.addEventListener("submit", (event) => event.preventDefault());
   supervisorDownForm.addEventListener("submit", (event) => event.preventDefault());
+  if (supervisorActionForm) {
+    supervisorActionForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const session = appState.supervisorSession;
+      if (!session?.username) {
+        alert("Log in as a supervisor to lodge actions.");
+        return;
+      }
+      const assignedLineIds = Array.isArray(session.assignedLineIds) ? session.assignedLineIds : [];
+      const selectedLineId = String(supervisorActionLineInput?.value || "").trim();
+      if (selectedLineId && !assignedLineIds.includes(selectedLineId)) {
+        alert("Select one of your assigned lines.");
+        return;
+      }
+      const selectedLine = selectedLineId && appState.lines[selectedLineId] ? appState.lines[selectedLineId] : null;
+      const title = String(supervisorActionTitleInput?.value || "").trim();
+      if (!title) {
+        alert("Action title is required.");
+        return;
+      }
+      const description = String(supervisorActionDescriptionInput?.value || "").trim();
+      if (!description) {
+        alert("Description is required.");
+        return;
+      }
+      const dueDate = String(supervisorActionDueDateInput?.value || "").trim();
+      if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
+        alert("Due date is invalid.");
+        return;
+      }
+      const relatedEquipmentRaw = String(supervisorActionEquipmentInput?.value || "").trim();
+      const validEquipmentIds = new Set((selectedLine?.stages || []).map((stage) => String(stage?.id || "").trim()).filter(Boolean));
+      if (relatedEquipmentRaw && !validEquipmentIds.has(relatedEquipmentRaw)) {
+        alert("Select valid equipment for the selected line.");
+        return;
+      }
+      const relatedReasonCategory = normalizeActionReasonCategory(supervisorActionReasonCategoryInput?.value);
+      const relatedReasonDetailRaw = String(supervisorActionReasonDetailInput?.value || "").trim();
+      let relatedReasonDetail = "";
+      if (relatedReasonCategory) {
+        const validReasonDetails = new Set(
+          downtimeDetailOptions(selectedLine, relatedReasonCategory).map((option) => String(option?.value || "").trim()).filter(Boolean)
+        );
+        if (relatedReasonDetailRaw && !validReasonDetails.has(relatedReasonDetailRaw)) {
+          alert("Select a valid downtime reason.");
+          return;
+        }
+        relatedReasonDetail = relatedReasonDetailRaw;
+      }
+      const supervisor = supervisorByUsername(session.username);
+      const createdAction = normalizeSupervisorAction({
+        id: makeLocalLogId("action"),
+        supervisorUsername: session.username,
+        supervisorName: String(supervisor?.name || session?.name || session.username || "Supervisor").trim() || "Supervisor",
+        lineId: selectedLineId,
+        title,
+        description,
+        priority: normalizeActionPriority(supervisorActionPriorityInput?.value),
+        status: normalizeActionStatus(supervisorActionStatusInput?.value),
+        dueDate,
+        relatedEquipmentId: relatedEquipmentRaw,
+        relatedReasonCategory,
+        relatedReasonDetail,
+        createdAt: nowIso(),
+        createdBy: String(supervisor?.name || session?.name || session.username || "Supervisor").trim() || "Supervisor"
+      });
+      if (!createdAction) {
+        alert("Could not lodge action. Please try again.");
+        return;
+      }
+      ensureSupervisorActionsState().unshift(createdAction);
+      supervisorActionForm.reset();
+      if (supervisorActionLineInput && selectedLineId && assignedLineIds.includes(selectedLineId)) {
+        supervisorActionLineInput.value = selectedLineId;
+      }
+      if (supervisorActionPriorityInput) supervisorActionPriorityInput.value = "Medium";
+      if (supervisorActionStatusInput) supervisorActionStatusInput.value = "Open";
+      if (supervisorActionDueDateInput) supervisorActionDueDateInput.value = todayISO();
+      if (supervisorActionEquipmentInput) supervisorActionEquipmentInput.value = "";
+      if (supervisorActionReasonCategoryInput) supervisorActionReasonCategoryInput.value = "";
+      if (supervisorActionReasonDetailInput) supervisorActionReasonDetailInput.value = "";
+      refreshSupervisorActionRelationOptions();
+      saveState();
+      renderHome();
+    });
+  }
   if (superRunCrewingPatternBtn) {
     superRunCrewingPatternBtn.addEventListener("click", () => {
       const line = selectedSupervisorLine();
@@ -4628,6 +6595,7 @@ function bindHome() {
     const startInput = document.getElementById("superShiftStart").value || "";
     const finishInput = document.getElementById("superShiftFinish").value || "";
     const crewRaw = document.getElementById("superShiftCrew").value;
+    const notesInput = String(document.getElementById("superShiftNotes")?.value || "").trim();
 
     if (!rowIsValidDateShift(date, shift)) {
       alert("Date/shift are invalid.");
@@ -4666,6 +6634,7 @@ function bindHome() {
     const crewOnShift = crewRaw === ""
       ? Math.max(0, Math.floor(num(existing?.crewOnShift)))
       : Math.max(0, Math.floor(num(crewRaw)));
+    const notes = notesInput !== "" ? notesInput : String(existing?.notes || "");
 
     if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
       alert("Shift start and finish must be in HH:MM (24h).");
@@ -4680,7 +6649,7 @@ function bindHome() {
       return;
     }
 
-    const payload = { lineId, date, shift, crewOnShift, startTime, finishTime };
+    const payload = { lineId, date, shift, crewOnShift, startTime, finishTime, notes };
     try {
       const saved = existing?.id
         ? await patchSupervisorShiftLog(session, existing.id, payload)
@@ -5064,6 +7033,7 @@ function bindHome() {
     const prodStartInput = document.getElementById("superRunProdStart").value || "";
     const finishInput = document.getElementById("superRunFinish").value || "";
     const unitsRaw = document.getElementById("superRunUnits").value;
+    const notesInput = String(document.getElementById("superRunNotes")?.value || "").trim();
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
       alert("Date is invalid.");
@@ -5084,9 +7054,15 @@ function bindHome() {
       }
     }
 
-    const product = productInput || existing?.product || "";
+    const product = String(productInput || existing?.product || "").trim();
     if (!product) {
       alert("Product is required.");
+      return;
+    }
+    const productChanged = Boolean(productInput) && product !== String(existing?.product || "").trim();
+    const requiresCatalogValidation = !existing || productChanged;
+    if (requiresCatalogValidation && !isCatalogProductName(product, { lineId })) {
+      alert("Select a product from Manage Products before starting a run.");
       return;
     }
 
@@ -5095,6 +7071,7 @@ function bindHome() {
     const unitsProduced = unitsRaw === ""
       ? Math.max(0, num(existing?.unitsProduced))
       : Math.max(0, num(unitsRaw));
+    const notes = notesInput !== "" ? notesInput : String(existing?.notes || "");
     const backendShift = inferShiftForLog(line, date, productionStartTime, appState.supervisorSelectedShift || "Day");
 
     if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
@@ -5135,6 +7112,7 @@ function bindHome() {
       productionStartTime,
       finishTime,
       unitsProduced,
+      notes,
       runCrewingPattern
     };
     try {
@@ -5222,6 +7200,7 @@ function bindHome() {
     document.getElementById("superShiftCrew").value = String(Math.max(0, Math.floor(num(row.crewOnShift))));
     document.getElementById("superShiftStart").value = row.startTime || "";
     document.getElementById("superShiftFinish").value = isOpenShiftRow(row) ? "" : row.finishTime || "";
+    document.getElementById("superShiftNotes").value = String(row.notes || "");
     if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
     superShiftLogIdInput.value = row.id || "";
     supervisorShiftTileEditId = row.id || "";
@@ -5252,6 +7231,7 @@ function bindHome() {
     const rowIsOpen = isOpenRunRow(row);
     document.getElementById("superRunFinish").value = rowIsOpen ? "" : row.finishTime || "";
     document.getElementById("superRunUnits").value = num(row.unitsProduced) > 0 ? formatNum(Math.max(0, num(row.unitsProduced)), 0) : "";
+    document.getElementById("superRunNotes").value = String(row.notes || "");
     superRunLogIdInput.value = row.id || "";
     const rowShift = row.shift || inferShiftForLog(line, row.date, row.productionStartTime, appState.supervisorSelectedShift || "Day");
     setRunCrewingPatternField(
@@ -5290,6 +7270,7 @@ function bindHome() {
       setDowntimeDetailOptions(supervisorDownReasonDetail, line, reasonCategory || "", reasonDetail || "");
     }
     document.getElementById("superDownReasonNote").value = reasonNote;
+    document.getElementById("superDownNotes").value = String(row.notes || "");
     superDownLogIdInput.value = row.id || "";
     suppressSupervisorSelectionReset = false;
     updateSupervisorProgressButtonLabels();
@@ -5351,7 +7332,8 @@ function bindHome() {
       shift,
       crewOnShift: Math.max(0, Math.floor(num(row.crewOnShift))),
       startTime,
-      finishTime
+      finishTime,
+      notes: String(row.notes || "")
     };
     try {
       const saved = await patchSupervisorShiftLog(session, row.id, payload);
@@ -5434,7 +7416,8 @@ function bindHome() {
       product: row.product || "Run",
       productionStartTime,
       finishTime,
-      unitsProduced
+      unitsProduced,
+      notes: String(row.notes || "")
     };
     try {
       const saved = await patchSupervisorRunLog(session, row.id, payload);
@@ -5526,6 +7509,7 @@ function bindHome() {
       reasonCategory,
       reasonDetail,
       reasonNote,
+      notes: String(row.notes || ""),
       reason: buildDowntimeReasonText(line, reasonCategory, reasonDetail, reasonNote)
     };
     try {
@@ -5568,6 +7552,7 @@ function bindHome() {
     const reasonCategoryInput = document.getElementById("superDownReasonCategory").value || "";
     const reasonDetailInput = document.getElementById("superDownReasonDetail").value || "";
     const reasonNoteInput = String(document.getElementById("superDownReasonNote").value || "").trim();
+    const notesInput = String(document.getElementById("superDownNotes")?.value || "").trim();
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
       alert("Date is invalid.");
@@ -5594,6 +7579,7 @@ function bindHome() {
     const reasonCategory = reasonCategoryInput || existing?.reasonCategory || "";
     const reasonDetail = reasonDetailInput || existing?.reasonDetail || "";
     const reasonNote = reasonNoteInput !== "" ? reasonNoteInput : existing?.reasonNote || "";
+    const notes = notesInput !== "" ? notesInput : String(existing?.notes || "");
     const equipment = reasonCategory === "Equipment" ? (reasonDetail || existing?.equipment || "") : "";
     const reason = buildDowntimeReasonText(line, reasonCategory, reasonDetail, reasonNote);
 
@@ -5628,7 +7614,8 @@ function bindHome() {
       reason,
       reasonCategory,
       reasonDetail,
-      reasonNote
+      reasonNote,
+      notes
     };
     try {
       const saved = existing?.id
@@ -6569,6 +8556,68 @@ function stageDefaultSize(stage) {
   return { w: 9.5, h: 15 };
 }
 
+function setStageSettingsDataSourceHint(stageId, dataSourceId, assignments = null) {
+  const hint = document.getElementById("stageSettingsDataSourceHint");
+  if (!hint) return;
+  hint.classList.remove("is-warning");
+
+  const safeStageId = String(stageId || "").trim();
+  const safeLineId = String(state?.id || "").trim();
+  const safeSourceId = String(dataSourceId || "").trim();
+
+  if (!safeSourceId) {
+    hint.textContent = "No data source connected.";
+    return;
+  }
+
+  const source = dataSourceById(safeSourceId);
+  const conflict = conflictingDataSourceAssignment(safeSourceId, safeLineId, safeStageId, assignments);
+  if (conflict) {
+    hint.textContent = `This source is already connected to ${conflict.lineName} - ${conflict.stageName}.`;
+    hint.classList.add("is-warning");
+    return;
+  }
+  hint.textContent = `Connected to ${dataSourceDisplayLabel(source)}.`;
+}
+
+function renderStageSettingsDataSourceOptions(stageId, dataSourceId = "") {
+  const select = document.getElementById("stageSettingsDataSource");
+  const hint = document.getElementById("stageSettingsDataSourceHint");
+  if (!select) return;
+
+  const safeStageId = String(stageId || "").trim();
+  const safeLineId = String(state?.id || "").trim();
+  const safeSelectedId = String(dataSourceId || "").trim();
+  const sources = (appState.dataSources || []).filter((source) => source.isActive !== false);
+  const assignments = dataSourceAssignments(appState.lines);
+  const sourceById = new Map(sources.map((source) => [source.id, source]));
+  const options = [`<option value="">Not connected</option>`];
+
+  sources.forEach((source) => {
+    const conflict = conflictingDataSourceAssignment(source.id, safeLineId, safeStageId, assignments);
+    const selected = source.id === safeSelectedId;
+    const disabled = Boolean(conflict) && !selected;
+    const optionLabel = conflict
+      ? `${dataSourceDisplayLabel(source)} - In use by ${conflict.lineName} - ${conflict.stageName}`
+      : dataSourceDisplayLabel(source);
+    options.push(
+      `<option value="${htmlEscape(source.id)}"${selected ? " selected" : ""}${disabled ? " disabled" : ""}>${htmlEscape(optionLabel)}</option>`
+    );
+  });
+
+  if (safeSelectedId && !sourceById.has(safeSelectedId)) {
+    options.push(`<option value="${htmlEscape(safeSelectedId)}" selected>Current source (unavailable)</option>`);
+  }
+
+  select.innerHTML = options.join("");
+  if (safeSelectedId) select.value = safeSelectedId;
+  setStageSettingsDataSourceHint(safeStageId, select.value, assignments);
+  if (!sources.length && hint) {
+    hint.textContent = "No data sources are available.";
+    hint.classList.add("is-warning");
+  }
+}
+
 function openStageSettingsModal(stageId) {
   const stage = getStages().find((item) => item.id === stageId);
   if (!stage) return;
@@ -6583,6 +8632,7 @@ function openStageSettingsModal(stageId) {
   document.getElementById("stageSettingsMaxThroughput").value = stageMaxThroughput(stage.id);
   document.getElementById("stageSettingsWidth").value = roundToDecimals(safeWidth, 1).toFixed(1);
   document.getElementById("stageSettingsHeight").value = roundToDecimals(safeHeight, 1).toFixed(1);
+  renderStageSettingsDataSourceOptions(stage.id, String(stage.dataSourceId || "").trim());
 
   const overlay = document.getElementById("stageSettingsModal");
   overlay.classList.add("open");
@@ -6599,11 +8649,18 @@ function bindStageSettingsModal() {
   const overlay = document.getElementById("stageSettingsModal");
   const closeBtn = document.getElementById("closeStageSettingsModal");
   const form = document.getElementById("stageSettingsForm");
+  const dataSourceSelect = document.getElementById("stageSettingsDataSource");
 
   closeBtn.addEventListener("click", closeStageSettingsModal);
   overlay.addEventListener("click", (event) => {
     if (event.target === overlay) closeStageSettingsModal();
   });
+  if (dataSourceSelect) {
+    dataSourceSelect.addEventListener("change", () => {
+      const stageId = document.getElementById("stageSettingsId").value;
+      setStageSettingsDataSourceHint(stageId, dataSourceSelect.value);
+    });
+  }
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
@@ -6618,6 +8675,17 @@ function bindStageSettingsModal() {
     const maxThroughput = Math.max(0, num(document.getElementById("stageSettingsMaxThroughput").value));
     const width = roundToDecimals(Math.max(2, num(document.getElementById("stageSettingsWidth").value)), 1);
     const height = roundToDecimals(Math.max(1, num(document.getElementById("stageSettingsHeight").value)), 1);
+    const nextDataSourceIdRaw = String(document.getElementById("stageSettingsDataSource")?.value || "").trim();
+    const nextDataSourceId = nextDataSourceIdRaw
+      && (dataSourceById(nextDataSourceIdRaw) || nextDataSourceIdRaw === String(stage.dataSourceId || "").trim())
+      ? nextDataSourceIdRaw
+      : "";
+    const dataSourceConflict = conflictingDataSourceAssignment(nextDataSourceId, state?.id, stage.id);
+    if (dataSourceConflict) {
+      alert(`This data source is already connected to ${dataSourceConflict.lineName} - ${dataSourceConflict.stageName}.`);
+      renderStageSettingsDataSourceOptions(stage.id, String(stage.dataSourceId || "").trim());
+      return;
+    }
     const defaults = stageDefaultSize(stage);
 
     stage.name = name;
@@ -6629,6 +8697,7 @@ function bindStageSettingsModal() {
       .toLowerCase()
       .split(/[^a-z0-9]+/)
       .filter(Boolean);
+    stage.dataSourceId = nextDataSourceId;
 
     if (!state.crewsByShift.Day[stage.id]) state.crewsByShift.Day[stage.id] = {};
     if (!state.crewsByShift.Night[stage.id]) state.crewsByShift.Night[stage.id] = {};
@@ -6639,7 +8708,13 @@ function bindStageSettingsModal() {
     if (!state.stageSettings[stage.id]) state.stageSettings[stage.id] = {};
     state.stageSettings[stage.id].maxThroughput = maxThroughput;
 
-    addAudit(state, "EDIT_STAGE_SETTINGS", `Stage updated: ${stageDisplayName(stage, getStages().findIndex((s) => s.id === stage.id))}`);
+    const stageIndex = getStages().findIndex((s) => s.id === stage.id);
+    const sourceLabel = nextDataSourceId ? dataSourceDisplayLabel(dataSourceById(nextDataSourceId)) : "Not connected";
+    addAudit(
+      state,
+      "EDIT_STAGE_SETTINGS",
+      `Stage updated: ${stageDisplayName(stage, stageIndex)} | Data source: ${sourceLabel}`
+    );
     saveState({ syncModel: true });
     closeStageSettingsModal();
     renderAll();
@@ -6785,6 +8860,7 @@ function bindForms() {
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
     data.crewOnShift = Math.max(0, Math.floor(num(data.crewOnShift)));
+    data.notes = String(data.notes || "").trim();
     if (!rowIsValidDateShift(data.date, data.shift)) {
       alert("Date and shift are required.");
       return;
@@ -6804,7 +8880,8 @@ function bindForms() {
         shift: data.shift,
         crewOnShift: data.crewOnShift,
         startTime: data.startTime,
-        finishTime: data.finishTime
+        finishTime: data.finishTime,
+        notes: data.notes
       };
       const saved = await syncManagerShiftLog(payload);
       state.shiftRows.push({
@@ -6826,12 +8903,18 @@ function bindForms() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
+    data.notes = String(data.notes || "").trim();
+    data.product = String(data.product || "").trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data.date || ""))) {
       alert("Date is required.");
       return;
     }
-    if (!String(data.product || "").trim()) {
+    if (!data.product) {
       alert("Product is required.");
+      return;
+    }
+    if (!isCatalogProductName(data.product)) {
+      alert("Select a product from Manage Products before starting a run.");
       return;
     }
     if (!strictTimeValid(data.productionStartTime) || !strictTimeValid(data.finishTime)) {
@@ -6862,6 +8945,7 @@ function bindForms() {
         productionStartTime: data.productionStartTime,
         finishTime: data.finishTime,
         unitsProduced: data.unitsProduced,
+        notes: data.notes,
         runCrewingPattern
       };
       const saved = await syncManagerRunLog(payload);
@@ -6898,6 +8982,7 @@ function bindForms() {
     data.reasonCategory = String(data.reasonCategory || "").trim();
     data.reasonDetail = String(data.reasonDetail || "").trim();
     data.reasonNote = String(data.reasonNote || "").trim();
+    data.notes = String(data.notes || "").trim();
     if (!data.reasonCategory) {
       alert("Reason group is required.");
       return;
@@ -6917,7 +9002,8 @@ function bindForms() {
         downtimeStart: data.downtimeStart,
         downtimeFinish: data.downtimeFinish,
         equipment: data.equipment,
-        reason: data.reason || ""
+        reason: data.reason || "",
+        notes: data.notes
       };
       const saved = await syncManagerDowntimeLog(payload);
       state.downtimeRows.push({
@@ -6953,6 +9039,7 @@ function bindForms() {
       const finishTime = inlineValue(rowNode, "finishTime");
       const breakCount = Math.max(0, Math.floor(num(inlineValue(rowNode, "breakCount"))));
       const breakTimeMins = Math.max(0, num(inlineValue(rowNode, "breakTimeMins")));
+      const notes = inlineValue(rowNode, "notes");
       if (!rowIsValidDateShift(date, shift)) {
         alert("Date/shift are invalid.");
         return;
@@ -6961,7 +9048,7 @@ function bindForms() {
         alert("Times must be HH:MM (24h).");
         return;
       }
-      const payload = { date, shift, crewOnShift, startTime, finishTime };
+      const payload = { date, shift, crewOnShift, startTime, finishTime, notes };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
         const toHHMM = (minutes) => {
@@ -7041,16 +9128,22 @@ function bindForms() {
       const row = (state.runRows || []).find((item) => item.id === logId);
       if (!row) return;
       const date = inlineValue(rowNode, "date");
-      const product = inlineValue(rowNode, "product");
+      const product = String(inlineValue(rowNode, "product") || "").trim();
       const productionStartTime = inlineValue(rowNode, "productionStartTime");
       const finishTime = inlineValue(rowNode, "finishTime");
       const unitsProduced = Math.max(0, num(inlineValue(rowNode, "unitsProduced")));
+      const notes = inlineValue(rowNode, "notes");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
         alert("Date is invalid.");
         return;
       }
       if (!product) {
         alert("Product is required.");
+        return;
+      }
+      const productChanged = product !== String(row.product || "").trim();
+      if (productChanged && !isCatalogProductName(product)) {
+        alert("Product must be selected from Manage Products.");
         return;
       }
       if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
@@ -7071,6 +9164,7 @@ function bindForms() {
         productionStartTime,
         finishTime,
         unitsProduced,
+        notes,
         runCrewingPattern
       };
       const canPatchServer = UUID_RE.test(String(logId || ""));
@@ -7110,6 +9204,7 @@ function bindForms() {
       const reasonCategory = inlineValue(rowNode, "reasonCategory");
       let reasonDetail = inlineValue(rowNode, "reasonDetail");
       const reasonNote = inlineValue(rowNode, "reasonNote");
+      const notes = inlineValue(rowNode, "notes");
       let equipment = inlineValue(rowNode, "equipment");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
         alert("Date is invalid.");
@@ -7147,7 +9242,8 @@ function bindForms() {
         reason,
         reasonCategory,
         reasonDetail,
-        reasonNote
+        reasonNote,
+        notes
       };
       const payload = {
         lineId: state.id,
@@ -7275,7 +9371,8 @@ function bindForms() {
       shift: row.shift || inferShiftForLog(state, row.date, startTime, state.selectedShift || "Day"),
       crewOnShift: Math.max(0, Math.floor(num(row.crewOnShift))),
       startTime,
-      finishTime
+      finishTime,
+      notes: String(row.notes || "")
     };
     const canPatchServer = UUID_RE.test(String(logId || ""));
     try {
@@ -7334,6 +9431,7 @@ function bindForms() {
       productionStartTime,
       finishTime,
       unitsProduced,
+      notes: String(row.notes || ""),
       runCrewingPattern
     };
     const canPatchServer = UUID_RE.test(String(logId || ""));
@@ -7411,6 +9509,7 @@ function bindForms() {
       reasonCategory,
       reasonDetail,
       reasonNote,
+      notes: String(row.notes || ""),
       reason: buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote)
     };
     const payload = {
@@ -7648,7 +9747,8 @@ function bindDataControls() {
         DowntimeMins: "",
         Start: row.startTime || "",
         Finish: row.finishTime || "",
-        Details: `Breaks logged: ${(data.breakRows || []).filter((br) => br.date === row.date && br.shift === row.shift).length}`
+        Details: `Breaks logged: ${(data.breakRows || []).filter((br) => br.date === row.date && br.shift === row.shift).length}`,
+        Notes: String(row.notes || "")
       })),
       ...data.runRows.map((row) => ({
         RecordType: "Run",
@@ -7660,7 +9760,8 @@ function bindDataControls() {
         DowntimeMins: Number(row.associatedDownTime || 0).toFixed(2),
         Start: row.productionStartTime || "",
         Finish: row.finishTime || "",
-        Details: `Net rate ${Number(row.netRunRate || 0).toFixed(2)} u/min`
+        Details: `Net rate ${Number(row.netRunRate || 0).toFixed(2)} u/min`,
+        Notes: String(row.notes || "")
       })),
       ...data.downtimeRows.map((row) => ({
         RecordType: "Downtime",
@@ -7672,10 +9773,11 @@ function bindDataControls() {
         DowntimeMins: Number(row.downtimeMins || 0).toFixed(2),
         Start: row.downtimeStart || "",
         Finish: row.downtimeFinish || "",
-        Details: row.reason || ""
+        Details: row.reason || "",
+        Notes: String(row.notes || "")
       }))
     ];
-    const columns = ["RecordType", "Date", "Shift", "Product", "Equipment", "Units", "DowntimeMins", "Start", "Finish", "Details"];
+    const columns = ["RecordType", "Date", "Shift", "Product", "Equipment", "Units", "DowntimeMins", "Start", "Finish", "Details", "Notes"];
     downloadTextFile(`line-report-${state.name.replace(/\s+/g, "-").toLowerCase()}-${Date.now()}.csv`, toCsv(rows, columns), "text/csv;charset=utf-8");
     addAudit(state, "EXPORT_CSV", "Line CSV report exported");
     saveState();
@@ -9159,6 +11261,7 @@ function renderTrackingTables() {
       finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
       breakCount: editing ? inlineInputHtml("breakCount", breakCount, { type: "number", min: "0", step: "1" }) : breakCount,
       breakTimeMins: editing ? inlineInputHtml("breakTimeMins", breakTimeMins, { type: "number", min: "0", step: "0.1" }) : breakTimeMins,
+      notes: editing ? inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" }) : String(row.notes || ""),
       submittedBy: managerLogSubmittedByLabel(row),
       action: actionHtml("shift", row, { editing, pending: shiftPending })
     };
@@ -9173,6 +11276,7 @@ function renderTrackingTables() {
     "Break Count": "breakCount",
     "Break Time (min)": "breakTimeMins",
     "Total Shift Time": "totalShiftTime",
+    Notes: "notes",
     "Submitted By": "submittedBy",
     Action: "action"
   });
@@ -9208,6 +11312,7 @@ function renderTrackingTables() {
         : row.productionStartTime,
       finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
       unitsProduced: editing ? inlineInputHtml("unitsProduced", Math.max(0, num(row.unitsProduced)), { type: "number", min: "0", step: "1" }) : row.unitsProduced,
+      notes: editing ? inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" }) : String(row.notes || ""),
       submittedBy: managerLogSubmittedByLabel(row),
       action: actionHtml("run", row, { editing, pending })
     };
@@ -9224,6 +11329,7 @@ function renderTrackingTables() {
     "Net Production Time": "netProductionTime",
     "Gross Run Rate": "grossRunRate",
     "Net Run Rate": "netRunRate",
+    Notes: "notes",
     "Submitted By": "submittedBy",
     Action: "action"
   });
@@ -9270,6 +11376,7 @@ function renderTrackingTables() {
           </div>
         `
         : row.reason,
+      notes: editing ? inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" }) : String(row.notes || ""),
       submittedBy: managerLogSubmittedByLabel(row),
       action: actionHtml("downtime", row, { editing, pending })
     };
@@ -9282,6 +11389,7 @@ function renderTrackingTables() {
     "Downtime (mins)": "downtimeMins",
     Equipment: "equipment",
     Reason: "reason",
+    Notes: "notes",
     "Submitted By": "submittedBy",
     Action: "action"
   });
@@ -9419,6 +11527,7 @@ function renderHome() {
   const sidebarBackdrop = document.getElementById("sidebarBackdrop");
   const homeSidebar = document.getElementById("homeSidebar");
   const headerLogoutBtn = document.getElementById("supervisorLogout");
+  const managerSettingsTabBtn = document.getElementById("managerSettingsTabBtn");
   const homeUserChip = document.getElementById("homeUserChip");
   const homeUserAvatar = document.getElementById("homeUserAvatar");
   const homeUserRole = document.getElementById("homeUserRole");
@@ -9429,15 +11538,20 @@ function renderHome() {
   const modeSupervisorBtn = document.getElementById("modeSupervisor");
   const lineModeManagerBtn = document.getElementById("lineModeManager");
   const lineModeSupervisorBtn = document.getElementById("lineModeSupervisor");
+  const homeModeToggle = modeManagerBtn?.closest(".shift-toggle");
+  const lineModeToggle = lineModeManagerBtn?.closest(".shift-toggle");
   const managerLoginSection = document.getElementById("managerLoginSection");
   const managerAppSection = document.getElementById("managerAppSection");
   const dashboardDateInput = document.getElementById("dashboardDate");
   const dashboardShiftButtons = Array.from(document.querySelectorAll("[data-dash-shift]"));
   const dashboardTable = document.getElementById("dashboardTable");
+  const dataSourcesList = document.getElementById("dataSourcesList");
+  const managerActionList = document.getElementById("managerActionList");
   const loginSection = document.getElementById("supervisorLoginSection");
   const appSection = document.getElementById("supervisorAppSection");
   const supervisorMobileModeBtn = document.getElementById("supervisorMobileMode");
   const lineSelect = document.getElementById("supervisorLineSelect");
+  const productCatalogTable = document.getElementById("productCatalogTable");
   const svDateInputs = Array.from(document.querySelectorAll("[data-sv-date]"));
   const svShiftButtons = Array.from(document.querySelectorAll("[data-sv-shift]"));
   const shiftDateInput = document.getElementById("superShiftDate");
@@ -9457,6 +11571,15 @@ function renderHome() {
   const downOpenList = document.getElementById("superDownOpenList");
   const entryList = document.getElementById("supervisorEntryList");
   const entryCards = document.getElementById("supervisorEntryCards");
+  const actionLineInput = document.getElementById("supervisorActionLine");
+  const actionPriorityInput = document.getElementById("supervisorActionPriority");
+  const actionStatusInput = document.getElementById("supervisorActionStatus");
+  const actionDueDateInput = document.getElementById("supervisorActionDueDate");
+  const actionEquipmentInput = document.getElementById("supervisorActionEquipment");
+  const actionReasonCategoryInput = document.getElementById("supervisorActionReasonCategory");
+  const actionReasonDetailInput = document.getElementById("supervisorActionReasonDetail");
+  const actionList = document.getElementById("supervisorActionList");
+  const actionCards = document.getElementById("supervisorActionCards");
   const superMainTabBtns = Array.from(document.querySelectorAll("[data-super-main-tab]"));
   const superMainPanels = Array.from(document.querySelectorAll(".supervisor-main-panel"));
   const session = normalizeSupervisorSession(appState.supervisorSession, appState.supervisors, appState.lines);
@@ -9474,12 +11597,19 @@ function renderHome() {
     headerLogoutBtn.classList.toggle("hidden", !showLogout);
     headerLogoutBtn.textContent = "Logout";
   }
+  if (managerSettingsTabBtn) {
+    const showManagerSettingsTab = !isSupervisor && managerSessionActive;
+    const managerSettingsActive = showManagerSettingsTab && appState.managerHomeTab === "settings";
+    managerSettingsTabBtn.classList.toggle("hidden", !showManagerSettingsTab);
+    managerSettingsTabBtn.classList.toggle("active", managerSettingsActive);
+    managerSettingsTabBtn.setAttribute("aria-pressed", String(managerSettingsActive));
+  }
   if (homeUserChip) {
     const showSupervisorTile = isSupervisor && Boolean(session);
     const showManagerTile = !isSupervisor && managerSessionActive;
     homeUserChip.classList.toggle("hidden", !(showManagerTile || showSupervisorTile));
     if (showSupervisorTile) {
-      const supervisorLabel = String(activeSupervisor?.name || "Supervisor").trim() || "Supervisor";
+      const supervisorLabel = String(activeSupervisor?.name || session?.name || session?.username || "Supervisor").trim() || "Supervisor";
       if (homeUserRole) homeUserRole.textContent = supervisorLabel;
       if (homeUserIdentity) homeUserIdentity.textContent = String(session?.username || "").trim();
       if (homeUserAvatar) homeUserAvatar.textContent = (supervisorLabel.charAt(0) || "S").toUpperCase();
@@ -9494,6 +11624,7 @@ function renderHome() {
   supervisorHome.classList.toggle("hidden", !isSupervisor);
   if (managerLoginSection) managerLoginSection.classList.toggle("hidden", isSupervisor || managerSessionActive);
   if (managerAppSection) managerAppSection.classList.toggle("hidden", isSupervisor || !managerSessionActive);
+  if (managerAppSection) managerAppSection.classList.toggle("is-settings-view", !isSupervisor && managerSessionActive && appState.managerHomeTab === "settings");
   modeManagerBtn.classList.toggle("active", !isSupervisor);
   modeSupervisorBtn.classList.toggle("active", isSupervisor);
   modeManagerBtn.setAttribute("aria-pressed", String(!isSupervisor));
@@ -9502,6 +11633,8 @@ function renderHome() {
   if (lineModeSupervisorBtn) lineModeSupervisorBtn.classList.toggle("active", isSupervisor);
   if (lineModeManagerBtn) lineModeManagerBtn.setAttribute("aria-pressed", String(!isSupervisor));
   if (lineModeSupervisorBtn) lineModeSupervisorBtn.setAttribute("aria-pressed", String(isSupervisor));
+  if (homeModeToggle) homeModeToggle.classList.add("hidden");
+  if (lineModeToggle) lineModeToggle.classList.add("hidden");
   supervisorMobileModeBtn.classList.toggle("hidden", true);
 
   if (!isSupervisor && !managerSessionActive) {
@@ -9577,7 +11710,237 @@ function renderHome() {
     if (sidebarBackdrop) sidebarBackdrop.classList.add("hidden");
   }
 
-  if (!isSupervisor) return;
+  if (productCatalogTable) {
+    refreshProductRowAssignmentSummaries(productCatalogTable);
+  }
+  syncRunProductInputsFromCatalog();
+  seedSampleActionsForSupervisors();
+
+  if (!isSupervisor) {
+    renderManagerDataSourcesList(dataSourcesList);
+    if (managerActionList) {
+      const managerActions = ensureSupervisorActionsState()
+        .slice()
+        .sort((a, b) => {
+          const statusDelta = actionStatusSortRank(a?.status) - actionStatusSortRank(b?.status);
+          if (statusDelta !== 0) return statusDelta;
+          const dueA = /^\d{4}-\d{2}-\d{2}$/.test(String(a?.dueDate || "").trim()) ? String(a.dueDate).trim() : "9999-12-31";
+          const dueB = /^\d{4}-\d{2}-\d{2}$/.test(String(b?.dueDate || "").trim()) ? String(b.dueDate).trim() : "9999-12-31";
+          const dueDelta = dueA.localeCompare(dueB);
+          if (dueDelta !== 0) return dueDelta;
+          const createdDelta = String(b?.createdAt || "").localeCompare(String(a?.createdAt || ""));
+          if (createdDelta !== 0) return createdDelta;
+          return String(a?.title || "").localeCompare(String(b?.title || ""), undefined, { sensitivity: "base" });
+        })
+        .slice(0, 400);
+      if (managerActionTicketEditId && !managerActions.some((action) => String(action?.id || "") === managerActionTicketEditId)) {
+        clearManagerActionTicketEdit();
+      }
+      const supervisors = (appState.supervisors || [])
+        .slice()
+        .sort((a, b) =>
+          String(a?.name || a?.username || "").localeCompare(String(b?.name || b?.username || ""), undefined, { sensitivity: "base" })
+        );
+      const assignmentOptions = [];
+      const assignmentSeen = new Set();
+      const pushAssignmentOption = (value, label) => {
+        const key = String(value || "").trim().toLowerCase();
+        if (assignmentSeen.has(key)) return;
+        assignmentSeen.add(key);
+        assignmentOptions.push({
+          value: key,
+          label: String(label || key || "Unassigned").trim() || "Unassigned"
+        });
+      };
+      pushAssignmentOption("", "Unassigned");
+      ACTION_SPECIAL_ASSIGNMENTS.forEach((assignment) => {
+        pushAssignmentOption(assignment.username, assignment.label);
+      });
+      supervisors.forEach((sup) => {
+        pushAssignmentOption(sup.username, sup.name || sup.username);
+      });
+      const supervisorOptionsHtml = (selectedUsername, selectedLabel = "") => {
+        const safeSelected = String(selectedUsername || "").trim().toLowerCase();
+        const hasSelected = assignmentOptions.some((option) => option.value === safeSelected);
+        const fallbackLabel = actionAssignmentLabel(safeSelected, selectedLabel);
+        const fallbackOption = safeSelected && !hasSelected
+          ? [`<option value="${htmlEscape(safeSelected)}" selected>${htmlEscape(fallbackLabel)}</option>`]
+          : [];
+        return [
+          ...assignmentOptions.map(
+            (option) =>
+              `<option value="${htmlEscape(option.value)}"${option.value === safeSelected ? " selected" : ""}>${htmlEscape(option.label)}</option>`
+          ),
+          ...fallbackOption,
+        ].join("");
+      };
+      const actionPriorityOptionsHtml = (selectedPriority) => {
+        const safeSelected = normalizeActionPriority(selectedPriority);
+        return ACTION_PRIORITY_OPTIONS.map(
+          (priority) => `<option value="${htmlEscape(priority)}"${priority === safeSelected ? " selected" : ""}>${htmlEscape(priority)}</option>`
+        ).join("");
+      };
+      const actionStatusOptionsHtml = (selectedStatus) => {
+        const safeSelected = normalizeActionStatus(selectedStatus);
+        return ACTION_STATUS_OPTIONS.map(
+          (status) => `<option value="${htmlEscape(status)}"${status === safeSelected ? " selected" : ""}>${htmlEscape(status)}</option>`
+        ).join("");
+      };
+      const actionEquipmentOptionsHtml = (line, selectedEquipmentId = "") => {
+        const safeSelected = String(selectedEquipmentId || "").trim();
+        const options = (line?.stages || []).map((stage, index) => ({
+          value: String(stage?.id || "").trim(),
+          label: stageDisplayName(stage, index)
+        }));
+        const hasSelected = options.some((option) => option.value === safeSelected);
+        const fallbackLabel = safeSelected ? stageNameByIdForLine(line, safeSelected) || safeSelected : "";
+        const fallbackOption = safeSelected && !hasSelected
+          ? [`<option value="${htmlEscape(safeSelected)}" selected>${htmlEscape(fallbackLabel)}</option>`]
+          : [];
+        return [
+          `<option value="">Related Equipment (optional)</option>`,
+          ...fallbackOption,
+          ...options.map(
+            (option) =>
+              `<option value="${htmlEscape(option.value)}"${option.value === safeSelected ? " selected" : ""}>${htmlEscape(option.label)}</option>`
+          )
+        ].join("");
+      };
+      const actionReasonCategoryOptionsHtml = (selectedCategory = "") => {
+        const safeSelected = normalizeActionReasonCategory(selectedCategory);
+        return [
+          `<option value="">Downtime Category (optional)</option>`,
+          ...ACTION_REASON_CATEGORIES.map(
+            (category) =>
+              `<option value="${htmlEscape(category)}"${category === safeSelected ? " selected" : ""}>${htmlEscape(category)}</option>`
+          )
+        ].join("");
+      };
+      const actionReasonDetailOptionsHtml = (line, selectedCategory = "", selectedDetail = "") => {
+        const safeCategory = normalizeActionReasonCategory(selectedCategory);
+        const safeDetail = String(selectedDetail || "").trim();
+        const options = safeCategory ? downtimeDetailOptions(line, safeCategory) : [];
+        const hasSelected = options.some((option) => option.value === safeDetail);
+        const fallbackLabel = safeCategory ? downtimeDetailLabel(line, safeCategory, safeDetail) || safeDetail : safeDetail;
+        const fallbackOption = safeDetail && !hasSelected
+          ? [`<option value="${htmlEscape(safeDetail)}" selected>${htmlEscape(fallbackLabel)}</option>`]
+          : [];
+        const placeholder = safeCategory
+          ? (safeCategory === "Equipment" ? "Downtime Reason / Stage" : "Downtime Reason")
+          : "Downtime Reason (optional)";
+        return [
+          `<option value="">${htmlEscape(placeholder)}</option>`,
+          ...fallbackOption,
+          ...options.map(
+            (option) =>
+              `<option value="${htmlEscape(option.value)}"${option.value === safeDetail ? " selected" : ""}>${htmlEscape(option.label)}</option>`
+          )
+        ].join("");
+      };
+
+      managerActionList.innerHTML = managerActions.length
+        ? `
+          <div class="pending-log-wrap supervisor-action-ticket-wrap manager-action-ticket-wrap">
+            <div class="pending-log-list supervisor-action-ticket-list manager-action-ticket-list">
+              ${managerActions
+                .map((action) => {
+                  const line = action.lineId && appState.lines[action.lineId] ? appState.lines[action.lineId] : null;
+                  const lineName = line?.name || "Unassigned";
+                  const relatedReasonCategory = normalizeActionReasonCategory(action.relatedReasonCategory);
+                  const relatedReasonDetail = relatedReasonCategory ? String(action.relatedReasonDetail || "").trim() : "";
+                  const createdBy = String(action.createdBy || action.supervisorName || "System").trim() || "System";
+                  const createdLabel = String(action.createdAt || "").replace("T", " ").slice(0, 16) || "-";
+                  const dueDateValue = /^\d{4}-\d{2}-\d{2}$/.test(String(action.dueDate || "").trim()) ? String(action.dueDate).trim() : "";
+                  const dueLabel = dueDateValue || "No due date";
+                  const relationSummary = actionRelationSummary(action, line);
+                  const description = String(action.description || "").trim() || "No description provided.";
+                  const title = String(action.title || "").trim() || "Untitled action";
+                  const priority = normalizeActionPriority(action.priority);
+                  const status = normalizeActionStatus(action.status);
+                  const editing = isManagerActionTicketEditRow(action.id);
+                  const ticketIdRaw = String(action.id || "").trim();
+                  const ticketId = ticketIdRaw ? ticketIdRaw.slice(-6).toUpperCase() : "N/A";
+                  return `
+                    <article class="pending-log-item supervisor-action-ticket manager-action-ticket" data-manager-action-row data-manager-line-id="${htmlEscape(
+                      action.lineId || ""
+                    )}">
+                      <div class="pending-log-meta">
+                        <h5>
+                          ${htmlEscape(title)}
+                          <span class="supervisor-action-ticket-id">#${htmlEscape(ticketId)}</span>
+                        </h5>
+                        <p class="supervisor-action-ticket-line">${htmlEscape(lineName)} | Due ${htmlEscape(dueLabel)} | Created ${htmlEscape(
+                          createdLabel
+                        )} by ${htmlEscape(createdBy)}</p>
+                        ${relationSummary ? `<p class="supervisor-action-ticket-relation">Related: ${htmlEscape(relationSummary)}</p>` : ""}
+                        <p class="supervisor-action-ticket-description">${htmlEscape(description)}</p>
+                        <div class="manager-action-ticket-edit-grid">
+                          <label class="manager-action-ticket-field">
+                            <span>Urgency</span>
+                            <select class="manager-action-priority-select" data-manager-action-priority${editing ? "" : " disabled"}>
+                              ${actionPriorityOptionsHtml(priority)}
+                            </select>
+                          </label>
+                          <label class="manager-action-ticket-field">
+                            <span>Status</span>
+                            <select class="manager-action-status-select" data-manager-action-status${editing ? "" : " disabled"}>
+                              ${actionStatusOptionsHtml(status)}
+                            </select>
+                          </label>
+                          <label class="manager-action-ticket-field">
+                            <span>Due Date</span>
+                            <input type="date" class="manager-action-due-date-input" data-manager-action-due-date value="${htmlEscape(
+                              dueDateValue
+                            )}"${editing ? "" : " disabled"} />
+                          </label>
+                          <label class="manager-action-ticket-field">
+                            <span>Assigned</span>
+                            <select class="manager-action-assign-select" data-manager-action-supervisor${editing ? "" : " disabled"}>
+                              ${supervisorOptionsHtml(action.supervisorUsername, action.supervisorName)}
+                            </select>
+                          </label>
+                        </div>
+                        <div class="manager-action-related-cell manager-action-ticket-related">
+                          <select class="manager-action-related-equipment-select" data-manager-action-related-equipment${editing ? "" : " disabled"}>
+                            ${actionEquipmentOptionsHtml(line, action.relatedEquipmentId)}
+                          </select>
+                          <select class="manager-action-reason-category-select" data-manager-action-reason-category${editing ? "" : " disabled"}>
+                            ${actionReasonCategoryOptionsHtml(relatedReasonCategory)}
+                          </select>
+                          <select class="manager-action-reason-detail-select" data-manager-action-reason-detail${
+                            editing && relatedReasonCategory ? "" : " disabled"
+                          }>
+                            ${actionReasonDetailOptionsHtml(line, relatedReasonCategory, relatedReasonDetail)}
+                          </select>
+                        </div>
+                      </div>
+                      <div class="pending-log-actions supervisor-action-ticket-badges manager-action-ticket-controls">
+                        <span class="supervisor-action-ticket-badge priority-${actionTicketToneKey(priority)}">${htmlEscape(priority)}</span>
+                        <span class="supervisor-action-ticket-badge status-${actionTicketToneKey(status)}">${htmlEscape(status)}</span>
+                        <div class="table-action-stack manager-action-actions-cell">
+                          ${
+                            editing
+                              ? `<button type="button" class="table-edit-pill is-save" data-manager-action-reassign="${htmlEscape(
+                                  action.id
+                                )}">Save</button>`
+                              : `<button type="button" class="table-edit-pill" data-manager-action-edit="${htmlEscape(action.id)}">Edit</button>`
+                          }
+                          <button type="button" class="table-edit-pill table-delete-pill" data-manager-action-delete="${htmlEscape(
+                            action.id
+                          )}">Delete</button>
+                        </div>
+                      </div>
+                    </article>
+                  `;
+                })
+                .join("")}
+            </div>
+          </div>
+        `
+        : `<p class="muted">No actions logged yet.</p>`;
+    }
+    return;
+  }
 
   const assignedLineShiftMap = normalizeSupervisorLineShifts(session?.assignedLineShifts, appState.lines, session?.assignedLineIds || []);
   let assignedIds = Object.keys(assignedLineShiftMap);
@@ -9589,7 +11952,7 @@ function renderHome() {
   appSection.classList.toggle("hidden", !session);
   if (!session) return;
 
-  const activeMainTab = ["supervisorDay", "supervisorData"].includes(appState.supervisorMainTab)
+  const activeMainTab = ["supervisorDay", "supervisorData", "supervisorActions"].includes(appState.supervisorMainTab)
     ? appState.supervisorMainTab
     : "supervisorDay";
   superMainTabBtns.forEach((btn) => {
@@ -9619,6 +11982,43 @@ function renderHome() {
     ? assignedIds.map((id) => `<option value="${id}">${appState.lines[id].name}</option>`).join("")
     : `<option value="">No assigned lines</option>`;
   lineSelect.value = appState.supervisorSelectedLineId || assignedIds[0] || "";
+  if (actionLineInput) {
+    actionLineInput.innerHTML = assignedIds.length
+      ? assignedIds.map((id) => `<option value="${id}">${htmlEscape(appState.lines[id]?.name || id)}</option>`).join("")
+      : `<option value="">No assigned lines</option>`;
+    const preferredActionLineId = assignedIds.includes(actionLineInput.value)
+      ? actionLineInput.value
+      : appState.supervisorSelectedLineId || assignedIds[0] || "";
+    actionLineInput.value = preferredActionLineId;
+    actionLineInput.disabled = !assignedIds.length;
+  }
+  if (actionReasonCategoryInput) {
+    setActionReasonCategoryOptions(actionReasonCategoryInput, actionReasonCategoryInput.value || "");
+  }
+  if (actionEquipmentInput || actionReasonDetailInput) {
+    const actionLine = actionLineInput?.value && appState.lines[actionLineInput.value] ? appState.lines[actionLineInput.value] : null;
+    if (actionEquipmentInput) {
+      setActionEquipmentOptions(actionEquipmentInput, actionLine, actionEquipmentInput.value || "");
+    }
+    if (actionReasonDetailInput) {
+      setActionReasonDetailOptions(
+        actionReasonDetailInput,
+        actionLine,
+        String(actionReasonCategoryInput?.value || ""),
+        actionReasonDetailInput.value || ""
+      );
+    }
+  }
+  if (actionPriorityInput && !ACTION_PRIORITY_OPTIONS.includes(actionPriorityInput.value)) {
+    actionPriorityInput.value = "Medium";
+  }
+  if (actionStatusInput && !ACTION_STATUS_OPTIONS.includes(actionStatusInput.value)) {
+    actionStatusInput.value = "Open";
+  }
+  if (actionDueDateInput && !actionDueDateInput.value) {
+    actionDueDateInput.value = todayISO();
+  }
+  syncRunProductInputsFromCatalog();
   svDateInputs.forEach((svDateInput) => {
     svDateInput.value = appState.supervisorSelectedDate;
   });
@@ -9983,10 +12383,20 @@ function renderHome() {
         .join("")
     : `<p class="muted">No supervisor submissions yet.</p>`;
 
+  const supervisorActions = supervisorActionsForUsername(session?.username).slice(0, 50);
+  const supervisorActionTicketsHtml = renderSupervisorActionTickets(supervisorActions);
+  if (actionList) {
+    actionList.innerHTML = supervisorActionTicketsHtml;
+  }
+  if (actionCards) {
+    actionCards.innerHTML = supervisorActionTicketsHtml;
+  }
+
   syncAllNowInputPrefixStates();
 }
 
 function renderAll() {
+  enforceAppVariantState();
   const managerSessionActive = Boolean(managerBackendSession.backendToken);
   if (appState.activeView === "line" && (appState.appMode !== "manager" || !managerSessionActive)) {
     appState.activeView = "home";
@@ -10105,6 +12515,7 @@ function showStartupLoading(message = "") {
 }
 
 async function bootstrapApp() {
+  enforceAppVariantState();
   const shouldRefreshSupervisor = appState.appMode === "supervisor" && Boolean(appState.supervisorSession?.backendToken);
   const shouldRefreshManager =
     !shouldRefreshSupervisor && (appState.appMode === "manager" || appState.activeView === "line") && Boolean(managerBackendSession.backendToken);
@@ -10144,6 +12555,7 @@ bootstrapApp();
 window.addEventListener("hashchange", () => {
   try {
     restoreRouteFromHash();
+    enforceAppVariantState();
     state = appState.lines[appState.activeLineId] || appState.lines[Object.keys(appState.lines)[0]] || null;
     if (state) appState.activeLineId = state.id;
     renderAll();

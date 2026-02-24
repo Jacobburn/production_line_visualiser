@@ -6,6 +6,9 @@
   "scripts": {
     "dev:css": "tailwindcss -i ./src/tailwind.css -o ./dist/tailwind.css --watch",
     "build:css": "tailwindcss -i ./src/tailwind.css -o ./dist/tailwind.css --minify",
+    "build:manager-site": "rm -rf deploy/manager && mkdir -p deploy/manager && cp app.js styles.css _redirects deploy/manager/ && cp -R assets deploy/manager/assets && cp index.html deploy/manager/index.html",
+    "build:supervisor-site": "rm -rf deploy/supervisor && mkdir -p deploy/supervisor && cp app.js styles.css _redirects deploy/supervisor/ && cp -R assets deploy/supervisor/assets && cp supervisor.html deploy/supervisor/index.html",
+    "build:sites": "npm run build:manager-site && npm run build:supervisor-site",
     "backend:dev": "npm --prefix backend run dev",
     "backend:start": "npm --prefix backend run start",
     "backend:migrate": "npm --prefix backend run migrate",

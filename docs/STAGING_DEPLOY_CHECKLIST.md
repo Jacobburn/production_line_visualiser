@@ -10,7 +10,8 @@
    - `DB_SSL_REJECT_UNAUTHORIZED=false`
    - `JWT_SECRET=<strong secret>`
    - `JWT_EXPIRES_IN=12h`
-   - `FRONTEND_ORIGIN=<staging frontend url>`
+   - `FRONTEND_ORIGINS=<comma-separated frontend urls>`
+     - Example: `FRONTEND_ORIGINS=https://clever-squirrel-e035dc.netlify.app,https://production-line-supervisor-app.netlify.app`
 3. Run migrations:
    - `npm --prefix backend run migrate`
 4. Seed once (optional for test users):

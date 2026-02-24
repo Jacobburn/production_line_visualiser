@@ -255,12 +255,14 @@ label {
 }
 
 input,
+textarea,
 select,
 button {
   font: inherit;
 }
 
 input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]):not([type="file"]),
+textarea,
 select {
   width: 100%;
   border: 1px solid var(--stroke);
@@ -1771,19 +1773,16 @@ button {
 
 .line-card.line-card-live-active {
   border-color: #67bb95;
-  box-shadow: 0 0 0 1px rgba(60, 154, 106, 0.18), 0 0 20px rgba(60, 154, 106, 0.34);
   background: #f6fcf9;
 }
 
 .line-card.line-card-live-warning {
   border-color: #d99a42;
-  box-shadow: 0 0 0 1px rgba(207, 137, 28, 0.2), 0 0 22px rgba(214, 146, 38, 0.34);
   background: #fffaf3;
 }
 
 .line-card.line-card-live-critical {
   border-color: #d76464;
-  box-shadow: 0 0 0 1px rgba(202, 64, 64, 0.24), 0 0 24px rgba(202, 64, 64, 0.36);
   background: #fff6f6;
 }
 
@@ -1896,6 +1895,10 @@ button {
   display: grid !important;
 }
 
+#supervisorAppSection.mobile-mode #supervisorActionCards {
+  display: grid !important;
+}
+
 .supervisor-main-tab-btn {
   min-width: 160px;
 }
@@ -1945,6 +1948,12 @@ button {
 
 #supervisorAppSection .form-grid button:not(.input-now-btn) {
   min-width: 170px;
+}
+
+#supervisorActionDescription {
+  grid-column: 1 / -1;
+  min-height: 150px;
+  resize: vertical;
 }
 
 #supervisorAppSection .table-wrap {
@@ -2245,6 +2254,68 @@ button {
 .manage-line-groups-modal-card {
   width: min(1000px, 96vw);
   padding: 1rem;
+}
+
+.manage-product-list-modal-card {
+  width: min(1380px, 97vw);
+  padding: 1rem;
+}
+
+.product-line-assign-modal-card {
+  width: min(560px, 94vw);
+  padding: 1rem;
+}
+
+#manageProductCatalogModal .modal-head {
+  align-items: center;
+  margin-bottom: 0.7rem;
+  padding-bottom: 0.62rem;
+  border-bottom: 1px solid #d8e1eb;
+}
+
+#manageProductCatalogModal .modal-head-actions {
+  justify-content: flex-end;
+}
+
+#productLineAssignModal .modal-head {
+  align-items: center;
+  margin-bottom: 0.7rem;
+  padding-bottom: 0.62rem;
+  border-bottom: 1px solid #d8e1eb;
+}
+
+.product-line-assign-product-wrap {
+  margin: 0 0 0.55rem;
+  color: #35495e;
+  font-size: 0.91rem;
+}
+
+.product-line-assign-list {
+  border: 1px solid #d6e1ec;
+  border-radius: 12px;
+  background: #f9fbfd;
+  max-height: 320px;
+  overflow: auto;
+  padding: 0.55rem;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.product-line-assign-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.4rem;
+  border-radius: 8px;
+}
+
+.product-line-assign-row:hover {
+  background: #eef4fb;
+}
+
+.product-line-assign-actions {
+  justify-content: flex-end;
+  margin-top: 0.65rem;
 }
 
 #manageLineGroupsModal .modal-head {
@@ -2719,6 +2790,47 @@ button {
   height: 40px;
 }
 
+.stage-data-source-hint {
+  grid-column: 1 / -1;
+  margin: -4px 0 2px;
+  font-size: 0.79rem;
+  line-height: 1.35;
+}
+
+.stage-data-source-hint.is-warning {
+  color: #b54708;
+}
+
+.connect-data-source-modal-card {
+  width: min(920px, 95vw);
+}
+
+.connect-data-source-form {
+  gap: 0.62rem;
+}
+
+.connect-data-source-field-group {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.62rem;
+}
+
+.connect-data-source-help {
+  grid-column: 1 / -1;
+  margin: -4px 0 0;
+  font-size: 0.8rem;
+  line-height: 1.34;
+}
+
+.connect-data-source-test-result.is-success {
+  color: #127042;
+}
+
+.connect-data-source-test-result.is-error {
+  color: #9f1c1c;
+}
+
 .run-crewing-actions {
   margin-top: 0.62rem;
   display: flex;
@@ -3139,6 +3251,124 @@ th {
   margin: 0.2rem 0 0;
 }
 
+.supervisor-action-ticket-wrap {
+  margin-top: 0.3rem;
+}
+
+.supervisor-action-ticket-list {
+  gap: 0.55rem;
+}
+
+.supervisor-action-ticket {
+  border-color: #cfdce8;
+  background: linear-gradient(180deg, #fbfdff 0%, #f4f8fc 100%);
+}
+
+.supervisor-action-ticket .pending-log-meta h5 {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  flex-wrap: wrap;
+}
+
+.supervisor-action-ticket-id {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.1rem 0.42rem;
+  border-radius: 999px;
+  border: 1px solid #d0dbe6;
+  background: #eef3f8;
+  color: #5f7286;
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+}
+
+.supervisor-action-ticket-line {
+  margin-top: 0.18rem;
+  color: #5d6f82;
+}
+
+.supervisor-action-ticket-relation {
+  margin-top: 0.16rem;
+  color: #4f647a;
+}
+
+.supervisor-action-ticket-description {
+  margin-top: 0.24rem;
+  color: #32485d;
+  line-height: 1.4;
+}
+
+.supervisor-action-ticket-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.34rem;
+}
+
+.supervisor-action-ticket-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.2rem 0.52rem;
+  border-radius: 999px;
+  border: 1px solid #c8d4e0;
+  background: #eef4f9;
+  color: #364c62;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.supervisor-action-ticket-badge.priority-low {
+  border-color: #95bbc8;
+  background: #e9f7fc;
+  color: #16667b;
+}
+
+.supervisor-action-ticket-badge.priority-medium {
+  border-color: #8ca4c9;
+  background: #eaf0fb;
+  color: #2d4d7d;
+}
+
+.supervisor-action-ticket-badge.priority-high {
+  border-color: #d6b178;
+  background: #fff4e3;
+  color: #8b5c12;
+}
+
+.supervisor-action-ticket-badge.priority-critical {
+  border-color: #d08b8b;
+  background: #fff0f0;
+  color: #9a2f2f;
+}
+
+.supervisor-action-ticket-badge.status-open {
+  border-color: #87b6d0;
+  background: #eaf5fd;
+  color: #1f5f85;
+}
+
+.supervisor-action-ticket-badge.status-in-progress {
+  border-color: #8ab6b0;
+  background: #e8f6f2;
+  color: #0f6656;
+}
+
+.supervisor-action-ticket-badge.status-blocked {
+  border-color: #d2a5a5;
+  background: #fff2f2;
+  color: #8f2b2b;
+}
+
+.supervisor-action-ticket-badge.status-completed {
+  border-color: #94be95;
+  background: #eef8ee;
+  color: #1f6a3b;
+}
+
 .crew-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
@@ -3278,6 +3508,18 @@ th {
     padding: 0.85rem;
   }
 
+  #manageProductCatalogModal .modal-card {
+    padding: 0.85rem;
+  }
+
+  #manageProductCatalogModal .modal-head-actions {
+    width: 100%;
+  }
+
+  #productLineAssignModal .modal-card {
+    padding: 0.85rem;
+  }
+
   .line-group-create-form {
     grid-template-columns: 1fr;
   }
@@ -3341,6 +3583,14 @@ th {
     width: 100%;
     justify-content: flex-end;
     justify-self: stretch;
+  }
+
+  .supervisor-action-ticket-badges {
+    justify-content: flex-start;
+  }
+
+  #homeView.dashboard-page #managerActionList .manager-action-ticket-controls {
+    align-items: flex-start;
   }
 
   .run-crewing-stage-row {
@@ -3733,6 +3983,28 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   font-size: 0.92rem;
 }
 
+#homeView.dashboard-page #managerSettingsTabBtn.home-settings-tab {
+  width: auto;
+  min-width: 96px;
+  min-height: 44px;
+  border-radius: var(--control-radius);
+  padding: 0 16px;
+  font-size: 0.92rem;
+  line-height: 1;
+  white-space: nowrap;
+  font-weight: 700;
+  border: 1px solid var(--stroke);
+  background: #ffffff;
+  color: var(--ink);
+}
+
+#homeView.dashboard-page #managerSettingsTabBtn.home-settings-tab.active {
+  border-color: var(--brand-dark);
+  background: var(--brand-dark);
+  color: #ffffff;
+  box-shadow: 0 2px 8px rgba(16, 24, 32, 0.24);
+}
+
 #lineWorkspace.app-shell {
   max-width: 1248px;
   padding: 24px;
@@ -3902,12 +4174,12 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   border-color: var(--brand-dark);
 }
 
-#lineWorkspace :is(button, input, select, .tab-btn):focus-visible {
+#lineWorkspace :is(button, input, textarea, select, .tab-btn):focus-visible {
   outline: none;
   box-shadow: var(--focus-home);
 }
 
-#homeView.dashboard-page #managerHome.dashboard-grid {
+#homeView.dashboard-page #managerAppSection.dashboard-grid {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
   column-gap: 16px;
@@ -4015,7 +4287,6 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 #homeView.dashboard-page .project-list-card {
   grid-column: span 12;
   min-height: 240px;
-  margin-bottom: 14px;
 }
 
 #homeView.dashboard-page .project-list-card .line-cards {
@@ -4161,14 +4432,311 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 #homeView.dashboard-page .add-line-card,
-#homeView.dashboard-page .manage-super-card {
-  grid-column: span 6;
-  min-height: 140px;
+#homeView.dashboard-page .manage-super-card,
+#homeView.dashboard-page .manage-products-card {
+  grid-column: span 4;
+  min-height: 170px;
 }
 
-#homeView.dashboard-page .manage-super-card {
-  min-height: 190px;
-  margin-bottom: 14px;
+#homeView.dashboard-page .data-sources-card {
+  grid-column: span 12;
+  min-height: 220px;
+}
+
+#homeView.dashboard-page #managerAppSection.dashboard-grid .manager-settings-card {
+  display: none;
+}
+
+#homeView.dashboard-page #managerAppSection.dashboard-grid.is-settings-view .manager-primary-card {
+  display: none;
+}
+
+#homeView.dashboard-page #managerAppSection.dashboard-grid.is-settings-view .manager-settings-card {
+  display: block;
+}
+
+#homeView.dashboard-page .data-sources-actions {
+  margin: 8px 0 12px;
+  justify-content: flex-end;
+}
+
+#homeView.dashboard-page .data-sources-actions button {
+  min-height: 38px;
+  padding: 0 14px;
+  font-weight: 700;
+}
+
+#homeView.dashboard-page .manager-actions-card {
+  grid-column: span 12;
+  min-height: 220px;
+}
+
+#homeView.dashboard-page .manage-products-card .products-table-wrap {
+  display: none;
+}
+
+#homeView.dashboard-page .manager-actions-card .muted {
+  margin: 10px 0;
+  line-height: 1.35;
+}
+
+#homeView.dashboard-page #dataSourcesList table {
+  min-width: 1240px;
+}
+
+#homeView.dashboard-page .data-source-status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0.1rem 0.56rem;
+  border-radius: 999px;
+  border: 1px solid #c8d5e2;
+  background: #eef3f8;
+  color: #445a70;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+#homeView.dashboard-page .data-source-status-pill.is-used {
+  border-color: #b8d6be;
+  background: #e8f5eb;
+  color: #245c34;
+}
+
+#homeView.dashboard-page .data-source-status-pill.is-conflict {
+  border-color: #dcb2b2;
+  background: #fdeeee;
+  color: #8f1f1f;
+}
+
+#homeView.dashboard-page .data-source-empty {
+  margin: 0.2rem 0 0;
+  color: var(--text-muted-home);
+  line-height: 1.35;
+}
+
+#homeView.dashboard-page .data-source-connection-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0.1rem 0.56rem;
+  border-radius: 999px;
+  border: 1px solid #c8d5e2;
+  background: #eef3f8;
+  color: #445a70;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+#homeView.dashboard-page .data-source-connection-pill.is-configured {
+  border-color: #b8d6be;
+  background: #e8f5eb;
+  color: #245c34;
+}
+
+#homeView.dashboard-page .data-source-test-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0.1rem 0.56rem;
+  border-radius: 999px;
+  border: 1px solid #c8d5e2;
+  background: #eef3f8;
+  color: #445a70;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+#homeView.dashboard-page .data-source-test-pill.is-success {
+  border-color: #b8d6be;
+  background: #e8f5eb;
+  color: #245c34;
+}
+
+#homeView.dashboard-page .data-source-test-pill.is-failed {
+  border-color: #dcb2b2;
+  background: #fdeeee;
+  color: #8f1f1f;
+}
+
+#homeView.dashboard-page .data-source-actions-cell {
+  white-space: nowrap;
+}
+
+#homeView.dashboard-page .data-source-test-btn {
+  min-height: 30px;
+  padding: 0 0.72rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-groups {
+  display: grid;
+  gap: 0.72rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-group {
+  border: 1px solid #d3deea;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f5f8fc 100%);
+  padding: 0.55rem;
+  display: grid;
+  gap: 0.45rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-group-overdue {
+  border-color: #d3a3a3;
+  background: linear-gradient(180deg, #fff9f9 0%, #fff3f3 100%);
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-group-urgent {
+  border-color: #d9b183;
+  background: linear-gradient(180deg, #fffaf3 0%, #fff5e8 100%);
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-group-completed {
+  border-color: #a8cab0;
+  background: linear-gradient(180deg, #f7fcf7 0%, #f0f8f0 100%);
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-group-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-group-head h3 {
+  margin: 0;
+  font-size: 0.91rem;
+  color: #20364a;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-group-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 28px;
+  padding: 0.14rem 0.48rem;
+  border-radius: 999px;
+  border: 1px solid #c8d4e0;
+  background: #edf3f8;
+  color: #465e74;
+  font-size: 0.74rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+#homeView.dashboard-page #managerActionList.table-wrap {
+  overflow: visible;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket-wrap {
+  margin-top: 0.3rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket-list {
+  gap: 0.62rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: flex-start;
+  gap: 0.75rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket .pending-log-meta {
+  display: grid;
+  gap: 0.04rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket-edit-grid {
+  margin-top: 0.42rem;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 0.42rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket-field {
+  display: grid;
+  gap: 0.16rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket-field > span {
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #4d6277;
+  letter-spacing: 0.01em;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket-related {
+  margin-top: 0.42rem;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 0.42rem;
+}
+
+#homeView.dashboard-page .manager-action-related-cell {
+  display: grid;
+  gap: 0.28rem;
+  min-width: 0;
+}
+
+#homeView.dashboard-page .manager-action-related-equipment-select,
+#homeView.dashboard-page .manager-action-reason-category-select,
+#homeView.dashboard-page .manager-action-reason-detail-select {
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  padding: 0.2rem 0.42rem;
+}
+
+#homeView.dashboard-page .manager-action-assign-cell {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+#homeView.dashboard-page .manager-action-assign-select {
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  padding: 0.2rem 0.42rem;
+}
+
+#homeView.dashboard-page .manager-action-priority-select,
+#homeView.dashboard-page .manager-action-status-select {
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  padding: 0.2rem 0.42rem;
+}
+
+#homeView.dashboard-page .manager-action-due-date-input {
+  min-width: 0;
+  width: 100%;
+  height: 32px;
+  padding: 0.2rem 0.42rem;
+}
+
+#homeView.dashboard-page #managerActionList .manager-action-ticket-controls {
+  flex-direction: column;
+  align-items: flex-end;
+  justify-content: flex-start;
+  gap: 0.42rem;
+}
+
+#homeView.dashboard-page .manager-action-actions-cell {
+  justify-content: flex-end;
+}
+
+#homeView.dashboard-page .manager-action-actions-cell .table-edit-pill {
+  height: 30px;
+  padding: 0 0.68rem;
 }
 
 #homeView.dashboard-page .dash-card-head {
@@ -4467,17 +5035,14 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 
 #homeView.dashboard-page .line-card.line-card-live-active:hover {
   border-color: #55a876;
-  box-shadow: 0 10px 24px rgba(57, 145, 100, 0.24);
 }
 
 #homeView.dashboard-page .line-card.line-card-live-warning:hover {
   border-color: #c88731;
-  box-shadow: 0 10px 24px rgba(198, 130, 30, 0.24);
 }
 
 #homeView.dashboard-page .line-card.line-card-live-critical:hover {
   border-color: #c25757;
-  box-shadow: 0 10px 24px rgba(190, 72, 72, 0.24);
 }
 
 #homeView.dashboard-page .line-card:focus-within {
@@ -4521,19 +5086,22 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 #homeView.dashboard-page .manage-super-card .action-row,
-#homeView.dashboard-page .add-line-card .action-row {
+#homeView.dashboard-page .add-line-card .action-row,
+#homeView.dashboard-page .manage-products-card .action-row {
   margin-top: 2px;
 }
 
 #homeView.dashboard-page .manage-super-card .action-row button,
-#homeView.dashboard-page .add-line-card .action-row button {
+#homeView.dashboard-page .add-line-card .action-row button,
+#homeView.dashboard-page .manage-products-card .action-row button {
   min-height: 40px;
   padding: 0 16px;
   font-weight: 700;
 }
 
 #homeView.dashboard-page .manage-super-card .muted,
-#homeView.dashboard-page .add-line-card .muted {
+#homeView.dashboard-page .add-line-card .muted,
+#homeView.dashboard-page .manage-products-card .muted {
   margin-top: 10px;
   line-height: 1.35;
 }
@@ -4587,7 +5155,125 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   background: var(--g-50);
 }
 
-#homeView.dashboard-page :is(button, input, select, .shift-option):focus-visible {
+:is(#homeView.dashboard-page, #manageProductCatalogModal) .products-table-wrap {
+  border: 1px solid var(--g-200);
+  border-radius: 14px;
+  overflow-y: auto;
+  overflow-x: hidden;
+  background: var(--g-0);
+  max-height: 460px;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--g-100);
+  color: var(--g-600);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  line-height: 1.25;
+  padding: 0.34rem 0.32rem;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td {
+  font-size: 11px;
+  color: var(--text-home);
+  vertical-align: top;
+  line-height: 1.25;
+  white-space: normal;
+  word-break: break-word;
+  padding: 0.34rem 0.32rem;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(1) {
+  width: 6%;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(2) {
+  width: 11%;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(3) {
+  width: 23%;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(4),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(5) {
+  width: 8%;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(6),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(7),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(8),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(9),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(10),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(11),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(12) {
+  width: 5%;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable :is(th, td):nth-child(13) {
+  width: 12%;
+  text-align: left;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(1) {
+  font-family: SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(2),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(3) {
+  word-break: break-word;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(6),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(7),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(9),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(10),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(11),
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:nth-child(12) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable tbody tr:nth-child(even) {
+  background: var(--g-50);
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable tr.product-row-editing td {
+  background: #fffaf0;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable tr.product-row-editing td:first-child {
+  box-shadow: inset 3px 0 0 #e6ac4a;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable td:last-child .table-action-stack {
+  justify-content: flex-start;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable .product-row-line-summary {
+  margin-top: 0.28rem;
+  font-size: 0.68rem;
+  color: #4b5f75;
+  line-height: 1.2;
+}
+
+:is(#homeView.dashboard-page, #manageProductCatalogModal) #productCatalogTable .table-inline-input {
+  min-width: 0;
+  font-size: 0.72rem;
+  padding: 0.22rem 0.3rem;
+}
+
+#homeView.dashboard-page :is(button, input, textarea, select, .shift-option):focus-visible {
   outline: none;
   box-shadow: var(--focus-home);
 }
@@ -4637,7 +5323,8 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 
   #homeView.dashboard-page .project-list-card,
   #homeView.dashboard-page .add-line-card,
-  #homeView.dashboard-page .manage-super-card {
+  #homeView.dashboard-page .manage-super-card,
+  #homeView.dashboard-page .manage-products-card {
     grid-column: span 6;
     grid-row: auto;
   }
@@ -4694,6 +5381,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
     font-size: 0.86rem;
   }
 
+  #homeView.dashboard-page #managerSettingsTabBtn.home-settings-tab,
   #homeView.dashboard-page #supervisorLogout.home-btn,
   #homeView.dashboard-page #supervisorMobileMode.ghost-btn {
     width: 100%;
@@ -4774,7 +5462,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
     max-width: none;
   }
 
-  #homeView.dashboard-page #managerHome.dashboard-grid {
+  #homeView.dashboard-page #managerAppSection.dashboard-grid {
     grid-template-columns: 1fr;
   }
 
@@ -4782,9 +5470,16 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   #homeView.dashboard-page .analytics-card,
   #homeView.dashboard-page .project-list-card,
   #homeView.dashboard-page .add-line-card,
-  #homeView.dashboard-page .manage-super-card {
+  #homeView.dashboard-page .manage-super-card,
+  #homeView.dashboard-page .manage-products-card,
+  #homeView.dashboard-page .data-sources-card,
+  #homeView.dashboard-page .manager-actions-card {
     grid-column: span 1;
     grid-row: auto;
+  }
+
+  .connect-data-source-field-group {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -4851,6 +5546,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
     padding: 0 6px;
   }
 
+  #homeView.dashboard-page #managerSettingsTabBtn.home-settings-tab,
   #homeView.dashboard-page #supervisorLogout.home-btn,
   #homeView.dashboard-page #supervisorMobileMode.ghost-btn {
     min-height: 40px;
