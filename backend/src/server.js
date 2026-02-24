@@ -645,8 +645,24 @@ async function hasLineShiftAccess(user, lineId, shift) {
        AND a.line_id = $2
        AND l.is_active = TRUE
        AND (
-         ($3 = 'Full Day' AND a.shift IN ('Day', 'Night'))
-         OR a.shift = $3
+         a.shift = $3
+         OR (
+           $3 = 'Full Day'
+           AND EXISTS (
+             SELECT 1
+             FROM supervisor_line_shift_assignments day_access
+             WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = $2
+               AND day_access.shift = 'Day'
+           )
+           AND EXISTS (
+             SELECT 1
+             FROM supervisor_line_shift_assignments night_access
+             WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = $2
+               AND night_access.shift = 'Night'
+           )
+         )
        )
      LIMIT 1`,
     [user.id, lineId, shift]
@@ -1907,7 +1923,23 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
             AND a_count.line_id = sl.line_id
             AND (
               a_count.shift = sl.shift
-              OR (sl.shift = 'Full Day' AND a_count.shift IN ('Day', 'Night'))
+              OR (
+                   sl.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = sl.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = sl.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
             )
         )
     ) AS "shiftCount"
@@ -2059,7 +2091,23 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
                  AND a_count.line_id = sl.line_id
                  AND (
                    a_count.shift = sl.shift
-                   OR (sl.shift = 'Full Day' AND a_count.shift IN ('Day', 'Night'))
+                   OR (
+                   sl.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = sl.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = sl.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
          ) AS "shiftCount"
@@ -2168,7 +2216,23 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
                  AND a.line_id = shift_logs.line_id
                  AND (
                    a.shift = shift_logs.shift
-                   OR (shift_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   shift_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = shift_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = shift_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
@@ -2210,7 +2274,23 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
                  AND a.line_id = shift_break_logs.line_id
                  AND (
                    a.shift = shift_break_logs.shift
-                   OR (shift_break_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   shift_break_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = shift_break_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = shift_break_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
@@ -2260,7 +2340,23 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
                  AND a.line_id = run_logs.line_id
                  AND (
                    a.shift = run_logs.shift
-                   OR (run_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   run_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = run_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = run_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
@@ -2306,7 +2402,23 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
                  AND a.line_id = downtime_logs.line_id
                  AND (
                    a.shift = downtime_logs.shift
-                   OR (downtime_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   downtime_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = downtime_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = downtime_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
@@ -3228,7 +3340,23 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
                  AND a.line_id = shift_logs.line_id
                  AND (
                    a.shift = shift_logs.shift
-                   OR (shift_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   shift_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = shift_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = shift_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY date ASC, shift ASC, submitted_at ASC`,
@@ -3268,7 +3396,23 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
                  AND a.line_id = shift_break_logs.line_id
                  AND (
                    a.shift = shift_break_logs.shift
-                   OR (shift_break_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   shift_break_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = shift_break_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = shift_break_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY date ASC, shift ASC, submitted_at ASC`,
@@ -3316,7 +3460,23 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
                  AND a.line_id = run_logs.line_id
                  AND (
                    a.shift = run_logs.shift
-                   OR (run_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   run_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = run_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = run_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY date ASC, shift ASC, submitted_at ASC`,
@@ -3360,7 +3520,23 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
                  AND a.line_id = downtime_logs.line_id
                  AND (
                    a.shift = downtime_logs.shift
-                   OR (downtime_logs.shift = 'Full Day' AND a.shift IN ('Day', 'Night'))
+                   OR (
+                   downtime_logs.shift = 'Full Day'
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments day_access
+                     WHERE day_access.supervisor_user_id = $1
+                       AND day_access.line_id = downtime_logs.line_id
+                       AND day_access.shift = 'Day'
+                   )
+                   AND EXISTS (
+                     SELECT 1
+                     FROM supervisor_line_shift_assignments night_access
+                     WHERE night_access.supervisor_user_id = $1
+                       AND night_access.line_id = downtime_logs.line_id
+                       AND night_access.shift = 'Night'
+                   )
+                 )
                  )
              )
            ORDER BY date ASC, shift ASC, submitted_at ASC`,

@@ -3698,10 +3698,41 @@ async function ensureBackendStageId(localLineId, localStageId, session) {
   if (!backendLineId) return "";
   const payload = await apiRequest(`/api/lines/${backendLineId}`, { token: session.backendToken });
   const backendStages = Array.isArray(payload?.stages) ? payload.stages : [];
-  const localStage = (appState.lines[localLineId]?.stages || []).find((stage) => stage.id === localStageId);
+  const localStages = appState.lines[localLineId]?.stages || [];
+  const localStage = localStages.find((stage) => stage.id === localStageId);
   if (!localStage) return "";
-  const localName = stageNameCore(localStage.name);
-  const matched = backendStages.find((stage) => stageNameCore(stage.stageName) === localName);
+  let matched = null;
+  const localStageIdRaw = String(localStage?.id || "").trim();
+  if (UUID_RE.test(localStageIdRaw)) {
+    const byId = backendStages.find((stage) => String(stage?.id || "").trim() === localStageIdRaw);
+    if (byId?.id && UUID_RE.test(String(byId.id).trim())) matched = byId;
+  }
+  const localIndex = localStages.findIndex((stage) => stage.id === localStageId);
+  if (!matched && localIndex >= 0) {
+    const expectedOrder = localIndex + 1;
+    const byOrder = backendStages.find(
+      (stage) =>
+        Number(stage?.stageOrder) === expectedOrder
+        && UUID_RE.test(String(stage?.id || "").trim())
+    );
+    if (byOrder) matched = byOrder;
+  }
+  if (!matched) {
+    const localName = stageNameCore(localStage.name);
+    const byName = backendStages.filter(
+      (stage) =>
+        stageNameCore(stage?.stageName) === localName
+        && UUID_RE.test(String(stage?.id || "").trim())
+    );
+    if (byName.length === 1) {
+      [matched] = byName;
+    } else if (byName.length > 1 && localIndex >= 0) {
+      const expectedOrder = localIndex + 1;
+      matched = byName
+        .slice()
+        .sort((left, right) => Math.abs(num(left?.stageOrder) - expectedOrder) - Math.abs(num(right?.stageOrder) - expectedOrder))[0];
+    }
+  }
   if (!matched?.id || !UUID_RE.test(matched.id)) return "";
   session.backendStageMap = session.backendStageMap || {};
   session.backendStageMap[key] = matched.id;
@@ -3807,8 +3838,6 @@ async function patchManagerDowntimeLog(logId, payload) {
     method: "PATCH",
     token: session.backendToken,
     body: {
-      date: payload.date,
-      shift: payload.shift,
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
       equipmentStageId: safeEquipmentStageId,
@@ -4218,8 +4247,8 @@ function setDowntimeDetailOptions(selectNode, line, category, selectedValue = ""
   const options = downtimeDetailOptions(line, category);
   const placeholder = category === "Equipment" ? "Select Stage" : "Select Reason";
   selectNode.innerHTML = [
-    `<option value="">${placeholder}</option>`,
-    ...options.map((option) => `<option value="${option.value}">${option.label}</option>`)
+    `<option value="">${htmlEscape(placeholder)}</option>`,
+    ...options.map((option) => `<option value="${htmlEscape(option.value)}">${htmlEscape(option.label)}</option>`)
   ].join("");
   if (selectedValue && options.some((option) => option.value === selectedValue)) {
     selectNode.value = selectedValue;
@@ -9303,13 +9332,11 @@ function bindForms() {
         alert("Shift row could not be found. Refresh and try again.");
         return;
       }
-      const date = inlineValue(rowNode, "date");
-      const shift = inlineValue(rowNode, "shift");
+      const date = String(row.date || "").trim();
+      const shift = String(row.shift || "").trim();
       const crewOnShift = Math.max(0, Math.floor(num(inlineValue(rowNode, "crewOnShift"))));
       const startTime = inlineValue(rowNode, "startTime");
       const finishTime = inlineValue(rowNode, "finishTime");
-      const breakCount = Math.max(0, Math.floor(num(inlineValue(rowNode, "breakCount"))));
-      const breakTimeMins = Math.max(0, num(inlineValue(rowNode, "breakTimeMins")));
       const notes = inlineValue(rowNode, "notes");
       if (!rowIsValidDateShift(date, shift)) {
         alert("Date/shift are invalid.");
@@ -9319,72 +9346,21 @@ function bindForms() {
         alert("Times must be HH:MM (24h).");
         return;
       }
-      const payload = { date, shift, crewOnShift, startTime, finishTime, notes };
+      const payload = { crewOnShift, startTime, finishTime, notes };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
-        const toHHMM = (minutes) => {
-          const minsPerDay = 24 * 60;
-          const normalized = ((Math.floor(num(minutes)) % minsPerDay) + minsPerDay) % minsPerDay;
-          const hh = String(Math.floor(normalized / 60)).padStart(2, "0");
-          const mm = String(normalized % 60).padStart(2, "0");
-          return `${hh}:${mm}`;
-        };
-        const existingBreakRows = Array.isArray(state.breakRows) ? state.breakRows : [];
-        const hasShiftLinkedBreaks = existingBreakRows.some((breakRow) => String(breakRow?.shiftLogId || "") === String(row.id || ""));
-        const belongsToEditedShift = (breakRow) => {
-          const shiftLogId = String(breakRow?.shiftLogId || "");
-          if (shiftLogId) return shiftLogId === String(row.id || "");
-          if (hasShiftLinkedBreaks) return false;
-          return String(breakRow?.date || "") === String(row.date || "") && String(breakRow?.shift || "") === String(row.shift || "");
-        };
-        const retainedBreakRows = existingBreakRows.filter((breakRow) => !belongsToEditedShift(breakRow));
-        const generatedBreakRows = [];
-        if (breakCount > 0) {
-          const shiftDuration = Math.max(1, Math.floor(diffMinutes(startTime, finishTime) || 0));
-          const totalBreak = Math.max(0, Math.round(breakTimeMins));
-          const base = Math.floor(totalBreak / breakCount);
-          let remainder = totalBreak - base * breakCount;
-          const durations = Array.from({ length: breakCount }, () => {
-            const duration = base + (remainder > 0 ? 1 : 0);
-            if (remainder > 0) remainder -= 1;
-            return duration;
-          });
-          const totalAssigned = durations.reduce((sum, duration) => sum + duration, 0);
-          const totalGapSpace = Math.max(0, shiftDuration - totalAssigned);
-          const gapBase = Math.floor(totalGapSpace / (breakCount + 1));
-          let gapRemainder = totalGapSpace - gapBase * (breakCount + 1);
-          const shiftStartMins = parseTimeToMinutes(startTime);
-          let cursor = Number.isFinite(shiftStartMins) ? shiftStartMins : 0;
-          durations.forEach((duration, index) => {
-            const leadingGap = gapBase + (gapRemainder > 0 ? 1 : 0);
-            if (gapRemainder > 0) gapRemainder -= 1;
-            cursor += leadingGap;
-            const breakStart = toHHMM(cursor);
-            const breakFinish = toHHMM(cursor + duration);
-            generatedBreakRows.push({
-              id: makeLocalLogId("break"),
-              lineId: state.id,
-              date,
-              shift,
-              shiftLogId: row.id || "",
-              breakStart,
-              breakFinish,
-              breakMins: duration,
-              submittedBy: "manager",
-              submittedAt: nowIso()
-            });
-            cursor += duration;
-            if (index === durations.length - 1) return;
-          });
-        }
-
         if (canPatchServer) {
           const saved = await patchManagerShiftLog(logId, payload);
-          Object.assign(row, payload, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+          Object.assign(row, payload, {
+            submittedBy: "manager",
+            submittedAt: saved?.submittedAt || nowIso()
+          });
         } else {
-          Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
+          Object.assign(row, payload, {
+            submittedBy: "manager",
+            submittedAt: nowIso()
+          });
         }
-        state.breakRows = [...retainedBreakRows, ...generatedBreakRows];
         clearManagerLogInlineEdit();
         addAudit(state, "MANAGER_SHIFT_EDIT", `Manager edited shift row for ${row.date} (${row.shift})`);
         saveState();
@@ -9401,7 +9377,7 @@ function bindForms() {
         alert("Run row could not be found. Refresh and try again.");
         return;
       }
-      const date = inlineValue(rowNode, "date");
+      const date = String(row.date || "").trim();
       const product = catalogProductCanonicalName(String(inlineValue(rowNode, "product") || "").trim());
       const productionStartTime = inlineValue(rowNode, "productionStartTime");
       const finishTime = inlineValue(rowNode, "finishTime");
@@ -9430,9 +9406,6 @@ function bindForms() {
       const existingRunPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, backendShift, { fallbackToIdeal: false });
       const runCrewingPattern = Object.keys(runPatternFromEdit).length ? runPatternFromEdit : existingRunPattern;
       const payload = {
-        lineId: state.id,
-        date,
-        shift: backendShift,
         product,
         setUpStartTime: "",
         productionStartTime,
@@ -9445,14 +9418,26 @@ function bindForms() {
       try {
         if (canPatchServer) {
           const saved = await patchManagerRunLog(logId, payload);
-          Object.assign(row, payload, {
+          Object.assign(row, {
+            product,
+            setUpStartTime: "",
+            productionStartTime,
+            finishTime,
+            unitsProduced,
+            notes,
             shift: "",
             runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
             submittedBy: "manager",
             submittedAt: saved?.submittedAt || nowIso()
           });
         } else {
-          Object.assign(row, payload, {
+          Object.assign(row, {
+            product,
+            setUpStartTime: "",
+            productionStartTime,
+            finishTime,
+            unitsProduced,
+            notes,
             shift: "",
             runCrewingPattern,
             submittedBy: "manager",
@@ -9475,7 +9460,7 @@ function bindForms() {
         alert("Downtime row could not be found. Refresh and try again.");
         return;
       }
-      const date = inlineValue(rowNode, "date");
+      const date = String(row.date || "").trim();
       const downtimeStart = inlineValue(rowNode, "downtimeStart");
       const downtimeFinish = inlineValue(rowNode, "downtimeFinish");
       const reasonCategory = inlineValue(rowNode, "reasonCategory");
@@ -9512,7 +9497,6 @@ function bindForms() {
       const shift = inferShiftForLog(state, date, downtimeStart, row.shift || state.selectedShift || "Day");
       const reason = buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote);
       const updatedValues = {
-        date,
         downtimeStart,
         downtimeFinish,
         equipment,
@@ -9524,8 +9508,8 @@ function bindForms() {
       };
       const payload = {
         lineId: state.id,
-        date,
-        shift,
+        date, // Used for local validation only.
+        shift, // Used for local validation/inference only.
         ...updatedValues
       };
       const canPatchServer = UUID_RE.test(String(logId || ""));
@@ -10219,7 +10203,16 @@ function renderTable(tableId, columns, rows, fieldMap) {
     .map((row) => {
       const rowClass = String(row?.__rowClass || "").trim();
       const rowClassAttr = rowClass ? ` class="${htmlEscape(rowClass)}"` : "";
-      return `<tr${rowClassAttr}>${columns.map((col) => `<td>${formatTableCellValue(row[fieldMap[col]])}</td>`).join("")}</tr>`;
+      const htmlFields = new Set(Array.isArray(row?.__htmlFields) ? row.__htmlFields.map((field) => String(field || "")) : []);
+      const cells = columns
+        .map((col) => {
+          const field = String(fieldMap[col] || "");
+          const value = row?.[field];
+          if (field && htmlFields.has(field)) return `<td>${String(value ?? "")}</td>`;
+          return `<td>${htmlEscape(formatTableCellValue(value))}</td>`;
+        })
+        .join("");
+      return `<tr${rowClassAttr}>${cells}</tr>`;
     })
     .join("");
 
@@ -11523,23 +11516,19 @@ function renderTrackingTables() {
     const hasOpenBreak = openBreakByShiftLogId.has(String(row.id || ""));
     const shiftPending = isPendingShiftLogRow(row);
     const pending = shiftPending || hasOpenBreak;
+    const htmlFields = ["action"];
+    if (editing) htmlFields.push("crewOnShift", "startTime", "finishTime", "notes");
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
-      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
-      shift: editing
-        ? inlineSelectHtml(
-            "shift",
-            String(row.shift || ""),
-            SHIFT_OPTIONS.map((option) => ({ value: option, label: option })),
-            { placeholder: "Shift" }
-          )
-        : row.shift,
+      __htmlFields: htmlFields,
+      date: row.date,
+      shift: row.shift,
       crewOnShift: editing ? inlineInputHtml("crewOnShift", Math.max(0, num(row.crewOnShift)), { type: "number", min: "0", step: "1" }) : row.crewOnShift,
       startTime: editing ? inlineInputHtml("startTime", String(row.startTime || ""), { placeholder: "HH:MM" }) : row.startTime,
       finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
-      breakCount: editing ? inlineInputHtml("breakCount", breakCount, { type: "number", min: "0", step: "1" }) : breakCount,
-      breakTimeMins: editing ? inlineInputHtml("breakTimeMins", breakTimeMins, { type: "number", min: "0", step: "0.1" }) : breakTimeMins,
+      breakCount,
+      breakTimeMins,
       notes: editing ? inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" }) : String(row.notes || ""),
       submittedBy: managerLogSubmittedByLabel(row),
       action: actionHtml("shift", row, { editing, pending: shiftPending })
@@ -11563,6 +11552,8 @@ function renderTrackingTables() {
   const displayRunRows = sortNewestFirst(data.runRows, "productionStartTime").map((row) => {
     const editing = isInlineEditing("run", String(row.id || ""));
     const pending = isPendingRunLogRow(row);
+    const htmlFields = ["action"];
+    if (editing) htmlFields.push("product", "productionStartTime", "finishTime", "unitsProduced", "notes");
     const patternShift = inferShiftForLog(state, String(row.date || todayISO()), String(row.productionStartTime || ""), state.selectedShift || "Day");
     const runPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, patternShift, { fallbackToIdeal: false });
     const runPatternRaw = Object.keys(runPattern).length ? JSON.stringify(runPattern) : "";
@@ -11570,7 +11561,8 @@ function renderTrackingTables() {
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
-      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
+      __htmlFields: htmlFields,
+      date: row.date,
       assignedShift: resolveTimedLogShiftLabel(row, state, "productionStartTime", "finishTime"),
       product: editing
         ? `
@@ -11616,6 +11608,8 @@ function renderTrackingTables() {
   const displayDowntimeRows = sortNewestFirst(data.downtimeRows, "downtimeStart").map((row) => {
     const editing = isInlineEditing("downtime", String(row.id || ""));
     const pending = isPendingDowntimeLogRow(row);
+    const htmlFields = ["action"];
+    if (editing) htmlFields.push("downtimeStart", "downtimeFinish", "equipment", "reason", "notes");
     const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
     const reasonCategory = String(row.reasonCategory || parsedReason.reasonCategory || "");
     const reasonDetail = String(row.reasonDetail || parsedReason.reasonDetail || "");
@@ -11627,7 +11621,8 @@ function renderTrackingTables() {
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
-      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
+      __htmlFields: htmlFields,
+      date: row.date,
       assignedShift: resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish"),
       downtimeStart: editing ? inlineInputHtml("downtimeStart", String(row.downtimeStart || ""), { placeholder: "HH:MM" }) : row.downtimeStart,
       downtimeFinish: editing ? inlineInputHtml("downtimeFinish", String(row.downtimeFinish || ""), { placeholder: "HH:MM" }) : row.downtimeFinish,
@@ -12263,12 +12258,12 @@ function renderHome() {
   supervisorMobileModeBtn.classList.toggle("active", Boolean(appState.supervisorMobileMode));
   supervisorMobileModeBtn.textContent = appState.supervisorMobileMode ? "Mobile Mode On" : "Mobile Mode";
   lineSelect.innerHTML = assignedIds.length
-    ? assignedIds.map((id) => `<option value="${id}">${appState.lines[id].name}</option>`).join("")
+    ? assignedIds.map((id) => `<option value="${htmlEscape(id)}">${htmlEscape(appState.lines[id]?.name || id)}</option>`).join("")
     : `<option value="">No assigned lines</option>`;
   lineSelect.value = appState.supervisorSelectedLineId || assignedIds[0] || "";
   if (actionLineInput) {
     actionLineInput.innerHTML = assignedIds.length
-      ? assignedIds.map((id) => `<option value="${id}">${htmlEscape(appState.lines[id]?.name || id)}</option>`).join("")
+      ? assignedIds.map((id) => `<option value="${htmlEscape(id)}">${htmlEscape(appState.lines[id]?.name || id)}</option>`).join("")
       : `<option value="">No assigned lines</option>`;
     const preferredActionLineId = assignedIds.includes(actionLineInput.value)
       ? actionLineInput.value
