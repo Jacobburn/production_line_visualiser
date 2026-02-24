@@ -4724,13 +4724,15 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 }
 
 #homeView.dashboard-page #managerActionList .manager-action-ticket-controls {
-  flex-direction: column;
-  align-items: flex-end;
-  justify-content: flex-start;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: flex-end;
   gap: 0.42rem;
 }
 
 #homeView.dashboard-page .manager-action-actions-cell {
+  flex-basis: 100%;
   justify-content: flex-end;
 }
 

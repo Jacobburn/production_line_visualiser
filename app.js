@@ -11874,16 +11874,19 @@ function renderHome() {
                         )} by ${htmlEscape(createdBy)}</p>
                         ${relationSummary ? `<p class="supervisor-action-ticket-relation">Related: ${htmlEscape(relationSummary)}</p>` : ""}
                         <p class="supervisor-action-ticket-description">${htmlEscape(description)}</p>
+                        ${
+                          editing
+                            ? `
                         <div class="manager-action-ticket-edit-grid">
                           <label class="manager-action-ticket-field">
                             <span>Urgency</span>
-                            <select class="manager-action-priority-select" data-manager-action-priority${editing ? "" : " disabled"}>
+                            <select class="manager-action-priority-select" data-manager-action-priority>
                               ${actionPriorityOptionsHtml(priority)}
                             </select>
                           </label>
                           <label class="manager-action-ticket-field">
                             <span>Status</span>
-                            <select class="manager-action-status-select" data-manager-action-status${editing ? "" : " disabled"}>
+                            <select class="manager-action-status-select" data-manager-action-status>
                               ${actionStatusOptionsHtml(status)}
                             </select>
                           </label>
@@ -11891,28 +11894,31 @@ function renderHome() {
                             <span>Due Date</span>
                             <input type="date" class="manager-action-due-date-input" data-manager-action-due-date value="${htmlEscape(
                               dueDateValue
-                            )}"${editing ? "" : " disabled"} />
+                            )}" />
                           </label>
                           <label class="manager-action-ticket-field">
                             <span>Assigned</span>
-                            <select class="manager-action-assign-select" data-manager-action-supervisor${editing ? "" : " disabled"}>
+                            <select class="manager-action-assign-select" data-manager-action-supervisor>
                               ${supervisorOptionsHtml(action.supervisorUsername, action.supervisorName)}
                             </select>
                           </label>
                         </div>
                         <div class="manager-action-related-cell manager-action-ticket-related">
-                          <select class="manager-action-related-equipment-select" data-manager-action-related-equipment${editing ? "" : " disabled"}>
+                          <select class="manager-action-related-equipment-select" data-manager-action-related-equipment>
                             ${actionEquipmentOptionsHtml(line, action.relatedEquipmentId)}
                           </select>
-                          <select class="manager-action-reason-category-select" data-manager-action-reason-category${editing ? "" : " disabled"}>
+                          <select class="manager-action-reason-category-select" data-manager-action-reason-category>
                             ${actionReasonCategoryOptionsHtml(relatedReasonCategory)}
                           </select>
                           <select class="manager-action-reason-detail-select" data-manager-action-reason-detail${
-                            editing && relatedReasonCategory ? "" : " disabled"
+                            relatedReasonCategory ? "" : " disabled"
                           }>
                             ${actionReasonDetailOptionsHtml(line, relatedReasonCategory, relatedReasonDetail)}
                           </select>
                         </div>
+                      `
+                            : ""
+                        }
                       </div>
                       <div class="pending-log-actions supervisor-action-ticket-badges manager-action-ticket-controls">
                         <span class="supervisor-action-ticket-badge priority-${actionTicketToneKey(priority)}">${htmlEscape(priority)}</span>
