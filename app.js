@@ -9339,8 +9339,11 @@ function bindForms() {
     if (!isInlineEditing && !hasInlineFields) return;
 
     if (type === "shift") {
-      const row = (state.shiftRows || []).find((item) => item.id === logId);
-      if (!row) return;
+      const row = (state.shiftRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+      if (!row) {
+        alert("Shift row could not be found. Refresh and try again.");
+        return;
+      }
       const date = inlineValue(rowNode, "date");
       const shift = inlineValue(rowNode, "shift");
       const crewOnShift = Math.max(0, Math.floor(num(inlineValue(rowNode, "crewOnShift"))));
@@ -9434,8 +9437,11 @@ function bindForms() {
     }
 
     if (type === "run") {
-      const row = (state.runRows || []).find((item) => item.id === logId);
-      if (!row) return;
+      const row = (state.runRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+      if (!row) {
+        alert("Run row could not be found. Refresh and try again.");
+        return;
+      }
       const date = inlineValue(rowNode, "date");
       const product = catalogProductCanonicalName(String(inlineValue(rowNode, "product") || "").trim());
       const productionStartTime = inlineValue(rowNode, "productionStartTime");
@@ -9505,8 +9511,11 @@ function bindForms() {
     }
 
     if (type === "downtime") {
-      const row = (state.downtimeRows || []).find((item) => item.id === logId);
-      if (!row) return;
+      const row = (state.downtimeRows || []).find((item) => String(item?.id || "") === String(logId || ""));
+      if (!row) {
+        alert("Downtime row could not be found. Refresh and try again.");
+        return;
+      }
       const date = inlineValue(rowNode, "date");
       const downtimeStart = inlineValue(rowNode, "downtimeStart");
       const downtimeFinish = inlineValue(rowNode, "downtimeFinish");
