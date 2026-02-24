@@ -2926,7 +2926,9 @@ function optionalStrictTimeValid(value) {
 }
 
 function isPendingRunLogRow(row) {
-  return strictTimeValid(row?.productionStartTime) && strictTimeValid(row?.finishTime) && row.productionStartTime === row.finishTime;
+  const startTime = String(row?.productionStartTime || "").trim();
+  const finishTime = String(row?.finishTime || "").trim();
+  return strictTimeValid(startTime) && (finishTime === "" || (strictTimeValid(finishTime) && startTime === finishTime));
 }
 
 function isPendingShiftLogRow(row) {
@@ -6921,9 +6923,14 @@ function bindHome() {
   };
 
   const isOpenRunRow = (row) =>
-    strictTimeValid(row?.productionStartTime) &&
-    strictTimeValid(row?.finishTime) &&
-    row.productionStartTime === row.finishTime;
+    strictTimeValid(String(row?.productionStartTime || "").trim()) &&
+    (
+      String(row?.finishTime || "").trim() === ""
+      || (
+        strictTimeValid(String(row?.finishTime || "").trim())
+        && String(row?.productionStartTime || "").trim() === String(row?.finishTime || "").trim()
+      )
+    );
 
   const isOpenShiftRow = (row) =>
     strictTimeValid(row?.startTime) &&
@@ -7514,8 +7521,8 @@ function bindHome() {
 
     const date = document.getElementById("superRunDate").value || todayISO();
     const productInput = String(document.getElementById("superRunProduct").value || "").trim();
-    const prodStartInput = document.getElementById("superRunProdStart").value || "";
-    const finishInput = document.getElementById("superRunFinish").value || "";
+    const prodStartInput = String(document.getElementById("superRunProdStart").value || "").trim();
+    const finishInput = String(document.getElementById("superRunFinish").value || "").trim();
     const unitsRaw = document.getElementById("superRunUnits").value;
     const notesInput = String(document.getElementById("superRunNotes")?.value || "").trim();
 
@@ -7553,7 +7560,7 @@ function bindHome() {
     }
 
     const productionStartTime = prodStartInput || existing?.productionStartTime || nowTimeHHMM();
-    const finishTime = finishInput || (complete ? nowTimeHHMM() : productionStartTime);
+    const finishTime = complete ? (finishInput || nowTimeHHMM()) : finishInput;
     const unitsProduced = unitsRaw === ""
       ? Math.max(0, num(existing?.unitsProduced))
       : Math.max(0, num(unitsRaw));
@@ -7565,12 +7572,21 @@ function bindHome() {
       existing?.assignedShift || existing?.shift || appState.supervisorSelectedShift || "Day"
     );
 
-    if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
-      alert("Production start and finish must be HH:MM (24h).");
+    if (!strictTimeValid(productionStartTime)) {
+      alert("Production start must be HH:MM (24h).");
       return;
     }
-    if (!complete && finishTime !== productionStartTime) {
-      alert("Open run logs keep finish equal to start. Use the Finalise pill on the log when the run ends.");
+    if (complete) {
+      if (!strictTimeValid(finishTime)) {
+        alert("Run finish must be HH:MM (24h).");
+        return;
+      }
+      if (finishTime === productionStartTime) {
+        alert("Finish time must be different from start time.");
+        return;
+      }
+    } else if (finishTime !== "") {
+      alert("Leave finish empty while the run is in progress. Use Finalise when the run ends.");
       return;
     }
     if (!supervisorCanAccessShift(session, lineId, backendShift)) {
@@ -9800,8 +9816,8 @@ function bindForms() {
         alert("Product must be selected from Manage Products.");
         return;
       }
-      if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
-        alert("Times must be HH:MM (24h).");
+      if (!strictTimeValid(productionStartTime) || !optionalStrictTimeValid(finishTime)) {
+        alert("Start must be HH:MM (24h). Finish must be HH:MM (24h) or empty.");
         return;
       }
       const runPatternRaw = inlineValue(rowNode, "runCrewingPattern");
@@ -12847,9 +12863,14 @@ function renderHome() {
       return a >= b ? row : latest;
     }, null);
   const isRunOpen = (row) =>
-    strictTimeValid(row?.productionStartTime) &&
-    strictTimeValid(row?.finishTime) &&
-    row.productionStartTime === row.finishTime;
+    strictTimeValid(String(row?.productionStartTime || "").trim()) &&
+    (
+      String(row?.finishTime || "").trim() === ""
+      || (
+        strictTimeValid(String(row?.finishTime || "").trim())
+        && String(row?.productionStartTime || "").trim() === String(row?.finishTime || "").trim()
+      )
+    );
   const isDownOpen = (row) =>
     strictTimeValid(row?.downtimeStart) &&
     strictTimeValid(row?.downtimeFinish) &&
@@ -13102,7 +13123,7 @@ function renderHome() {
       if (!line) return [];
       if (activeTab === "superRun") {
         return (line.runRows || [])
-          .filter((row) => row.submittedAt)
+          .filter((row) => row.submittedAt && supervisorOwnsPendingLogRow(row, session))
           .map((row) => ({
             lineName: line.name,
             date: row.date,
@@ -13115,7 +13136,7 @@ function renderHome() {
       }
       if (activeTab === "superDown") {
         return (line.downtimeRows || [])
-          .filter((row) => row.submittedAt)
+          .filter((row) => row.submittedAt && supervisorOwnsPendingLogRow(row, session))
           .map((row) => ({
             lineName: line.name,
             date: row.date,
@@ -13127,7 +13148,7 @@ function renderHome() {
           }));
       }
       return (line.shiftRows || [])
-        .filter((row) => row.submittedAt)
+        .filter((row) => row.submittedAt && supervisorOwnsPendingLogRow(row, session))
         .map((row) => ({
           lineName: line.name,
           date: row.date,

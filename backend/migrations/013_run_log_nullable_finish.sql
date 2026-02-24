@@ -1,0 +1,2 @@
+ALTER TABLE run_logs
+  ALTER COLUMN finish_time DROP NOT NULL;

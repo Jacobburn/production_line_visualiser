@@ -170,7 +170,7 @@ const runLogSchema = z.object({
   product: z.string().min(1).max(120),
   setUpStartTime: optionalTime,
   productionStartTime: z.string().regex(timeRegex),
-  finishTime: z.string().regex(timeRegex),
+  finishTime: optionalTime,
   unitsProduced: z.number().nonnegative(),
   notes: optionalLogNotes,
   runCrewingPattern: z.record(z.number().int().min(0)).optional().default({})
@@ -1343,6 +1343,10 @@ async function ensureLogSchema() {
        ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''`
     );
     await dbQuery(
+      `ALTER TABLE run_logs
+       ALTER COLUMN finish_time DROP NOT NULL`
+    );
+    await dbQuery(
       `ALTER TABLE downtime_logs
        ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''`
     );
@@ -2321,7 +2325,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              product,
              COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
              to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
              COALESCE(run_logs.notes, '') AS notes,
@@ -2339,7 +2343,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              product,
              COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
              to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
              COALESCE(run_logs.notes, '') AS notes,
@@ -3442,7 +3446,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              product,
              COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
              to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
              COALESCE(run_logs.notes, '') AS notes,
@@ -3459,7 +3463,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              product,
              COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
              to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             to_char(finish_time, 'HH24:MI') AS "finishTime",
+             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
              units_produced AS "unitsProduced",
              COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
              COALESCE(run_logs.notes, '') AS notes,
@@ -3957,7 +3961,7 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
            r.product::text AS product,
            NULLIF(COALESCE(r.set_up_start_time, ''), '')::time AS set_up_start_time,
            r.production_start_time::time AS production_start_time,
-           r.finish_time::time AS finish_time,
+           NULLIF(COALESCE(r.finish_time, ''), '')::time AS finish_time,
            GREATEST(0, COALESCE(r.units_produced, 0)) AS units_produced
          FROM jsonb_to_recordset($2::jsonb) AS r(
            date text,
@@ -4262,7 +4266,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
     `INSERT INTO run_logs(
        line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, notes, submitted_by_user_id
      )
-     VALUES ($1, $2, $3, $4, NULLIF($5, '')::time, $6, $7, $8, $9::jsonb, COALESCE($10, ''), $11)
+     VALUES ($1, $2, $3, $4, NULLIF($5, '')::time, $6, NULLIF($7, '')::time, $8, $9::jsonb, COALESCE($10, ''), $11)
      RETURNING
        id,
        line_id AS "lineId",
@@ -4271,7 +4275,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
        product,
        COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
        to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-       to_char(finish_time, 'HH24:MI') AS "finishTime",
+       COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
        units_produced AS "unitsProduced",
        COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
        COALESCE(notes, '') AS notes,
@@ -4283,7 +4287,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.product,
       parsed.data.setUpStartTime || '',
       parsed.data.productionStartTime,
-      parsed.data.finishTime,
+      parsed.data.finishTime ?? '',
       parsed.data.unitsProduced,
       JSON.stringify(parsed.data.runCrewingPattern || {}),
       String(parsed.data.notes ?? '').trim(),
@@ -4483,7 +4487,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        product = COALESCE(NULLIF($4, ''), product),
        setup_start_time = CASE WHEN $5::text IS NULL THEN setup_start_time ELSE NULLIF($5, '')::time END,
        production_start_time = COALESCE(NULLIF($6, '')::time, production_start_time),
-       finish_time = COALESCE(NULLIF($7, '')::time, finish_time),
+       finish_time = CASE WHEN $7::text IS NULL THEN finish_time ELSE NULLIF($7, '')::time END,
        units_produced = COALESCE($8, units_produced),
        run_crewing_pattern = COALESCE($9::jsonb, run_crewing_pattern),
        notes = CASE
@@ -4500,7 +4504,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        product,
        COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
        to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-       to_char(finish_time, 'HH24:MI') AS "finishTime",
+       COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
        units_produced AS "unitsProduced",
        COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
        COALESCE(notes, '') AS notes,
