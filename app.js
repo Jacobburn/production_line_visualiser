@@ -13099,7 +13099,34 @@ function renderHome() {
   const logs = assignedIds
     .flatMap((id) => {
       const line = appState.lines[id];
-      const shiftItems = (line.shiftRows || [])
+      if (!line) return [];
+      if (activeTab === "superRun") {
+        return (line.runRows || [])
+          .filter((row) => row.submittedAt)
+          .map((row) => ({
+            lineName: line.name,
+            date: row.date,
+            shift: resolveTimedLogShiftLabel(row, line, "productionStartTime", "finishTime"),
+            type: "Run",
+            summary: `${row.product || "-"} (${formatNum(row.unitsProduced, 0)} units)`,
+            supervisor: row.submittedBy || "-",
+            createdAt: row.submittedAt
+          }));
+      }
+      if (activeTab === "superDown") {
+        return (line.downtimeRows || [])
+          .filter((row) => row.submittedAt)
+          .map((row) => ({
+            lineName: line.name,
+            date: row.date,
+            shift: resolveTimedLogShiftLabel(row, line, "downtimeStart", "downtimeFinish"),
+            type: "Downtime",
+            summary: `${stageNameByIdForLine(line, row.equipment) || row.reasonCategory || "Downtime"}: ${row.reason || "-"}`,
+            supervisor: row.submittedBy || "-",
+            createdAt: row.submittedAt
+          }));
+      }
+      return (line.shiftRows || [])
         .filter((row) => row.submittedAt)
         .map((row) => ({
           lineName: line.name,
@@ -13110,29 +13137,6 @@ function renderHome() {
           supervisor: row.submittedBy || "-",
           createdAt: row.submittedAt
         }));
-      const runItems = (line.runRows || [])
-        .filter((row) => row.submittedAt)
-        .map((row) => ({
-          lineName: line.name,
-          date: row.date,
-          shift: resolveTimedLogShiftLabel(row, line, "productionStartTime", "finishTime"),
-          type: "Run",
-          summary: `${row.product || "-"} (${formatNum(row.unitsProduced, 0)} units)`,
-          supervisor: row.submittedBy || "-",
-          createdAt: row.submittedAt
-        }));
-      const downItems = (line.downtimeRows || [])
-        .filter((row) => row.submittedAt)
-        .map((row) => ({
-          lineName: line.name,
-          date: row.date,
-          shift: resolveTimedLogShiftLabel(row, line, "downtimeStart", "downtimeFinish"),
-          type: "Downtime",
-          summary: `${stageNameByIdForLine(line, row.equipment) || row.reasonCategory || "Downtime"}: ${row.reason || "-"}`,
-          supervisor: row.submittedBy || "-",
-          createdAt: row.submittedAt
-        }));
-      return [...shiftItems, ...runItems, ...downItems];
     })
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
     .slice(0, 20);
