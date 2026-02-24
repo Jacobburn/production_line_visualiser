@@ -1051,6 +1051,38 @@ async function ensureDataSourceSchema() {
   return dataSourceSchemaPromise;
 }
 
+let logSchemaReady = false;
+let logSchemaPromise = null;
+
+async function ensureLogSchema() {
+  if (logSchemaReady) return;
+  if (logSchemaPromise) return logSchemaPromise;
+  logSchemaPromise = (async () => {
+    await dbQuery(
+      `ALTER TABLE shift_logs
+       ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''`
+    );
+    await dbQuery(
+      `ALTER TABLE run_logs
+       ADD COLUMN IF NOT EXISTS run_crewing_pattern JSONB NOT NULL DEFAULT '{}'::jsonb`
+    );
+    await dbQuery(
+      `ALTER TABLE run_logs
+       ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''`
+    );
+    await dbQuery(
+      `ALTER TABLE downtime_logs
+       ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''`
+    );
+    logSchemaReady = true;
+  })()
+    .catch((error) => {
+      logSchemaPromise = null;
+      throw error;
+    });
+  return logSchemaPromise;
+}
+
 app.get('/api/health', asyncRoute(async (_req, res) => {
   await dbQuery('SELECT 1');
   res.json({ ok: true, env: config.nodeEnv, timestamp: new Date().toISOString() });
@@ -1561,6 +1593,7 @@ app.patch('/api/lines/reorder', authMiddleware, requireRole('manager'), asyncRou
 app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   await ensureLineGroupSchema();
   await ensureDataSourceSchema();
+  await ensureLogSchema();
   const linesQuery = req.user.role === 'manager'
     ? `SELECT
          l.id,
@@ -2280,6 +2313,7 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
@@ -2964,6 +2998,7 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
 }));
 
 app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const parsed = shiftLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid shift log payload' });
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
@@ -3146,6 +3181,7 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
 }));
 
 app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const parsed = runLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid run log payload' });
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
@@ -3197,6 +3233,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const parsed = downtimeLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log payload' });
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
@@ -3242,6 +3279,7 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const logId = req.params.logId;
   if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
   const parsed = shiftLogUpdateSchema.safeParse(req.body || {});
@@ -3311,6 +3349,7 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
 }));
 
 app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const logId = req.params.logId;
   if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid run log id' });
   const parsed = runLogUpdateSchema.safeParse(req.body || {});
@@ -3389,6 +3428,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
 }));
 
 app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const logId = req.params.logId;
   if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid downtime log id' });
   const parsed = downtimeLogUpdateSchema.safeParse(req.body || {});
