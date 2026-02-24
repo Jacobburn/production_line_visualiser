@@ -2153,10 +2153,11 @@ function restoreAuthSessionsFromStorage() {
   };
 }
 
-function queueLineModelSync(lineId) {
+function queueLineModelSync(lineId, { delayMs = 300 } = {}) {
   if (!lineId || !UUID_RE.test(String(lineId))) return;
   if (lineModelSyncTimer) clearTimeout(lineModelSyncTimer);
-  lineModelSyncTimer = setTimeout(async () => {
+  const runSync = async () => {
+    lineModelSyncTimer = null;
     try {
       await saveLineModelToBackend(lineId);
     } catch (error) {
@@ -2165,10 +2166,15 @@ function queueLineModelSync(lineId) {
         alert(`Could not save layout/settings changes to server.\n${error?.message || "Please retry."}`);
       }
     }
-  }, 300);
+  };
+  if (Number(delayMs) <= 0) {
+    runSync();
+    return;
+  }
+  lineModelSyncTimer = setTimeout(runSync, Number(delayMs));
 }
 
-function requestLineModelSync(lineId, { force = false } = {}) {
+function requestLineModelSync(lineId, { force = false, immediate = false } = {}) {
   const safeLineId = String(lineId || "");
   if (!safeLineId) return;
   const line = appState.lines?.[safeLineId];
@@ -2178,7 +2184,7 @@ function requestLineModelSync(lineId, { force = false } = {}) {
     return;
   }
   deferredLineModelSyncIds.delete(safeLineId);
-  queueLineModelSync(safeLineId);
+  queueLineModelSync(safeLineId, { delayMs: immediate ? 0 : 300 });
 }
 
 function saveState(options = {}) {
@@ -2186,7 +2192,12 @@ function saveState(options = {}) {
   if (state && state.id) {
     appState.lines[state.id] = state;
     appState.activeLineId = state.id;
-    if (options.syncModel) requestLineModelSync(state.id, { force: Boolean(options.forceSyncModel) });
+    if (options.syncModel) {
+      requestLineModelSync(state.id, {
+        force: Boolean(options.forceSyncModel),
+        immediate: Boolean(options.immediateSyncModel)
+      });
+    }
   }
   persistAuthSessions();
   persistHomeUiState();
@@ -3683,7 +3694,16 @@ function delayMs(ms) {
 async function ensureBackendStageId(localLineId, localStageId, session) {
   if (!localLineId || !localStageId || !session?.backendToken) return "";
   const key = `${localLineId}::${localStageId}`;
-  if (session.backendStageMap?.[key]) return session.backendStageMap[key];
+  const cachedStageId = String(session.backendStageMap?.[key] || "").trim();
+  if (cachedStageId) {
+    if (UUID_RE.test(cachedStageId)) return cachedStageId;
+    // Discard stale/non-UUID cache entries so they cannot poison API payloads.
+    if (session.backendStageMap && Object.prototype.hasOwnProperty.call(session.backendStageMap, key)) {
+      delete session.backendStageMap[key];
+      if (session === managerBackendSession) persistManagerBackendSession();
+      else saveState();
+    }
+  }
   const backendLineId = await ensureBackendLineId(localLineId, session);
   if (!backendLineId) return "";
   const payload = await apiRequest(`/api/lines/${backendLineId}`, { token: session.backendToken });
@@ -3737,6 +3757,7 @@ async function syncManagerDowntimeLog(payload) {
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
   const backendEquipmentId = await ensureBackendStageId(payload.lineId, payload.equipment, session);
+  const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
   const response = await apiRequest("/api/logs/downtime", {
     method: "POST",
     token: session.backendToken,
@@ -3746,7 +3767,7 @@ async function syncManagerDowntimeLog(payload) {
       shift: payload.shift,
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: backendEquipmentId || null,
+      equipmentStageId: safeEquipmentStageId,
       reason: payload.reason || "",
       notes: String(payload.notes || "")
     }
@@ -3791,6 +3812,7 @@ async function patchManagerDowntimeLog(logId, payload) {
   const backendEquipmentId = payload.equipment
     ? await ensureBackendStageId(payload.lineId || state.id, payload.equipment, session)
     : null;
+  const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
   const response = await apiRequest(`/api/logs/downtime/${logId}`, {
     method: "PATCH",
     token: session.backendToken,
@@ -3799,7 +3821,7 @@ async function patchManagerDowntimeLog(logId, payload) {
       shift: payload.shift,
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: backendEquipmentId || null,
+      equipmentStageId: safeEquipmentStageId,
       reason: payload.reason || "",
       notes: String(payload.notes || "")
     }
@@ -3993,6 +4015,7 @@ async function syncSupervisorDowntimeLog(session, payload) {
   const backendEquipmentId = payload.equipment
     ? await ensureBackendStageId(payload.lineId, payload.equipment, session)
     : null;
+  const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
   const response = await apiRequest("/api/logs/downtime", {
     method: "POST",
     token: session.backendToken,
@@ -4002,7 +4025,7 @@ async function syncSupervisorDowntimeLog(session, payload) {
       shift: payload.shift,
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: backendEquipmentId || null,
+      equipmentStageId: safeEquipmentStageId,
       reason: payload.reason || "",
       notes: String(payload.notes || "")
     }
@@ -4016,13 +4039,14 @@ async function patchSupervisorDowntimeLog(session, logId, payload) {
   const backendEquipmentId = payload.equipment
     ? await ensureBackendStageId(payload.lineId, payload.equipment, session)
     : null;
+  const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
   const response = await apiRequest(`/api/logs/downtime/${logId}`, {
     method: "PATCH",
     token: session.backendToken,
     body: {
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: backendEquipmentId || null,
+      equipmentStageId: safeEquipmentStageId,
       reason: payload.reason || "",
       notes: String(payload.notes || "")
     }
@@ -9309,8 +9333,10 @@ function bindForms() {
   const inlineValue = (rowNode, field) => String(rowNode?.querySelector(`[data-inline-field="${field}"]`)?.value || "").trim();
 
   const saveManagerLogInlineEdit = async (type, logId, rowNode) => {
-    if (!logId || !rowNode) return;
-    if (!isManagerLogInlineEditRow(state.id, type, logId)) return;
+    if (!state?.id || !logId || !rowNode) return;
+    const isInlineEditing = isManagerLogInlineEditRow(state.id, type, logId);
+    const hasInlineFields = Boolean(rowNode.querySelector("[data-inline-field]"));
+    if (!isInlineEditing && !hasInlineFields) return;
 
     if (type === "shift") {
       const row = (state.shiftRows || []).find((item) => item.id === logId);
@@ -10163,7 +10189,7 @@ function renderCrewInputs() {
       if (!state.crewsByShift[crewShift]) state.crewsByShift[crewShift] = defaultStageCrew(getStages());
       if (!state.crewsByShift[crewShift][stage.id]) state.crewsByShift[crewShift][stage.id] = {};
       state.crewsByShift[crewShift][stage.id].crew = num(input.value);
-      saveState({ syncModel: true });
+      saveState({ syncModel: true, forceSyncModel: true, immediateSyncModel: true });
       renderVisualiser();
       renderStageTrend();
     });
@@ -10193,7 +10219,7 @@ function renderThroughputInputs() {
     input.addEventListener("change", () => {
       if (!state.stageSettings[stage.id]) state.stageSettings[stage.id] = {};
       state.stageSettings[stage.id].maxThroughput = num(input.value);
-      saveState({ syncModel: true });
+      saveState({ syncModel: true, forceSyncModel: true, immediateSyncModel: true });
       renderVisualiser();
       renderStageTrend();
     });
