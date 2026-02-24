@@ -253,6 +253,8 @@ const runLogUpdateSchema = z.object({
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const downtimeLogUpdateSchema = z.object({
+  date: z.string().regex(isoDateRegex).optional(),
+  shift: z.enum(shiftValues).optional(),
   downtimeStart: optionalTime.optional(),
   downtimeFinish: optionalTime.optional(),
   equipmentStageId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
@@ -4551,12 +4553,12 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   if (!existingResult.rowCount) return res.status(404).json({ error: 'Downtime log not found' });
   const existing = existingResult.rows[0];
 
-  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  const data = parsed.data;
+  const accessShift = data.shift || existing.shift;
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, accessShift))) return res.status(403).json({ error: 'Forbidden' });
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
     return res.status(403).json({ error: 'Supervisors can only edit their own logs' });
   }
-
-  const data = parsed.data;
   const equipmentStageProvided = Object.prototype.hasOwnProperty.call(data, 'equipmentStageId');
   const equipmentStageValue = equipmentStageProvided ? String(data.equipmentStageId || '').trim() : '';
   if (equipmentStageValue && !(await isLineStage(existing.lineId, equipmentStageValue))) {
@@ -4569,22 +4571,24 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   const result = await dbQuery(
     `UPDATE downtime_logs
      SET
-       downtime_start = COALESCE(NULLIF($2, '')::time, downtime_start),
-       downtime_finish = COALESCE(NULLIF($3, '')::time, downtime_finish),
+       date = COALESCE($2::date, date),
+       shift = COALESCE($3, shift),
+       downtime_start = COALESCE(NULLIF($4, '')::time, downtime_start),
+       downtime_finish = COALESCE(NULLIF($5, '')::time, downtime_finish),
        equipment_stage_id = CASE
-         WHEN $4::boolean IS FALSE THEN equipment_stage_id
-         WHEN NULLIF($5, '')::uuid IS NULL THEN NULL
-         ELSE NULLIF($5, '')::uuid
+         WHEN $6::boolean IS FALSE THEN equipment_stage_id
+         WHEN NULLIF($7, '')::uuid IS NULL THEN NULL
+         ELSE NULLIF($7, '')::uuid
        END,
        reason = CASE
-         WHEN $6::boolean IS FALSE THEN reason
-         ELSE NULLIF($7, '')
+         WHEN $8::boolean IS FALSE THEN reason
+         ELSE NULLIF($9, '')
        END,
        notes = CASE
-         WHEN $8::boolean IS FALSE THEN notes
-         ELSE $9
+         WHEN $10::boolean IS FALSE THEN notes
+         ELSE $11
        END,
-       submitted_by_user_id = $10,
+       submitted_by_user_id = $12,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -4600,6 +4604,8 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
        submitted_at AS "submittedAt"`,
     [
       logId,
+      data.date ?? null,
+      data.shift ?? null,
       data.downtimeStart ?? null,
       data.downtimeFinish ?? null,
       equipmentStageProvided,

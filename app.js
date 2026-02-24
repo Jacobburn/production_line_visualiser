@@ -2302,6 +2302,7 @@ function normalizeLine(id, line) {
     downtimeRows: Array.isArray(line?.downtimeRows)
       ? line.downtimeRows.map((row) => ({
           ...row,
+          assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
           shift: ""
         }))
       : [],
@@ -3244,6 +3245,8 @@ function rowMatchesDateShift(row, date, shift, { line = null, startField = "", f
   if (!row || row.date !== date) return false;
   if (isFullDayShift(shift)) return true;
   const requestedShift = shift === "Night" ? "Night" : "Day";
+  const explicitAssignedShift = normalizeLogAssignableShift(row?.assignedShift || row?.shift);
+  if (explicitAssignedShift) return explicitAssignedShift === requestedShift;
   const explicitMatches = Array.isArray(row?.__shiftMatches) ? row.__shiftMatches : null;
   if (explicitMatches) return explicitMatches.includes(requestedShift);
   if (line && startField && finishField) {
@@ -3335,7 +3338,7 @@ async function saveCurrentLineSettings() {
 
 function isWithinShiftWindow(targetMins, startMins, finishMins) {
   if (!Number.isFinite(targetMins) || !Number.isFinite(startMins) || !Number.isFinite(finishMins)) return false;
-  if (startMins === finishMins) return true;
+  if (startMins === finishMins) return targetMins === startMins;
   if (finishMins > startMins) return targetMins >= startMins && targetMins <= finishMins;
   return targetMins >= startMins || targetMins <= finishMins;
 }
@@ -3344,21 +3347,25 @@ function inferShiftForLog(line, date, timeValue, fallbackShift = "Day") {
   const fallback = fallbackShiftValue(fallbackShift);
   const shiftRows = (line?.shiftRows || [])
     .filter((row) => row.date === date && SHIFT_OPTIONS.includes(row.shift))
-    .slice()
-    .sort((a, b) => String(a.startTime || "").localeCompare(String(b.startTime || "")));
+    .slice();
   const targetMins = parseTimeToMinutes(timeValue);
 
   if (Number.isFinite(targetMins)) {
-    const matched = shiftRows.find((row) => {
+    const matchedRows = shiftRows.filter((row) => {
       const startMins = parseTimeToMinutes(row.startTime);
       const finishMins = parseTimeToMinutes(row.finishTime);
       return isWithinShiftWindow(targetMins, startMins, finishMins);
     });
-    if (matched?.shift) return matched.shift;
+    if (matchedRows.length) {
+      const fallbackMatch = matchedRows.find((row) => row.shift === fallback);
+      if (fallbackMatch?.shift) return fallbackMatch.shift;
+      const mostRecentMatch = matchedRows
+        .slice()
+        .sort((a, b) => rowNewestSortValue(b, "startTime") - rowNewestSortValue(a, "startTime"))[0];
+      if (mostRecentMatch?.shift) return mostRecentMatch.shift;
+    }
   }
 
-  if (shiftRows.some((row) => row.shift === fallback)) return fallback;
-  if (shiftRows[0]?.shift) return shiftRows[0].shift;
   return fallback;
 }
 
@@ -3587,6 +3594,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
         const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
         return {
           ...row,
+          assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
           shift: "",
           notes: String(row?.notes || ""),
           reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
@@ -4016,6 +4024,8 @@ async function patchManagerDowntimeLog(logId, payload) {
     method: "PATCH",
     token: session.backendToken,
     body: {
+      date: payload.date,
+      shift: payload.shift,
       downtimeStart: payload.downtimeStart,
       downtimeFinish: payload.downtimeFinish,
       equipmentStageId: safeEquipmentStageId,
@@ -7962,7 +7972,8 @@ function bindHome() {
       alert("Equipment downtime requires an equipment stage.");
       return;
     }
-    const shift = row.shift || inferShiftForLog(line, row.date, downtimeStart, appState.supervisorSelectedShift || "Day");
+    const shift = normalizeLogAssignableShift(row.assignedShift || row.shift)
+      || inferShiftForLog(line, row.date, downtimeStart, appState.supervisorSelectedShift || "Day");
     if (!supervisorCanAccessShift(session, lineId, shift)) {
       alert(`You are not assigned to the ${shift} shift.`);
       return;
@@ -7985,6 +7996,7 @@ function bindHome() {
       const savedRow = {
         ...row,
         ...payload,
+        assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
         shift: "",
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
@@ -8043,7 +8055,8 @@ function bindHome() {
 
     const downtimeStart = startInput || existing?.downtimeStart || nowTimeHHMM();
     const downtimeFinish = finishInput || (complete ? nowTimeHHMM() : existing?.downtimeFinish || downtimeStart);
-    const backendShift = inferShiftForLog(line, date, downtimeStart, appState.supervisorSelectedShift || "Day");
+    const backendShift = normalizeLogAssignableShift(existing?.assignedShift || existing?.shift)
+      || inferShiftForLog(line, date, downtimeStart, appState.supervisorSelectedShift || "Day");
     const reasonCategory = reasonCategoryInput || existing?.reasonCategory || "";
     const reasonDetail = reasonDetailInput || existing?.reasonDetail || "";
     const reasonNote = reasonNoteInput !== "" ? reasonNoteInput : existing?.reasonNote || "";
@@ -8093,6 +8106,7 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
+        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
         shift: "",
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
@@ -9503,6 +9517,7 @@ function bindForms() {
       const saved = await syncManagerDowntimeLog(payload);
       state.downtimeRows.push({
         ...data,
+        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
         shift: "",
         id: saved?.id || data.id || makeLocalLogId("down"),
         submittedBy: "manager",
@@ -9829,7 +9844,8 @@ function bindForms() {
         alert("Downtime row could not be found. Refresh and try again.");
         return;
       }
-      const date = String(row.date || "").trim();
+      const date = inlineValue(rowNode, "date");
+      const assignedShift = normalizeLogAssignableShift(inlineValue(rowNode, "assignedShift"));
       const downtimeStart = inlineValue(rowNode, "downtimeStart");
       const downtimeFinish = inlineValue(rowNode, "downtimeFinish");
       const reasonCategory = inlineValue(rowNode, "reasonCategory");
@@ -9839,6 +9855,10 @@ function bindForms() {
       let equipment = inlineValue(rowNode, "equipment");
       if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
         alert("Date is invalid.");
+        return;
+      }
+      if (!assignedShift) {
+        alert("Assigned shift is required.");
         return;
       }
       if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
@@ -9863,9 +9883,11 @@ function bindForms() {
         alert("Reason detail is required.");
         return;
       }
-      const shift = inferShiftForLog(state, date, downtimeStart, row.shift || state.selectedShift || "Day");
+      const shift = assignedShift || inferShiftForLog(state, date, downtimeStart, row.shift || state.selectedShift || "Day");
       const reason = buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote);
       const updatedValues = {
+        date,
+        assignedShift,
         downtimeStart,
         downtimeFinish,
         equipment,
@@ -9877,17 +9899,27 @@ function bindForms() {
       };
       const payload = {
         lineId: state.id,
-        date, // Used for local validation only.
-        shift, // Used for local validation/inference only.
+        date,
+        shift,
         ...updatedValues
       };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
         if (canPatchServer) {
           const saved = await patchManagerDowntimeLog(logId, payload);
-          Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+          Object.assign(row, updatedValues, {
+            assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
+            shift: "",
+            submittedBy: "manager",
+            submittedAt: saved?.submittedAt || nowIso()
+          });
         } else {
-          Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: nowIso() });
+          Object.assign(row, updatedValues, {
+            assignedShift: shift,
+            shift: "",
+            submittedBy: "manager",
+            submittedAt: nowIso()
+          });
         }
         clearManagerLogInlineEdit();
         addAudit(
@@ -10156,7 +10188,8 @@ function bindForms() {
       alert("Equipment downtime requires an equipment stage.");
       return;
     }
-    const shift = row.shift || inferShiftForLog(state, row.date, downtimeStart, state.selectedShift || "Day");
+    const shift = normalizeLogAssignableShift(row.assignedShift || row.shift)
+      || inferShiftForLog(state, row.date, downtimeStart, state.selectedShift || "Day");
     const updatedValues = {
       date: row.date,
       downtimeStart,
@@ -10178,9 +10211,19 @@ function bindForms() {
     try {
       if (canPatchServer) {
         const saved = await patchManagerDowntimeLog(logId, payload);
-        Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
+        Object.assign(row, updatedValues, {
+          assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
+          shift: "",
+          submittedBy: "manager",
+          submittedAt: saved?.submittedAt || nowIso()
+        });
       } else {
-        Object.assign(row, updatedValues, { shift: "", submittedBy: "manager", submittedAt: nowIso() });
+        Object.assign(row, updatedValues, {
+          assignedShift: normalizeLogAssignableShift(shift),
+          shift: "",
+          submittedBy: "manager",
+          submittedAt: nowIso()
+        });
       }
       clearManagerInlineEditIfTarget("downtime", logId);
       addAudit(
@@ -10471,6 +10514,7 @@ function bindDataControls() {
       state.downtimeRows = Array.isArray(parsed.downtimeRows)
         ? parsed.downtimeRows.map((row) => ({
             ...row,
+            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
             shift: ""
           }))
         : [];
@@ -12042,7 +12086,7 @@ function renderTrackingTables() {
     const editing = isInlineEditing("downtime", String(row.id || ""));
     const pending = isPendingDowntimeLogRow(row);
     const htmlFields = ["action"];
-    if (editing) htmlFields.push("downtimeStart", "downtimeFinish", "equipment", "reason", "notes");
+    if (editing) htmlFields.push("date", "assignedShift", "downtimeStart", "downtimeFinish", "equipment", "reason", "notes");
     const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
     const reasonCategory = String(row.reasonCategory || parsedReason.reasonCategory || "");
     const reasonDetail = String(row.reasonDetail || parsedReason.reasonDetail || "");
@@ -12051,12 +12095,26 @@ function renderTrackingTables() {
     const reasonDetailChoices = downtimeDetailOptions(state, reasonCategory);
     const equipmentChoices = downtimeDetailOptions(state, "Equipment");
     const equipmentValue = String(row.equipment || (reasonCategory === "Equipment" ? reasonDetail : ""));
+    const explicitAssignedShift = normalizeLogAssignableShift(row.assignedShift || row.shift);
+    const inferredAssignedShift = inferShiftForLog(
+      state,
+      String(row.date || todayISO()),
+      String(row.downtimeStart || ""),
+      state.selectedShift || "Day"
+    );
+    const editableAssignedShift = explicitAssignedShift || normalizeLogAssignableShift(inferredAssignedShift) || LOG_ASSIGNABLE_SHIFTS[0];
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
       __htmlFields: htmlFields,
-      date: row.date,
-      assignedShift: resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish"),
+      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
+      assignedShift: editing
+        ? inlineSelectHtml(
+          "assignedShift",
+          editableAssignedShift,
+          LOG_ASSIGNABLE_SHIFTS.map((shiftOption) => ({ value: shiftOption, label: shiftOption }))
+        )
+        : resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish"),
       downtimeStart: editing ? inlineInputHtml("downtimeStart", String(row.downtimeStart || ""), { placeholder: "HH:MM" }) : row.downtimeStart,
       downtimeFinish: editing ? inlineInputHtml("downtimeFinish", String(row.downtimeFinish || ""), { placeholder: "HH:MM" }) : row.downtimeFinish,
       equipment: editing
