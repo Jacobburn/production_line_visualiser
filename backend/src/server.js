@@ -41,6 +41,8 @@ const shiftValues = ['Day', 'Night', 'Full Day'];
 const supervisorShiftValues = ['Day', 'Night'];
 const actionPriorityValues = ['Low', 'Medium', 'High', 'Critical'];
 const actionStatusValues = ['Open', 'In Progress', 'Blocked', 'Completed'];
+const productCatalogColumnCount = 12;
+const productCatalogAllLinesToken = '*';
 const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const optionalTime = z.string().regex(timeRegex).optional().or(z.literal('')).or(z.null());
@@ -266,6 +268,14 @@ const supervisorActionUpdateSchema = z.object({
   relatedReasonCategory: z.string().max(120).optional().or(z.literal('')).or(z.null()),
   relatedReasonDetail: z.string().max(240).optional().or(z.literal('')).or(z.null())
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
+
+const productCatalogValuesSchema = z.array(z.string()).length(productCatalogColumnCount);
+const productCatalogLineIdSchema = z.union([z.string().uuid(), z.literal(productCatalogAllLinesToken)]);
+
+const productCatalogEntrySchema = z.object({
+  values: productCatalogValuesSchema,
+  lineIds: z.array(productCatalogLineIdSchema).optional().default([productCatalogAllLinesToken])
+});
 
 const clearLineDataSchema = z.object({
   secretKey: z.string().min(1).max(128)
@@ -732,6 +742,90 @@ function mapSupervisorActionRow(row = {}) {
     createdAt: row.createdAt,
     createdBy: String(row.createdBy || '').trim()
   };
+}
+
+function normalizeProductCatalogValues(values = []) {
+  const source = Array.isArray(values) ? values : [];
+  return Array.from({ length: productCatalogColumnCount }, (_unused, index) => String(source[index] ?? '').trim());
+}
+
+function normalizeProductCatalogLineSelection(lineIds = []) {
+  const source = Array.isArray(lineIds) ? lineIds : [];
+  const normalized = [];
+  let allLines = false;
+  source.forEach((rawLineId) => {
+    const lineId = String(rawLineId || '').trim();
+    if (!lineId) return;
+    if (lineId === productCatalogAllLinesToken) {
+      allLines = true;
+      return;
+    }
+    if (!z.string().uuid().safeParse(lineId).success) return;
+    if (!normalized.includes(lineId)) normalized.push(lineId);
+  });
+  if (allLines) return { allLines: true, lineIds: [] };
+  return { allLines: false, lineIds: normalized };
+}
+
+function hasProductCatalogIdentity(values = []) {
+  const safeValues = normalizeProductCatalogValues(values);
+  return Boolean(safeValues[0] || safeValues[1] || safeValues[2]);
+}
+
+function mapProductCatalogRow(row = {}) {
+  const id = String(row.id || '').trim();
+  if (!z.string().uuid().safeParse(id).success) return null;
+  const values = normalizeProductCatalogValues(Array.isArray(row.values) ? row.values : []);
+  const lineIds = Array.isArray(row.lineIds)
+    ? row.lineIds
+      .map((lineId) => String(lineId || '').trim())
+      .filter((lineId) => z.string().uuid().safeParse(lineId).success)
+    : [];
+  if (!hasProductCatalogIdentity(values)) return null;
+  return {
+    id,
+    values,
+    lineIds: row.allLines ? [productCatalogAllLinesToken] : lineIds
+  };
+}
+
+async function fetchProductCatalogForUser(user) {
+  const isManager = user?.role === 'manager';
+  const result = await dbQuery(
+    isManager
+      ? `SELECT
+           p.id,
+           COALESCE(p.catalog_values, '[]'::jsonb) AS values,
+           p.all_lines AS "allLines",
+           ARRAY(
+             SELECT line_id::TEXT
+             FROM unnest(COALESCE(p.line_ids, ARRAY[]::UUID[])) AS line_id
+           ) AS "lineIds"
+         FROM product_catalog_entries p
+         ORDER BY p.created_at ASC, p.id ASC`
+      : `SELECT
+           p.id,
+           COALESCE(p.catalog_values, '[]'::jsonb) AS values,
+           p.all_lines AS "allLines",
+           ARRAY(
+             SELECT line_id::TEXT
+             FROM unnest(COALESCE(p.line_ids, ARRAY[]::UUID[])) AS line_id
+           ) AS "lineIds"
+         FROM product_catalog_entries p
+         WHERE p.all_lines = TRUE
+            OR EXISTS (
+              SELECT 1
+              FROM unnest(COALESCE(p.line_ids, ARRAY[]::UUID[])) AS product_line_id
+              INNER JOIN supervisor_line_shift_assignments a
+                ON a.line_id = product_line_id
+               AND a.supervisor_user_id = $1
+            )
+         ORDER BY p.created_at ASC, p.id ASC`,
+    isManager ? [] : [user.id]
+  );
+  return result.rows
+    .map((row) => mapProductCatalogRow(row))
+    .filter(Boolean);
 }
 
 async function resolveSupervisorActionAssignee(usernameInput, fallbackName = '') {
@@ -1345,6 +1439,70 @@ async function ensureSupervisorActionSchema() {
   return supervisorActionSchemaPromise;
 }
 
+let productCatalogSchemaReady = false;
+let productCatalogSchemaPromise = null;
+
+async function ensureProductCatalogSchema() {
+  if (productCatalogSchemaReady) return;
+  if (productCatalogSchemaPromise) return productCatalogSchemaPromise;
+  productCatalogSchemaPromise = (async () => {
+    await dbQuery(
+      `CREATE TABLE IF NOT EXISTS product_catalog_entries (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         catalog_values JSONB NOT NULL DEFAULT '[]'::jsonb,
+         line_ids UUID[] NOT NULL DEFAULT ARRAY[]::UUID[],
+         all_lines BOOLEAN NOT NULL DEFAULT TRUE,
+         created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`
+    );
+    await dbQuery(
+      `ALTER TABLE product_catalog_entries
+       ADD COLUMN IF NOT EXISTS catalog_values JSONB NOT NULL DEFAULT '[]'::jsonb`
+    );
+    await dbQuery(
+      `ALTER TABLE product_catalog_entries
+       ADD COLUMN IF NOT EXISTS line_ids UUID[] NOT NULL DEFAULT ARRAY[]::UUID[]`
+    );
+    await dbQuery(
+      `ALTER TABLE product_catalog_entries
+       ADD COLUMN IF NOT EXISTS all_lines BOOLEAN NOT NULL DEFAULT TRUE`
+    );
+    await dbQuery(
+      `ALTER TABLE product_catalog_entries
+       ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL`
+    );
+    await dbQuery(
+      `ALTER TABLE product_catalog_entries
+       ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+    );
+    await dbQuery(
+      `ALTER TABLE product_catalog_entries
+       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_product_catalog_entries_created
+       ON product_catalog_entries (created_at ASC, id ASC)`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_product_catalog_entries_all_lines
+       ON product_catalog_entries (all_lines, created_at ASC)`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_product_catalog_entries_line_ids
+       ON product_catalog_entries
+       USING GIN (line_ids)`
+    );
+    productCatalogSchemaReady = true;
+  })()
+    .catch((error) => {
+      productCatalogSchemaPromise = null;
+      throw error;
+    });
+  return productCatalogSchemaPromise;
+}
+
 app.get('/api/health', asyncRoute(async (_req, res) => {
   await dbQuery('SELECT 1');
   res.json({ ok: true, env: config.nodeEnv, timestamp: new Date().toISOString() });
@@ -1857,6 +2015,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   await ensureDataSourceSchema();
   await ensureLogSchema();
   await ensureSupervisorActionSchema();
+  await ensureProductCatalogSchema();
   const linesQuery = req.user.role === 'manager'
     ? `SELECT
          l.id,
@@ -1921,8 +2080,11 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   const lineRows = linesResult.rows;
   const lineIds = lineRows.map((line) => line.id);
   if (!lineIds.length) {
-    const payload = { lines: [], supervisors: [], lineGroups: [], dataSources: [], supervisorActions: [] };
-    payload.supervisorActions = await fetchSupervisorActionsForUser(req.user);
+    const payload = { lines: [], supervisors: [], lineGroups: [], dataSources: [], supervisorActions: [], productCatalog: [] };
+    [payload.supervisorActions, payload.productCatalog] = await Promise.all([
+      fetchSupervisorActionsForUser(req.user),
+      fetchProductCatalogForUser(req.user)
+    ]);
     if (req.user.role === 'manager') {
       const [supervisors, lineGroups, dataSources] = await Promise.all([
         fetchSupervisorsWithAssignments(),
@@ -2266,8 +2428,11 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     downtimeRows: downtimeByLine.get(line.id) || []
   }));
 
-  const payload = { lines, supervisors: [], lineGroups: [], dataSources: [], supervisorActions: [] };
-  payload.supervisorActions = await fetchSupervisorActionsForUser(req.user);
+  const payload = { lines, supervisors: [], lineGroups: [], dataSources: [], supervisorActions: [], productCatalog: [] };
+  [payload.supervisorActions, payload.productCatalog] = await Promise.all([
+    fetchSupervisorActionsForUser(req.user),
+    fetchProductCatalogForUser(req.user)
+  ]);
   if (req.user.role === 'manager') {
     const [supervisors, lineGroups, dataSources] = await Promise.all([
       fetchSupervisorsWithAssignments(),
@@ -2832,6 +2997,126 @@ app.delete('/api/supervisor-actions/:actionId', authMiddleware, requireRole('man
   });
 
   return res.status(204).send();
+}));
+
+app.get('/api/product-catalog', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureProductCatalogSchema();
+  const products = await fetchProductCatalogForUser(req.user);
+  return res.json({ products });
+}));
+
+app.post('/api/product-catalog', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureProductCatalogSchema();
+  const parsed = productCatalogEntrySchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid product catalog payload' });
+
+  const values = normalizeProductCatalogValues(parsed.data.values);
+  if (!hasProductCatalogIdentity(values)) {
+    return res.status(400).json({ error: 'Code, Desc 1, or Desc 2 is required.' });
+  }
+  const lineSelection = normalizeProductCatalogLineSelection(parsed.data.lineIds);
+  const missingLineIds = await findMissingActiveLineIds(lineSelection.lineIds);
+  if (missingLineIds.length) {
+    return res.status(400).json({ error: 'One or more assigned lines are invalid or inactive', lineIds: missingLineIds });
+  }
+
+  const inserted = await dbQuery(
+    `INSERT INTO product_catalog_entries(
+       catalog_values,
+       line_ids,
+       all_lines,
+       created_by_user_id
+     )
+     VALUES (
+       $1::jsonb,
+       $2::UUID[],
+       $3,
+       $4
+     )
+     RETURNING
+       id,
+       COALESCE(catalog_values, '[]'::jsonb) AS values,
+       all_lines AS "allLines",
+       ARRAY(
+         SELECT line_id::TEXT
+         FROM unnest(COALESCE(line_ids, ARRAY[]::UUID[])) AS line_id
+       ) AS "lineIds"`,
+    [
+      JSON.stringify(values),
+      lineSelection.lineIds,
+      lineSelection.allLines,
+      req.user.id
+    ]
+  );
+  const product = mapProductCatalogRow(inserted.rows[0]);
+  if (!product) throw new Error('Saved product catalog entry could not be mapped.');
+
+  await writeAudit({
+    lineId: null,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'CREATE_PRODUCT_CATALOG_ENTRY',
+    details: `Product created: ${product.values[1] || product.values[0] || product.id}`
+  });
+
+  return res.status(201).json({ product });
+}));
+
+app.patch('/api/product-catalog/:productId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureProductCatalogSchema();
+  const productId = req.params.productId;
+  if (!z.string().uuid().safeParse(productId).success) return res.status(400).json({ error: 'Invalid product id' });
+  const parsed = productCatalogEntrySchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid product catalog payload' });
+
+  const values = normalizeProductCatalogValues(parsed.data.values);
+  if (!hasProductCatalogIdentity(values)) {
+    return res.status(400).json({ error: 'Code, Desc 1, or Desc 2 is required.' });
+  }
+  const lineSelection = normalizeProductCatalogLineSelection(parsed.data.lineIds);
+  const missingLineIds = await findMissingActiveLineIds(lineSelection.lineIds);
+  if (missingLineIds.length) {
+    return res.status(400).json({ error: 'One or more assigned lines are invalid or inactive', lineIds: missingLineIds });
+  }
+
+  const updated = await dbQuery(
+    `UPDATE product_catalog_entries
+     SET
+       catalog_values = $2::jsonb,
+       line_ids = $3::UUID[],
+       all_lines = $4,
+       updated_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       COALESCE(catalog_values, '[]'::jsonb) AS values,
+       all_lines AS "allLines",
+       ARRAY(
+         SELECT line_id::TEXT
+         FROM unnest(COALESCE(line_ids, ARRAY[]::UUID[])) AS line_id
+       ) AS "lineIds"`,
+    [
+      productId,
+      JSON.stringify(values),
+      lineSelection.lineIds,
+      lineSelection.allLines
+    ]
+  );
+  if (!updated.rowCount) return res.status(404).json({ error: 'Product not found' });
+  const product = mapProductCatalogRow(updated.rows[0]);
+  if (!product) throw new Error('Updated product catalog entry could not be mapped.');
+
+  await writeAudit({
+    lineId: null,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'UPDATE_PRODUCT_CATALOG_ENTRY',
+    details: `Product updated: ${product.values[1] || product.values[0] || product.id}`
+  });
+
+  return res.json({ product });
 }));
 
 app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {

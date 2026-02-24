@@ -3,8 +3,6 @@ const STORAGE_BACKUP_KEY = "kebab-line-data-v2-backup";
 const AUTH_STORAGE_KEY = "kebab-line-auth-v1";
 const ROUTE_STORAGE_KEY = "kebab-line-route-v1";
 const HOME_UI_STORAGE_KEY = "kebab-line-home-ui-v1";
-const SUPERVISOR_ACTIONS_STORAGE_KEY = "kebab-line-supervisor-actions-v1";
-const SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY = "kebab-line-supervisor-actions-seeded-v1";
 const APP_VARIANT = (() => {
   const raw = String(window.PRODUCTION_LINE_APP_VARIANT || "").trim().toLowerCase();
   return raw === "supervisor" ? "supervisor" : "manager";
@@ -123,27 +121,6 @@ const MANAGER_ACTION_URGENCY_GROUP_MAP = Object.freeze(
     return acc;
   }, {})
 );
-const ACTION_SAMPLE_TEMPLATES = Object.freeze([
-  {
-    title: "Verify startup readiness",
-    description: "Confirm pre-start checks are complete and record any blockers.",
-    priority: "Medium",
-    dueInDays: 1
-  },
-  {
-    title: "Investigate downtime spikes",
-    description: "Review today's downtime reasons and propose corrective actions.",
-    priority: "High",
-    dueInDays: 2
-  },
-  {
-    title: "Close shift handover gaps",
-    description: "Capture handover notes and assign follow-up items for next shift.",
-    priority: "Low",
-    dueInDays: 3
-  }
-]);
-const PRODUCT_CATALOG_STORAGE_KEY = "kebab-line-product-catalog-v1";
 const PRODUCT_CATALOG_MANAGER_DATALIST_ID = "productCatalogManagerRunProducts";
 const PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID = "productCatalogSupervisorRunProducts";
 const PRODUCT_CATALOG_COLUMN_COUNT = 12;
@@ -166,6 +143,7 @@ appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines
 appState.lineGroups = normalizeLineGroups(appState.lineGroups);
 appState.dataSources = normalizeDataSources(appState.dataSources);
 appState.supervisorActions = normalizeSupervisorActions(appState.supervisorActions);
+setProductCatalogEntries(appState.productCatalogEntries);
 let lineModelSyncTimer = null;
 const deferredLineModelSyncIds = new Set();
 let lineShiftTrackerResizeTimer = null;
@@ -195,7 +173,6 @@ function enforceAppVariantState() {
 clearLegacyStateStorage();
 restoreAuthSessionsFromStorage();
 restoreHomeUiState();
-restoreSupervisorActionsFromStorage();
 restoreRouteFromHash();
 enforceAppVariantState();
 state = appState.lines[appState.activeLineId] || null;
@@ -279,55 +256,6 @@ function persistHomeUiState() {
   writeHomeUiStorage({
     homeLineGroupExpanded: sanitizeHomeLineGroupExpanded(appState.homeLineGroupExpanded)
   });
-}
-
-function readSupervisorActionsStorage() {
-  try {
-    const raw = window.localStorage.getItem(SUPERVISOR_ACTIONS_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
-    return [];
-  }
-}
-
-function writeSupervisorActionsStorage(actions) {
-  try {
-    const normalized = normalizeSupervisorActions(actions);
-    if (normalized.length) {
-      window.localStorage.setItem(SUPERVISOR_ACTIONS_STORAGE_KEY, JSON.stringify(normalized));
-    } else {
-      window.localStorage.removeItem(SUPERVISOR_ACTIONS_STORAGE_KEY);
-    }
-  } catch {
-    // Ignore storage failures (private mode, quota, disabled storage).
-  }
-}
-
-function readSupervisorActionsSeededStorage() {
-  try {
-    return window.localStorage.getItem(SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY) === "1";
-  } catch {
-    return false;
-  }
-}
-
-function writeSupervisorActionsSeededStorage(isSeeded) {
-  try {
-    if (isSeeded) window.localStorage.setItem(SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY, "1");
-    else window.localStorage.removeItem(SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY);
-  } catch {
-    // Ignore storage failures (private mode, quota, disabled storage).
-  }
-}
-
-function restoreSupervisorActionsFromStorage() {
-  appState.supervisorActions = normalizeSupervisorActions(readSupervisorActionsStorage());
-}
-
-function persistSupervisorActions() {
-  writeSupervisorActionsStorage(appState.supervisorActions);
 }
 
 function readRouteStorage() {
@@ -1068,11 +996,12 @@ function actionRelationSummary(action, line) {
   return parts.join(" | ");
 }
 
-function normalizeSupervisorAction(action, index = 0) {
+function normalizeSupervisorAction(action) {
   if (!action || typeof action !== "object") return null;
   const supervisorUsername = String(action.supervisorUsername || "").trim().toLowerCase();
   if (!supervisorUsername) return null;
-  const id = String(action.id || "").trim() || `action-${Date.now()}-${index}`;
+  const id = String(action.id || "").trim();
+  if (!UUID_RE.test(id)) return null;
   const dueDateRaw = String(action.dueDate || "").trim();
   const relatedReasonCategory = normalizeActionReasonCategory(action.relatedReasonCategory);
   const relatedReasonDetailRaw = String(action.relatedReasonDetail || "").trim();
@@ -1099,7 +1028,7 @@ function normalizeSupervisorActions(actions) {
   const source = Array.isArray(actions) ? actions : [];
   const seen = new Set();
   return source
-    .map((action, index) => normalizeSupervisorAction(action, index))
+    .map((action) => normalizeSupervisorAction(action))
     .filter((action) => {
       if (!action) return false;
       if (seen.has(action.id)) return false;
@@ -1111,76 +1040,6 @@ function normalizeSupervisorActions(actions) {
 function ensureSupervisorActionsState() {
   appState.supervisorActions = normalizeSupervisorActions(appState.supervisorActions);
   return appState.supervisorActions;
-}
-
-function sampleActionSeedId(username, index) {
-  const safeUsername = String(username || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return `action-seed-${safeUsername || "supervisor"}-${index + 1}`;
-}
-
-function dayOffsetISO(baseDateIso, daysToAdd) {
-  const date = parseDateLocal(baseDateIso || todayISO());
-  date.setDate(date.getDate() + Math.max(0, Math.floor(num(daysToAdd))));
-  return formatDateLocal(date);
-}
-
-function seedSampleActionsForSupervisors() {
-  if (managerBackendSession.backendToken || appState.supervisorSession?.backendToken) return false;
-  if (readSupervisorActionsSeededStorage()) return false;
-  const actions = ensureSupervisorActionsState();
-  if (actions.length) {
-    writeSupervisorActionsSeededStorage(true);
-    return false;
-  }
-  const existingIds = new Set(actions.map((action) => String(action.id || "").trim()).filter(Boolean));
-  let changed = false;
-  (appState.supervisors || []).forEach((sup) => {
-    const username = String(sup?.username || "").trim().toLowerCase();
-    if (!username) return;
-    const supervisorName = String(sup?.name || username).trim() || username;
-    const lineShiftMap = normalizeSupervisorLineShifts(sup?.assignedLineShifts, appState.lines || {}, sup?.assignedLineIds || []);
-    const lineIds = Object.keys(lineShiftMap);
-    ACTION_SAMPLE_TEMPLATES.forEach((template, index) => {
-      const seedId = sampleActionSeedId(username, index);
-      if (existingIds.has(seedId)) return;
-      const lineId = lineIds.length ? lineIds[index % lineIds.length] : "";
-      const seededAction = normalizeSupervisorAction(
-        {
-          id: seedId,
-          supervisorUsername: username,
-          supervisorName,
-          lineId,
-          title: template.title,
-          description: template.description,
-          priority: template.priority,
-          status: "Open",
-          dueDate: dayOffsetISO(todayISO(), template.dueInDays),
-          createdAt: nowIso(),
-          createdBy: "System"
-        },
-        actions.length
-      );
-      if (!seededAction) return;
-      actions.push(seededAction);
-      existingIds.add(seedId);
-      changed = true;
-    });
-  });
-  if (changed) {
-    appState.supervisorActions = actions
-      .filter(Boolean)
-      .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
-    persistSupervisorActions();
-    writeSupervisorActionsSeededStorage(true);
-  }
-  if (!changed && (appState.supervisors || []).length) {
-    writeSupervisorActionsSeededStorage(true);
-  }
-  return changed;
 }
 
 function supervisorActionsForUsername(username) {
@@ -1895,7 +1754,7 @@ function isCatalogProductName(value, options = {}) {
   return listProductCatalogNames(options).some((name) => name.toLowerCase() === target);
 }
 
-function normalizeStoredProductCatalogEntry(entry) {
+function normalizeProductCatalogEntry(entry) {
   if (!entry || typeof entry !== "object") return null;
   const rowId = String(entry.id || "").trim() || createProductCatalogRowId();
   const valuesSource = Array.isArray(entry.values) ? entry.values : [];
@@ -1911,25 +1770,22 @@ function normalizeStoredProductCatalogEntry(entry) {
   };
 }
 
-function readProductCatalogStorage() {
-  try {
-    const raw = window.localStorage.getItem(PRODUCT_CATALOG_STORAGE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.map(normalizeStoredProductCatalogEntry).filter(Boolean);
-  } catch {
-    return [];
-  }
+function normalizeProductCatalogEntries(entries) {
+  const source = Array.isArray(entries) ? entries : [];
+  const seen = new Set();
+  return source
+    .map((entry) => normalizeProductCatalogEntry(entry))
+    .filter((entry) => {
+      if (!entry) return false;
+      const key = String(entry.id || "").trim();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
 }
 
-function writeProductCatalogStorage(entries) {
-  try {
-    const payload = Array.isArray(entries) ? entries.map(normalizeStoredProductCatalogEntry).filter(Boolean) : [];
-    window.localStorage.setItem(PRODUCT_CATALOG_STORAGE_KEY, JSON.stringify(payload));
-  } catch {
-    // Ignore storage failures (private mode, quota, disabled storage).
-  }
+function setProductCatalogEntries(entries) {
+  appState.productCatalogEntries = normalizeProductCatalogEntries(entries);
 }
 
 function serializeProductCatalogTable(table) {
@@ -1938,19 +1794,23 @@ function serializeProductCatalogTable(table) {
     .map((row) => {
       const values = Array.from({ length: PRODUCT_CATALOG_COLUMN_COUNT }, (_, i) => productCatalogCellText(row, i));
       if (!values[0] && !values[1] && !values[2]) return null;
-      return {
+      return normalizeProductCatalogEntry({
         id: ensureProductCatalogRowId(row),
         values,
         lineIds: getProductCatalogLineIdsFromRow(row)
-      };
+      });
     })
     .filter(Boolean);
+}
+
+function syncProductCatalogStateFromTable(table) {
+  setProductCatalogEntries(serializeProductCatalogTable(table));
 }
 
 function renderProductCatalogTableRows(table, entries) {
   if (!table) return;
   const tbody = table.tBodies?.[0] || table.createTBody();
-  const safeEntries = (Array.isArray(entries) ? entries : []).map(normalizeStoredProductCatalogEntry).filter(Boolean);
+  const safeEntries = normalizeProductCatalogEntries(entries);
   tbody.innerHTML = safeEntries
     .map((entry) => {
       const values = Array.from({ length: PRODUCT_CATALOG_COLUMN_COUNT }, (_, index) => String(entry.values?.[index] || "").trim());
@@ -1964,24 +1824,47 @@ function renderProductCatalogTableRows(table, entries) {
     .join("");
 }
 
-function hydrateProductCatalogTableFromStorage(table) {
+function hydrateProductCatalogTableFromState(table) {
   if (!table) return;
-  const storedEntries = readProductCatalogStorage();
-  if (storedEntries.length) {
-    renderProductCatalogTableRows(table, storedEntries);
-    return;
-  }
-  const fallbackEntries = serializeProductCatalogTable(table).map((entry) => ({
-    ...entry,
-    lineIds: entry.lineIds.length ? entry.lineIds : [PRODUCT_CATALOG_ALL_LINES_TOKEN]
-  }));
-  renderProductCatalogTableRows(table, fallbackEntries);
-  if (fallbackEntries.length) writeProductCatalogStorage(fallbackEntries);
+  renderProductCatalogTableRows(table, appState.productCatalogEntries);
 }
 
-function persistProductCatalogTable(table) {
-  if (!table) return;
-  writeProductCatalogStorage(serializeProductCatalogTable(table));
+function productCatalogPayload(values, lineIds) {
+  return {
+    values: Array.from({ length: PRODUCT_CATALOG_COLUMN_COUNT }, (_, index) => String(values?.[index] || "").trim()),
+    lineIds: normalizeProductCatalogLineIds(lineIds)
+  };
+}
+
+async function createProductCatalogEntryOnBackend(values, lineIds = []) {
+  const session = await ensureManagerBackendSession();
+  const payload = productCatalogPayload(values, lineIds);
+  const response = await apiRequest("/api/product-catalog", {
+    method: "POST",
+    token: session.backendToken,
+    body: payload
+  });
+  const product = normalizeProductCatalogEntry(response?.product);
+  if (!product || !UUID_RE.test(String(product.id || "").trim())) {
+    throw new Error("Server returned invalid product catalog data.");
+  }
+  return product;
+}
+
+async function updateProductCatalogEntryOnBackend(productId, values, lineIds = []) {
+  if (!UUID_RE.test(String(productId || "").trim())) throw new Error("Product is not synced to server.");
+  const session = await ensureManagerBackendSession();
+  const payload = productCatalogPayload(values, lineIds);
+  const response = await apiRequest(`/api/product-catalog/${encodeURIComponent(String(productId || "").trim())}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: payload
+  });
+  const product = normalizeProductCatalogEntry(response?.product);
+  if (!product || !UUID_RE.test(String(product.id || "").trim())) {
+    throw new Error("Server returned invalid product catalog data.");
+  }
+  return product;
 }
 
 function ensureRunProductDatalistById(datalistId) {
@@ -2081,6 +1964,39 @@ function refreshProductRowAssignmentSummaries(table) {
   });
 }
 
+function ensureProductCatalogActionColumn(table) {
+  if (!table) return;
+  const headerRow = table.tHead?.rows?.[0];
+  if (headerRow && !headerRow.querySelector("[data-product-action-head]")) {
+    const headerCell = document.createElement("th");
+    headerCell.textContent = "Action";
+    headerCell.setAttribute("data-product-action-head", "true");
+    headerRow.append(headerCell);
+  }
+  const bodyRows = Array.from(table.tBodies?.[0]?.rows || []);
+  bodyRows.forEach((rowNode) => {
+    ensureProductCatalogRowId(rowNode);
+    setProductCatalogLineIdsForRow(rowNode, getProductCatalogLineIdsFromRow(rowNode));
+    if (!rowNode.getAttribute("data-product-editing")) rowNode.setAttribute("data-product-editing", "false");
+    let actionCell = rowNode.querySelector("[data-product-action-cell]");
+    if (!actionCell) {
+      actionCell = document.createElement("td");
+      actionCell.setAttribute("data-product-action-cell", "true");
+      rowNode.append(actionCell);
+    }
+    if (!actionCell.querySelector("[data-product-row-edit]")) {
+      actionCell.innerHTML = `
+        <div class="table-action-stack">
+          <button type="button" class="table-edit-pill" data-product-row-edit="true">Edit</button>
+          <button type="button" class="table-edit-pill" data-product-row-lines="true">Lines</button>
+        </div>
+        <div class="product-row-line-summary" data-product-row-line-summary></div>
+      `;
+    }
+    setProductRowAssignmentSummary(rowNode);
+  });
+}
+
 function loadState() {
   return {
     activeView: "home",
@@ -2099,6 +2015,7 @@ function loadState() {
     supervisors: [],
     dataSources: [],
     supervisorActions: [],
+    productCatalogEntries: [],
     lineGroups: [],
     homeLineGroupExpanded: {},
     activeLineId: "",
@@ -2259,7 +2176,6 @@ function saveState(options = {}) {
   }
   persistAuthSessions();
   persistHomeUiState();
-  persistSupervisorActions();
   syncRouteToHash();
 }
 
@@ -3657,7 +3573,20 @@ async function refreshHostedState(preferredSession = null) {
     });
     if (Array.isArray(snapshot?.supervisorActions)) {
       appState.supervisorActions = normalizeSupervisorActions(snapshot.supervisorActions);
-      writeSupervisorActionsSeededStorage(true);
+    } else {
+      appState.supervisorActions = [];
+    }
+    if (Array.isArray(snapshot?.productCatalog)) {
+      setProductCatalogEntries(snapshot.productCatalog);
+    } else {
+      appState.productCatalogEntries = [];
+    }
+    const productCatalogTable = document.getElementById("productCatalogTable");
+    if (productCatalogTable) {
+      hydrateProductCatalogTableFromState(productCatalogTable);
+      ensureProductCatalogActionColumn(productCatalogTable);
+      refreshProductRowAssignmentSummaries(productCatalogTable);
+      syncRunProductInputsFromCatalog();
     }
 
     if (appState.supervisorSession) {
@@ -4904,23 +4833,39 @@ function bindHome() {
     setProductRowEditingState(rowNode, true);
   };
 
-  const finalizeProductRowInlineEdit = (rowNode) => {
+  const finalizeProductRowInlineEdit = async (rowNode) => {
     if (!rowNode) return false;
-    const descInput = rowNode.querySelector('input[data-product-inline-input="2"]');
-    const descValue = String(descInput?.value || "").trim();
+    const cells = Array.from(rowNode.cells || []).slice(0, PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT);
+    const values = cells.map((cell) => {
+      const input = cell.querySelector("input[data-product-inline-input]");
+      return String(input?.value ?? cell.textContent ?? "").trim();
+    });
+    const descValue = String(values[1] || "").trim();
     if (!descValue) {
+      const descInput = rowNode.querySelector('input[data-product-inline-input="2"]');
       alert("Desc 1 is required.");
       descInput?.focus();
       return false;
     }
-    const cells = Array.from(rowNode.cells || []).slice(0, PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT);
-    cells.forEach((cell) => {
-      const input = cell.querySelector("input[data-product-inline-input]");
-      if (!input) return;
-      cell.textContent = String(input.value || "").trim();
+    const rowId = ensureProductCatalogRowId(rowNode);
+    let savedProduct = null;
+    try {
+      savedProduct = UUID_RE.test(rowId)
+        ? await updateProductCatalogEntryOnBackend(rowId, values, getProductCatalogLineIdsFromRow(rowNode))
+        : await createProductCatalogEntryOnBackend(values, getProductCatalogLineIdsFromRow(rowNode));
+    } catch (error) {
+      alert(`Could not save product.\n${error?.message || "Please try again."}`);
+      return false;
+    }
+    const safeValues = Array.from({ length: PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT }, (_, index) => String(savedProduct.values?.[index] || "").trim());
+    cells.forEach((cell, index) => {
+      cell.textContent = safeValues[index];
     });
+    rowNode.setAttribute(PRODUCT_CATALOG_ID_ATTR, savedProduct.id);
+    setProductCatalogLineIdsForRow(rowNode, savedProduct.lineIds);
     setProductRowEditingState(rowNode, false);
-    persistProductCatalogTable(productCatalogTable);
+    syncProductCatalogStateFromTable(productCatalogTable);
+    refreshProductRowAssignmentSummaries(productCatalogTable);
     syncRunProductInputsFromCatalog();
     return true;
   };
@@ -4978,7 +4923,7 @@ function bindHome() {
     productLineAssignModal.setAttribute("aria-hidden", "false");
   };
 
-  const saveProductLineAssignments = () => {
+  const saveProductLineAssignments = async () => {
     if (!productCatalogTable || !productLineAssignList) return;
     const rowNode = findProductCatalogRowById(assigningProductRowId);
     if (!rowNode) {
@@ -4995,44 +4940,28 @@ function bindHome() {
       allLineIds.length && normalizedSelected.length === allLineIds.length
         ? [PRODUCT_CATALOG_ALL_LINES_TOKEN]
         : normalizedSelected;
-    setProductCatalogLineIdsForRow(rowNode, nextLineIds);
-    setProductRowAssignmentSummary(rowNode);
-    persistProductCatalogTable(productCatalogTable);
-    syncRunProductInputsFromCatalog();
-    closeProductLineAssignModal();
-  };
-
-  const ensureProductCatalogActionColumn = () => {
-    if (!productCatalogTable) return;
-    const headerRow = productCatalogTable.tHead?.rows?.[0];
-    if (headerRow && !headerRow.querySelector("[data-product-action-head]")) {
-      const headerCell = document.createElement("th");
-      headerCell.textContent = "Action";
-      headerCell.setAttribute("data-product-action-head", "true");
-      headerRow.append(headerCell);
+    const rowId = ensureProductCatalogRowId(rowNode);
+    if (!UUID_RE.test(rowId)) {
+      alert("Save the product row before assigning lines.");
+      return;
     }
-    const bodyRows = Array.from(productCatalogTable.tBodies?.[0]?.rows || []);
-    bodyRows.forEach((rowNode) => {
-      ensureProductCatalogRowId(rowNode);
-      setProductCatalogLineIdsForRow(rowNode, getProductCatalogLineIdsFromRow(rowNode));
-      if (!rowNode.getAttribute("data-product-editing")) rowNode.setAttribute("data-product-editing", "false");
-      let actionCell = rowNode.querySelector("[data-product-action-cell]");
-      if (!actionCell) {
-        actionCell = document.createElement("td");
-        actionCell.setAttribute("data-product-action-cell", "true");
-        rowNode.append(actionCell);
-      }
-      if (!actionCell.querySelector("[data-product-row-edit]")) {
-        actionCell.innerHTML = `
-          <div class="table-action-stack">
-            <button type="button" class="table-edit-pill" data-product-row-edit="true">Edit</button>
-            <button type="button" class="table-edit-pill" data-product-row-lines="true">Lines</button>
-          </div>
-          <div class="product-row-line-summary" data-product-row-line-summary></div>
-        `;
-      }
-      setProductRowAssignmentSummary(rowNode);
-    });
+    const values = Array.from({ length: PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT }, (_, index) => productCatalogCellText(rowNode, index));
+    try {
+      const savedProduct = await updateProductCatalogEntryOnBackend(rowId, values, nextLineIds);
+      const safeValues = Array.from({ length: PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT }, (_, index) => String(savedProduct.values?.[index] || "").trim());
+      const cells = Array.from(rowNode.cells || []).slice(0, PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT);
+      cells.forEach((cell, index) => {
+        cell.textContent = safeValues[index];
+      });
+      rowNode.setAttribute(PRODUCT_CATALOG_ID_ATTR, savedProduct.id);
+      setProductCatalogLineIdsForRow(rowNode, savedProduct.lineIds);
+      syncProductCatalogStateFromTable(productCatalogTable);
+      refreshProductRowAssignmentSummaries(productCatalogTable);
+      syncRunProductInputsFromCatalog();
+      closeProductLineAssignModal();
+    } catch (error) {
+      alert(`Could not save line assignments.\n${error?.message || "Please try again."}`);
+    }
   };
 
   const stripLeadingStageNumber = (name) => String(name || "").replace(/^\s*\d+\.\s*/, "").trim();
@@ -5374,7 +5303,7 @@ function bindHome() {
   const openManageProductCatalogModal = () => {
     if (!manageProductCatalogModal) return;
     if (productCatalogTable) {
-      ensureProductCatalogActionColumn();
+      ensureProductCatalogActionColumn(productCatalogTable);
       refreshProductRowAssignmentSummaries(productCatalogTable);
       syncRunProductInputsFromCatalog();
     }
@@ -6022,6 +5951,10 @@ function bindHome() {
         if (appState.appMode !== "manager" || !managerBackendSession.backendToken) return;
         const actionId = String(deleteBtn.getAttribute("data-manager-action-delete") || "").trim();
         if (!actionId) return;
+        if (!UUID_RE.test(actionId)) {
+          alert("Action is not synced to the server.");
+          return;
+        }
         const actions = ensureSupervisorActionsState();
         const actionIndex = actions.findIndex((item) => String(item?.id || "") === actionId);
         if (actionIndex < 0) {
@@ -6032,9 +5965,7 @@ function bindHome() {
         const actionTitle = String(action?.title || "this action").trim() || "this action";
         if (!window.confirm(`Delete "${actionTitle}"?`)) return;
         try {
-          if (UUID_RE.test(actionId)) {
-            await deleteManagerSupervisorAction(actionId);
-          }
+          await deleteManagerSupervisorAction(actionId);
           actions.splice(actionIndex, 1);
           if (isManagerActionTicketEditRow(actionId)) clearManagerActionTicketEdit();
           appState.supervisorActions = normalizeSupervisorActions(actions);
@@ -6051,6 +5982,10 @@ function bindHome() {
       if (appState.appMode !== "manager" || !managerBackendSession.backendToken) return;
       const actionId = String(saveBtn.getAttribute("data-manager-action-reassign") || "").trim();
       if (!actionId) return;
+      if (!UUID_RE.test(actionId)) {
+        alert("Action is not synced to the server.");
+        return;
+      }
       const row = saveBtn.closest("[data-manager-action-row]") || saveBtn.closest("tr");
       const supervisorSelect = row?.querySelector("[data-manager-action-supervisor]");
       if (!supervisorSelect) return;
@@ -6117,38 +6052,19 @@ function bindHome() {
         return;
       }
       const nextSupervisorName = actionAssignmentLabel(nextUsername, action.supervisorName);
-      const nextValues = {
-        supervisorUsername: nextUsername,
-        supervisorName: nextSupervisorName,
-        priority: nextPriority,
-        status: nextStatus,
-        dueDate: nextDueDate,
-        relatedEquipmentId: nextRelatedEquipmentId,
-        relatedReasonCategory: nextRelatedReasonCategory,
-        relatedReasonDetail: nextRelatedReasonDetail
-      };
       try {
-        let updatedAction = null;
-        if (UUID_RE.test(actionId)) {
-          const savedAction = await patchManagerSupervisorAction(actionId, {
-            supervisorUsername: nextUsername,
-            supervisorName: nextSupervisorName,
-            lineId: action.lineId,
-            priority: nextPriority,
-            status: nextStatus,
-            dueDate: nextDueDate,
-            relatedEquipmentId: nextRelatedEquipmentId,
-            relatedReasonCategory: nextRelatedReasonCategory,
-            relatedReasonDetail: nextRelatedReasonDetail
-          });
-          updatedAction = normalizeSupervisorAction(savedAction);
-        }
-        if (!updatedAction) {
-          updatedAction = normalizeSupervisorAction({
-            ...action,
-            ...nextValues
-          });
-        }
+        const savedAction = await patchManagerSupervisorAction(actionId, {
+          supervisorUsername: nextUsername,
+          supervisorName: nextSupervisorName,
+          lineId: action.lineId,
+          priority: nextPriority,
+          status: nextStatus,
+          dueDate: nextDueDate,
+          relatedEquipmentId: nextRelatedEquipmentId,
+          relatedReasonCategory: nextRelatedReasonCategory,
+          relatedReasonDetail: nextRelatedReasonDetail
+        });
+        const updatedAction = normalizeSupervisorAction(savedAction);
         if (!updatedAction) throw new Error("Action update returned invalid data.");
         appState.supervisorActions = normalizeSupervisorActions(
           actions.map((item) => (String(item?.id || "") === actionId ? updatedAction : item))
@@ -6348,7 +6264,9 @@ function bindHome() {
     });
   }
   if (productLineAssignSaveBtn) {
-    productLineAssignSaveBtn.addEventListener("click", saveProductLineAssignments);
+    productLineAssignSaveBtn.addEventListener("click", async () => {
+      await saveProductLineAssignments();
+    });
   }
   if (lineGroupCreateForm) {
     lineGroupCreateForm.addEventListener("submit", async (event) => {
@@ -6438,36 +6356,39 @@ function bindHome() {
   }
 
   if (productCatalogTable) {
-    hydrateProductCatalogTableFromStorage(productCatalogTable);
+    hydrateProductCatalogTableFromState(productCatalogTable);
+    syncProductCatalogStateFromTable(productCatalogTable);
     const productCatalogWrap = productCatalogTable.closest(".products-table-wrap");
     if (manageProductCatalogContent && productCatalogWrap && !manageProductCatalogContent.contains(productCatalogWrap)) {
       manageProductCatalogContent.append(productCatalogWrap);
     }
-    ensureProductCatalogActionColumn();
+    ensureProductCatalogActionColumn(productCatalogTable);
     refreshProductRowAssignmentSummaries(productCatalogTable);
     syncRunProductInputsFromCatalog();
-    productCatalogTable.addEventListener("click", (event) => {
+    productCatalogTable.addEventListener("click", async (event) => {
       const editBtn = event.target.closest("[data-product-row-edit]");
       const linesBtn = event.target.closest("[data-product-row-lines]");
       if (linesBtn) {
+        if (!managerBackendSession.backendToken || appState.appMode !== "manager") return;
         const rowNode = linesBtn.closest("tr");
         if (!rowNode) return;
         openProductLineAssignModal(rowNode);
         return;
       }
       if (!editBtn) return;
+      if (!managerBackendSession.backendToken || appState.appMode !== "manager") return;
       const rowNode = editBtn.closest("tr");
       if (!rowNode) return;
       const isEditing = rowNode.getAttribute("data-product-editing") === "true";
       if (isEditing) {
-        finalizeProductRowInlineEdit(rowNode);
+        await finalizeProductRowInlineEdit(rowNode);
         return;
       }
       const openRows = Array.from(productCatalogTable.querySelectorAll('tbody tr[data-product-editing="true"]')).filter(
         (openRow) => openRow !== rowNode
       );
       for (const openRow of openRows) {
-        const saved = finalizeProductRowInlineEdit(openRow);
+        const saved = await finalizeProductRowInlineEdit(openRow);
         if (!saved) return;
       }
       beginProductRowInlineEdit(rowNode);
@@ -6476,16 +6397,17 @@ function bindHome() {
   if (addProductBtn && productCatalogTable) {
     addProductBtn.disabled = false;
     addProductBtn.textContent = "Add Product";
-    addProductBtn.addEventListener("click", () => {
+    addProductBtn.addEventListener("click", async () => {
+      if (!managerBackendSession.backendToken || appState.appMode !== "manager") return;
       const openRows = Array.from(productCatalogTable.querySelectorAll('tbody tr[data-product-editing="true"]'));
       for (const openRow of openRows) {
-        const saved = finalizeProductRowInlineEdit(openRow);
+        const saved = await finalizeProductRowInlineEdit(openRow);
         if (!saved) return;
       }
       const rowNode = buildProductCatalogRow(Array(PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT).fill(""), []);
       const tbody = productCatalogTable.tBodies?.[0] || productCatalogTable.createTBody();
       tbody.prepend(rowNode);
-      ensureProductCatalogActionColumn();
+      ensureProductCatalogActionColumn(productCatalogTable);
       setProductRowEditingState(rowNode, false);
       setProductRowAssignmentSummary(rowNode);
       beginProductRowInlineEdit(rowNode);
@@ -6786,6 +6708,10 @@ function bindHome() {
         alert("Log in as a supervisor to lodge actions.");
         return;
       }
+      if (!session.backendToken) {
+        alert("Supervisor session is not connected to the server. Please log in again.");
+        return;
+      }
       const assignedLineIds = Array.isArray(session.assignedLineIds) ? session.assignedLineIds : [];
       const selectedLineId = String(supervisorActionLineInput?.value || "").trim();
       if (selectedLineId && !assignedLineIds.includes(selectedLineId)) {
@@ -6827,48 +6753,25 @@ function bindHome() {
         }
         relatedReasonDetail = relatedReasonDetailRaw;
       }
-      const supervisor = supervisorByUsername(session.username);
-      const createdAction = normalizeSupervisorAction({
-        id: makeLocalLogId("action"),
-        supervisorUsername: session.username,
-        supervisorName: String(supervisor?.name || session?.name || session.username || "Supervisor").trim() || "Supervisor",
-        lineId: selectedLineId,
-        title,
-        description,
-        priority: normalizeActionPriority(supervisorActionPriorityInput?.value),
-        status: normalizeActionStatus(supervisorActionStatusInput?.value),
-        dueDate,
-        relatedEquipmentId: relatedEquipmentRaw,
-        relatedReasonCategory,
-        relatedReasonDetail,
-        createdAt: nowIso(),
-        createdBy: String(supervisor?.name || session?.name || session.username || "Supervisor").trim() || "Supervisor"
-      });
-      if (!createdAction) {
-        alert("Could not lodge action. Please try again.");
+      let nextAction = null;
+      try {
+        const savedAction = await syncSupervisorAction(session, {
+          lineId: selectedLineId,
+          title,
+          description,
+          priority: normalizeActionPriority(supervisorActionPriorityInput?.value),
+          status: normalizeActionStatus(supervisorActionStatusInput?.value),
+          dueDate,
+          relatedEquipmentId: relatedEquipmentRaw,
+          relatedReasonCategory,
+          relatedReasonDetail
+        });
+        const normalizedSaved = normalizeSupervisorAction(savedAction);
+        if (!normalizedSaved) throw new Error("Server returned invalid action data.");
+        nextAction = normalizedSaved;
+      } catch (error) {
+        alert(`Could not lodge action.\n${error?.message || "Please try again."}`);
         return;
-      }
-      let nextAction = createdAction;
-      if (session.backendToken) {
-        try {
-          const savedAction = await syncSupervisorAction(session, {
-            lineId: selectedLineId,
-            title,
-            description,
-            priority: normalizeActionPriority(supervisorActionPriorityInput?.value),
-            status: normalizeActionStatus(supervisorActionStatusInput?.value),
-            dueDate,
-            relatedEquipmentId: relatedEquipmentRaw,
-            relatedReasonCategory,
-            relatedReasonDetail
-          });
-          const normalizedSaved = normalizeSupervisorAction(savedAction);
-          if (!normalizedSaved) throw new Error("Server returned invalid action data.");
-          nextAction = normalizedSaved;
-        } catch (error) {
-          alert(`Could not lodge action.\n${error?.message || "Please try again."}`);
-          return;
-        }
       }
       const actions = ensureSupervisorActionsState();
       actions.unshift(nextAction);
@@ -12090,7 +11993,6 @@ function renderHome() {
     refreshProductRowAssignmentSummaries(productCatalogTable);
   }
   syncRunProductInputsFromCatalog();
-  seedSampleActionsForSupervisors();
 
   if (!isSupervisor) {
     renderManagerDataSourcesList(dataSourcesList);

@@ -70,16 +70,6 @@ function parseFrontendOrigins({ requireExplicit = false, strict = false, allowWi
   return deduped;
 }
 
-function inferDatabaseProvider(connectionString) {
-  try {
-    const url = new URL(connectionString);
-    if (/supabase/i.test(url.hostname)) return 'supabase';
-  } catch {
-    // Ignore invalid URL values; fallback handled by caller.
-  }
-  return 'postgres';
-}
-
 function validatedJwtSecret() {
   const secret = requireEnv('JWT_SECRET').trim();
   if (secret === 'change-me-in-staging-and-prod' || secret === 'replace-with-a-32-plus-char-random-secret') {
@@ -91,24 +81,20 @@ function validatedJwtSecret() {
   return secret;
 }
 
-const defaultLocalDatabaseUrl = 'postgresql://postgres:postgres@localhost:5432/production_line';
-const databaseUrl = firstNonEmptyEnv(['SUPABASE_DB_URL', 'DATABASE_URL'], isProduction ? '' : defaultLocalDatabaseUrl);
-if (isProduction) {
-  let host = '';
-  try {
-    host = String(new URL(databaseUrl).hostname || '').toLowerCase();
-  } catch {
-    throw new Error('SUPABASE_DB_URL/DATABASE_URL must be a valid connection string in production.');
-  }
-  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
-    throw new Error('SUPABASE_DB_URL/DATABASE_URL cannot use localhost in production.');
-  }
+const databaseUrl = requireEnv('SUPABASE_DB_URL').trim();
+let databaseHost = '';
+try {
+  databaseHost = String(new URL(databaseUrl).hostname || '').toLowerCase();
+} catch {
+  throw new Error('SUPABASE_DB_URL must be a valid PostgreSQL connection string.');
 }
-const rawProvider = String(process.env.DATABASE_PROVIDER || '').trim().toLowerCase();
-const inferredProvider = inferDatabaseProvider(databaseUrl);
-const databaseProvider = rawProvider === 'supabase' || rawProvider === 'postgres'
-  ? rawProvider
-  : inferredProvider;
+if (!/supabase/i.test(databaseHost)) {
+  throw new Error('SUPABASE_DB_URL must target a Supabase-hosted PostgreSQL instance.');
+}
+if (databaseHost === 'localhost' || databaseHost === '127.0.0.1' || databaseHost === '::1') {
+  throw new Error('SUPABASE_DB_URL cannot point to localhost.');
+}
+const databaseProvider = 'supabase';
 const frontendOrigins = parseFrontendOrigins({
   requireExplicit: isProduction,
   strict: isProduction,

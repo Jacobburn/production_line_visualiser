@@ -3,19 +3,9 @@
 ## 1) Prerequisites
 - Node.js 20+
 - npm 10+
-- Docker Desktop (optional, for local Postgres)
-- Supabase project (recommended for staging/production)
+- Supabase project
 
-## 2) Choose database mode
-
-### Option A: Local Postgres (docker)
-From the project root:
-
-```bash
-docker compose up -d postgres
-```
-
-### Option B: Supabase Postgres
+## 2) Configure Supabase Postgres
 1. Create a Supabase project.
 2. In Supabase, open Project Settings -> Database.
 3. Copy a Postgres connection string (direct or session pooler).
@@ -28,10 +18,7 @@ Copy env template:
 cp backend/.env.example backend/.env
 ```
 
-For local docker Postgres, `DATABASE_URL` already points to:
-`postgresql://postgres:postgres@localhost:5432/production_line`.
-
-For Supabase, set:
+Set:
 - `SUPABASE_DB_URL=<your supabase postgres connection string>`
 - `DB_SSL=true`
 - `DB_SSL_REJECT_UNAUTHORIZED=true`
@@ -83,9 +70,13 @@ curl http://localhost:4000/api/health
 ## API routes (current)
 - `POST /api/auth/login`
 - `GET /api/me`
+- `GET /api/state-snapshot`
 - `GET /api/lines`
 - `POST /api/lines` (manager only)
 - `GET /api/lines/:lineId`
+- `GET /api/product-catalog`
+- `POST /api/product-catalog` (manager only)
+- `PATCH /api/product-catalog/:productId` (manager only)
 - `POST /api/logs/shifts`
 - `POST /api/logs/runs`
 - `POST /api/logs/downtime`
