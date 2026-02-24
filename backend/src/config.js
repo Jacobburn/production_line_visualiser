@@ -2,6 +2,9 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+const nodeEnv = String(process.env.NODE_ENV || 'development').trim() || 'development';
+const isProduction = nodeEnv === 'production';
+
 function requireEnv(name, fallback = '') {
   const value = process.env[name] ?? fallback;
   if (!value) {
@@ -27,26 +30,44 @@ function parseNumberEnv(name, fallback, { min = Number.NEGATIVE_INFINITY } = {})
   return parsed;
 }
 
-function normalizeOrigin(value) {
+function normalizeOrigin(value, { strict = false } = {}) {
   const raw = String(value || '').trim();
   if (!raw) return '';
   if (raw === '*') return '*';
   try {
     return new URL(raw).origin;
   } catch {
+    if (strict) {
+      throw new Error(`Invalid frontend origin: ${raw}`);
+    }
     return raw.replace(/\/+$/, '');
   }
 }
 
-function parseFrontendOrigins() {
-  const raw = firstNonEmptyEnv(['FRONTEND_ORIGINS', 'FRONTEND_ORIGIN'], '*');
+function parseFrontendOrigins({ requireExplicit = false, strict = false, allowWildcard = true } = {}) {
+  const raw = firstNonEmptyEnv(['FRONTEND_ORIGINS', 'FRONTEND_ORIGIN'], requireExplicit ? '' : '*');
   const trimmed = String(raw || '').trim();
-  if (!trimmed || trimmed === '*') return ['*'];
+  if (!trimmed || trimmed === '*') {
+    if (!allowWildcard) {
+      throw new Error('FRONTEND_ORIGINS must be set to one or more explicit origins in production.');
+    }
+    return ['*'];
+  }
   const origins = trimmed
     .split(',')
-    .map((entry) => normalizeOrigin(entry))
+    .map((entry) => normalizeOrigin(entry, { strict }))
     .filter(Boolean);
-  return origins.length ? Array.from(new Set(origins)) : ['*'];
+  const deduped = origins.length ? Array.from(new Set(origins)) : [];
+  if (!deduped.length) {
+    if (!allowWildcard) {
+      throw new Error('FRONTEND_ORIGINS must contain at least one valid origin in production.');
+    }
+    return ['*'];
+  }
+  if (!allowWildcard && deduped.includes('*')) {
+    throw new Error('Wildcard FRONTEND_ORIGINS is not allowed in production.');
+  }
+  return deduped;
 }
 
 function inferDatabaseProvider(connectionString) {
@@ -71,16 +92,31 @@ function validatedJwtSecret() {
 }
 
 const defaultLocalDatabaseUrl = 'postgresql://postgres:postgres@localhost:5432/production_line';
-const databaseUrl = firstNonEmptyEnv(['SUPABASE_DB_URL', 'DATABASE_URL'], defaultLocalDatabaseUrl);
+const databaseUrl = firstNonEmptyEnv(['SUPABASE_DB_URL', 'DATABASE_URL'], isProduction ? '' : defaultLocalDatabaseUrl);
+if (isProduction) {
+  let host = '';
+  try {
+    host = String(new URL(databaseUrl).hostname || '').toLowerCase();
+  } catch {
+    throw new Error('SUPABASE_DB_URL/DATABASE_URL must be a valid connection string in production.');
+  }
+  if (host === 'localhost' || host === '127.0.0.1' || host === '::1') {
+    throw new Error('SUPABASE_DB_URL/DATABASE_URL cannot use localhost in production.');
+  }
+}
 const rawProvider = String(process.env.DATABASE_PROVIDER || '').trim().toLowerCase();
 const inferredProvider = inferDatabaseProvider(databaseUrl);
 const databaseProvider = rawProvider === 'supabase' || rawProvider === 'postgres'
   ? rawProvider
   : inferredProvider;
-const frontendOrigins = parseFrontendOrigins();
+const frontendOrigins = parseFrontendOrigins({
+  requireExplicit: isProduction,
+  strict: isProduction,
+  allowWildcard: !isProduction
+});
 
 export const config = {
-  nodeEnv: process.env.NODE_ENV || 'development',
+  nodeEnv,
   port: Number(process.env.API_PORT || process.env.PORT || 4000),
   databaseProvider,
   databaseUrl,

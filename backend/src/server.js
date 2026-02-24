@@ -4246,7 +4246,7 @@ app.use((error, _req, res, _next) => {
 });
 
 const server = app.listen(config.port, () => {
-  console.log(`API listening on http://localhost:${config.port}`);
+  console.log(`API listening on port ${config.port}`);
   console.log(`Database provider: ${config.databaseProvider}`);
 });
 

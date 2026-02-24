@@ -55,6 +55,8 @@ const DOWN_COLUMNS = ["Date", "Assigned Shift", "Downtime Start", "Downtime Fini
 const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
 const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "Utilisation (%)", "Net Run Rate (u/min)", "Bottleneck", "Staffing"];
 const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
+const MANAGER_LINE_TABS = Object.freeze(["visualiser", "dayVisualiser", "lineTrends", "data", "settings"]);
+const MANAGER_DATA_TABS = Object.freeze(["dataShift", "dataRun", "dataDown", "dataControls"]);
 const LINE_TREND_RANGES = ["day", "week", "month", "quarter"];
 const LOG_ASSIGNABLE_SHIFTS = ["Day", "Night"];
 const LINE_SHIFT_TRACKER_MIN_WEEKS = 1;
@@ -178,6 +180,7 @@ let managerBackendSession = {
   backendStageMap: {},
   role: "manager"
 };
+let pendingManagerDataTabRestore = { lineId: "", tabId: "" };
 const dataSourceConnectionTestState = new Map();
 
 function enforceAppVariantState() {
@@ -350,6 +353,36 @@ function writeRouteStorage(value) {
   }
 }
 
+function parseManagerLineTabId(value) {
+  const tabId = String(value || "").trim();
+  return MANAGER_LINE_TABS.includes(tabId) ? tabId : "";
+}
+
+function parseManagerDataTabId(value) {
+  const tabId = String(value || "").trim();
+  return MANAGER_DATA_TABS.includes(tabId) ? tabId : "";
+}
+
+function activeManagerLineTabId() {
+  const activeDomTab = parseManagerLineTabId(document.querySelector(".tab-btn[data-tab].active")?.dataset?.tab);
+  if (activeDomTab) return activeDomTab;
+  const activeStateTab = parseManagerLineTabId(appState.managerLineTab);
+  return activeStateTab || "visualiser";
+}
+
+function setActiveManagerLineTab(tabId) {
+  const activeId = parseManagerLineTabId(tabId) || "visualiser";
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
+    const isActive = btn.dataset.tab === activeId;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", String(isActive));
+  });
+  document.querySelectorAll(".tab-panel").forEach((panel) => {
+    panel.classList.toggle("active", panel.id === activeId);
+  });
+  appState.managerLineTab = activeId;
+}
+
 function applyRouteSnapshot(route) {
   if (!route || typeof route !== "object") return;
   const mode = route.mode;
@@ -376,15 +409,33 @@ function applyRouteSnapshot(route) {
   if (/^\d{4}-\d{2}-\d{2}$/.test(dashboardDate)) appState.dashboardDate = dashboardDate;
   const dashboardShift = String(route.dashboardShift || "");
   if (SHIFT_OPTIONS.includes(dashboardShift)) appState.dashboardShift = dashboardShift;
+  const managerLineTab = parseManagerLineTabId(route.managerLineTab);
+  if (managerLineTab) appState.managerLineTab = managerLineTab;
+  const managerDataTab = parseManagerDataTabId(route.managerDataTab);
+  if (managerDataTab) {
+    const targetLineId = String(appState.activeLineId || "");
+    const targetLine = appState.lines?.[targetLineId];
+    if (targetLine) {
+      targetLine.activeDataTab = managerDataTab;
+      if (state && state.id === targetLineId) state.activeDataTab = managerDataTab;
+      pendingManagerDataTabRestore = { lineId: "", tabId: "" };
+    } else {
+      pendingManagerDataTabRestore = { lineId: targetLineId, tabId: managerDataTab };
+    }
+  }
   enforceAppVariantState();
 }
 
 function currentRouteSnapshot() {
   const routeMode = APP_VARIANT === "supervisor" ? "supervisor" : "manager";
+  const activeLine = appState.lines?.[appState.activeLineId] || state || null;
+  const managerDataTab = parseManagerDataTabId(activeLine?.activeDataTab) || "dataShift";
   return {
     mode: routeMode,
     view: appState.activeView === "line" ? "line" : "home",
     lineId: appState.activeView === "line" ? String(appState.activeLineId || "") : "",
+    managerLineTab: activeManagerLineTabId(),
+    managerDataTab,
     supervisorMainTab: appState.supervisorMainTab || "supervisorDay",
     supervisorTab: appState.supervisorTab || "superShift",
     supervisorSelectedLineId: String(appState.supervisorSelectedLineId || ""),
@@ -407,6 +458,8 @@ function restoreRouteFromHash() {
       mode: params.get("mode"),
       view: params.get("view"),
       lineId: params.get("line"),
+      managerLineTab: params.get("mlt"),
+      managerDataTab: params.get("mdt"),
       supervisorMainTab: params.get("smt"),
       supervisorTab: params.get("st"),
       supervisorSelectedLineId: params.get("sl"),
@@ -436,6 +489,10 @@ function syncRouteToHash() {
   } else {
     if (route.dashboardDate) params.set("dd", route.dashboardDate);
     if (route.dashboardShift) params.set("ds", route.dashboardShift);
+    if (route.view === "line") {
+      params.set("mlt", parseManagerLineTabId(route.managerLineTab) || "visualiser");
+      params.set("mdt", parseManagerDataTabId(route.managerDataTab) || "dataShift");
+    }
   }
   const nextHash = `#${params.toString()}`;
   if (window.location.hash !== nextHash) history.replaceState(null, "", nextHash);
@@ -2031,6 +2088,7 @@ function loadState() {
     managerHomeTab: "dashboard",
     dashboardDate: todayISO(),
     dashboardShift: "Day",
+    managerLineTab: "visualiser",
     supervisorMobileMode: APP_VARIANT === "supervisor",
     supervisorMainTab: "supervisorDay",
     supervisorTab: "superShift",
@@ -3575,6 +3633,9 @@ async function refreshHostedState(preferredSession = null) {
     const ids = Object.keys(hostedLines);
     appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0] || "";
     state = appState.lines[appState.activeLineId] || null;
+    if (pendingManagerDataTabRestore.lineId && !hostedLines[pendingManagerDataTabRestore.lineId]) {
+      pendingManagerDataTabRestore = { lineId: "", tabId: "" };
+    }
 
     const supervisors = Array.isArray(snapshot?.supervisors)
       ? snapshot.supervisors.filter((sup) => sup && sup.isActive !== false)
@@ -4660,19 +4721,12 @@ function statusClass(utilisation) {
 }
 
 function bindTabs() {
-  document.querySelectorAll(".tab-btn").forEach((btn) => {
-    const tabId = btn.dataset.tab;
+  document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
+    const tabId = parseManagerLineTabId(btn.dataset.tab);
     if (!tabId) return;
     btn.addEventListener("click", () => {
-      document.querySelectorAll(".tab-btn").forEach((b) => {
-        b.classList.remove("active");
-        b.setAttribute("aria-selected", "false");
-      });
-      document.querySelectorAll(".tab-panel").forEach((panel) => panel.classList.remove("active"));
-      btn.classList.add("active");
-      btn.setAttribute("aria-selected", "true");
-      const panel = document.getElementById(tabId);
-      if (panel) panel.classList.add("active");
+      setActiveManagerLineTab(tabId);
+      saveState();
     });
   });
 }
@@ -8509,9 +8563,11 @@ function bindHome() {
 function bindDataSubtabs() {
   document.querySelectorAll(".data-subtab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
-      const target = btn.dataset.dataTab;
+      if (!state) return;
+      const target = parseManagerDataTabId(btn.dataset.dataTab);
       if (!target) return;
       state.activeDataTab = target;
+      pendingManagerDataTabRestore = { lineId: "", tabId: "" };
       saveState();
       setActiveDataSubtab();
     });
@@ -12777,6 +12833,13 @@ function renderAll() {
   document.querySelectorAll("[data-manager-date]").forEach((input) => {
     input.value = state.selectedDate;
   });
+  setActiveManagerLineTab(activeManagerLineTabId());
+  const pendingTabId = parseManagerDataTabId(pendingManagerDataTabRestore.tabId);
+  const pendingLineId = String(pendingManagerDataTabRestore.lineId || "");
+  if (pendingTabId && (!pendingLineId || pendingLineId === String(state.id || ""))) {
+    state.activeDataTab = pendingTabId;
+    pendingManagerDataTabRestore = { lineId: "", tabId: "" };
+  }
   setShiftToggleUI();
   setActiveDataSubtab();
   renderCrewInputs();
@@ -12789,7 +12852,8 @@ function renderAll() {
 }
 
 function setActiveDataSubtab() {
-  const activeId = state.activeDataTab || "dataShift";
+  const activeId = parseManagerDataTabId(state?.activeDataTab) || "dataShift";
+  if (state) state.activeDataTab = activeId;
   document.querySelectorAll(".data-subtab-btn").forEach((btn) => {
     const active = btn.dataset.dataTab === activeId;
     btn.classList.toggle("active", active);
