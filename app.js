@@ -2295,6 +2295,7 @@ function normalizeLine(id, line) {
       ? line.runRows.map((row) => ({
           ...row,
           runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
+          assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
           shift: ""
         }))
       : [],
@@ -3230,6 +3231,8 @@ function timedLogShiftWeight(row, selectedShift) {
 }
 
 function resolveTimedLogShiftLabel(row, line, startField, finishField) {
+  const assignedShift = normalizeLogAssignableShift(row?.assignedShift || row?.shift);
+  if (assignedShift) return assignedShift;
   const explicit = String(row?.__shiftLabel || "").trim();
   if (explicit) return explicit;
   const coverage = shiftCoverageForTimedLog(line, row?.date, row?.[startField], row?.[finishField]);
@@ -3373,6 +3376,11 @@ function selectedShiftRowsByDate(rows, date, shift, { line = null } = {}) {
 
 function rowIsValidDateShift(date, shift) {
   return /^\d{4}-\d{2}-\d{2}$/.test(String(date || "")) && SHIFT_OPTIONS.includes(String(shift || ""));
+}
+
+function normalizeLogAssignableShift(value) {
+  const shift = String(value || "").trim();
+  return LOG_ASSIGNABLE_SHIFTS.includes(shift) ? shift : "";
 }
 
 async function apiRequest(path, { method = "GET", token = "", body, timeoutMs = API_REQUEST_TIMEOUT_MS } = {}) {
@@ -3570,6 +3578,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
         ...row,
         notes: String(row?.notes || ""),
         runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
+        assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
         shift: ""
       }))
     : [];
@@ -7510,7 +7519,12 @@ function bindHome() {
       ? Math.max(0, num(existing?.unitsProduced))
       : Math.max(0, num(unitsRaw));
     const notes = notesInput !== "" ? notesInput : String(existing?.notes || "");
-    const backendShift = inferShiftForLog(line, date, productionStartTime, appState.supervisorSelectedShift || "Day");
+    const backendShift = inferShiftForLog(
+      line,
+      date,
+      productionStartTime,
+      existing?.assignedShift || existing?.shift || appState.supervisorSelectedShift || "Day"
+    );
 
     if (!strictTimeValid(productionStartTime) || !strictTimeValid(finishTime)) {
       alert("Production start and finish must be HH:MM (24h).");
@@ -7561,6 +7575,7 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
+        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
         shift: "",
         runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, line, backendShift, { fallbackToIdeal: false }),
         id: saved?.id || existing?.id || "",
@@ -7671,7 +7686,8 @@ function bindHome() {
     document.getElementById("superRunUnits").value = num(row.unitsProduced) > 0 ? formatNum(Math.max(0, num(row.unitsProduced)), 0) : "";
     document.getElementById("superRunNotes").value = String(row.notes || "");
     superRunLogIdInput.value = row.id || "";
-    const rowShift = row.shift || inferShiftForLog(line, row.date, row.productionStartTime, appState.supervisorSelectedShift || "Day");
+    const rowShift = normalizeLogAssignableShift(row.assignedShift || row.shift)
+      || inferShiftForLog(line, row.date, row.productionStartTime, appState.supervisorSelectedShift || "Day");
     setRunCrewingPatternField(
       superRunCrewingPatternInput,
       superRunCrewingPatternSummary,
@@ -7853,7 +7869,8 @@ function bindHome() {
     const unitsPrompt = window.prompt("Units produced", String(Math.max(0, num(row.unitsProduced))));
     if (unitsPrompt === null) return;
     const unitsProduced = Math.max(0, num(unitsPrompt));
-    const shift = row.shift || inferShiftForLog(line, row.date, productionStartTime, appState.supervisorSelectedShift || "Day");
+    const shift = normalizeLogAssignableShift(row.assignedShift || row.shift)
+      || inferShiftForLog(line, row.date, productionStartTime, appState.supervisorSelectedShift || "Day");
     if (!supervisorCanAccessShift(session, lineId, shift)) {
       alert(`You are not assigned to the ${shift} shift.`);
       return;
@@ -7874,6 +7891,7 @@ function bindHome() {
       const savedRow = {
         ...row,
         ...payload,
+        assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
         shift: "",
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
@@ -9427,6 +9445,7 @@ function bindForms() {
       const saved = await syncManagerRunLog(payload);
       state.runRows.push({
         ...data,
+        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
         shift: "",
         runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || data.runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
         id: saved?.id || data.id || makeLocalLogId("run"),
@@ -9500,6 +9519,17 @@ function bindForms() {
   });
 
   const inlineValue = (rowNode, field) => String(rowNode?.querySelector(`[data-inline-field="${field}"]`)?.value || "").trim();
+  const upsertManagerRowById = (rows, nextRow) => {
+    if (!Array.isArray(rows) || !nextRow) return;
+    if (nextRow.id) {
+      const index = rows.findIndex((row) => String(row?.id || "") === String(nextRow.id));
+      if (index >= 0) {
+        rows[index] = { ...rows[index], ...nextRow };
+        return;
+      }
+    }
+    rows.push(nextRow);
+  };
 
   const saveManagerShiftBreakEdits = async (
     shiftLog,
@@ -9592,7 +9622,7 @@ function bindForms() {
             return false;
           }
           const savedBreak = await startManagerShiftBreak(shiftLog.id, startValue, finishValue || null);
-          upsertRowById(state.breakRows, {
+          upsertManagerRowById(state.breakRows, {
             id: savedBreak?.id || makeLocalLogId("break"),
             lineId: shiftLog.lineId || state.id,
             date: shiftLog.date || todayISO(),
@@ -9605,7 +9635,7 @@ function bindForms() {
           });
           changed = true;
         } else {
-          upsertRowById(state.breakRows, {
+          upsertManagerRowById(state.breakRows, {
             id: makeLocalLogId("break"),
             lineId: shiftLog.lineId || state.id,
             date: shiftLog.date || todayISO(),
@@ -9706,7 +9736,8 @@ function bindForms() {
         alert("Run row could not be found. Refresh and try again.");
         return;
       }
-      const date = String(row.date || "").trim();
+      const date = inlineValue(rowNode, "date");
+      const assignedShift = normalizeLogAssignableShift(inlineValue(rowNode, "assignedShift"));
       const product = catalogProductCanonicalName(String(inlineValue(rowNode, "product") || "").trim());
       const productionStartTime = inlineValue(rowNode, "productionStartTime");
       const finishTime = inlineValue(rowNode, "finishTime");
@@ -9720,6 +9751,10 @@ function bindForms() {
         alert("Product is required.");
         return;
       }
+      if (!assignedShift) {
+        alert("Assigned shift is required.");
+        return;
+      }
       const productChanged = product !== catalogProductCanonicalName(String(row.product || "").trim());
       if (productChanged && !isCatalogProductName(product)) {
         alert("Product must be selected from Manage Products.");
@@ -9729,12 +9764,13 @@ function bindForms() {
         alert("Times must be HH:MM (24h).");
         return;
       }
-      const backendShift = inferShiftForLog(state, date, productionStartTime, row.shift || state.selectedShift || "Day");
       const runPatternRaw = inlineValue(rowNode, "runCrewingPattern");
-      const runPatternFromEdit = normalizeRunCrewingPattern(runPatternRaw, state, backendShift, { fallbackToIdeal: false });
-      const existingRunPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, backendShift, { fallbackToIdeal: false });
+      const runPatternFromEdit = normalizeRunCrewingPattern(runPatternRaw, state, assignedShift, { fallbackToIdeal: false });
+      const existingRunPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, assignedShift, { fallbackToIdeal: false });
       const runCrewingPattern = Object.keys(runPatternFromEdit).length ? runPatternFromEdit : existingRunPattern;
       const payload = {
+        date,
+        shift: assignedShift,
         product,
         setUpStartTime: "",
         productionStartTime,
@@ -9748,6 +9784,8 @@ function bindForms() {
         if (canPatchServer) {
           const saved = await patchManagerRunLog(logId, payload);
           Object.assign(row, {
+            date,
+            assignedShift: normalizeLogAssignableShift(saved?.shift || assignedShift),
             product,
             setUpStartTime: "",
             productionStartTime,
@@ -9755,12 +9793,14 @@ function bindForms() {
             unitsProduced,
             notes,
             shift: "",
-            runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
+            runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, assignedShift, { fallbackToIdeal: false }),
             submittedBy: "manager",
             submittedAt: saved?.submittedAt || nowIso()
           });
         } else {
           Object.assign(row, {
+            date,
+            assignedShift,
             product,
             setUpStartTime: "",
             productionStartTime,
@@ -10033,7 +10073,8 @@ function bindForms() {
     const unitsPrompt = window.prompt("Units produced", String(Math.max(0, num(row.unitsProduced))));
     if (unitsPrompt === null) return;
     const unitsProduced = Math.max(0, num(unitsPrompt));
-    const backendShift = inferShiftForLog(state, row.date, productionStartTime, row.shift || state.selectedShift || "Day");
+    const backendShift = normalizeLogAssignableShift(row.assignedShift || row.shift)
+      || inferShiftForLog(state, row.date, productionStartTime, state.selectedShift || "Day");
     const runCrewingPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, backendShift, { fallbackToIdeal: false });
     const payload = {
       lineId: state.id,
@@ -10052,6 +10093,7 @@ function bindForms() {
       if (canPatchServer) {
         const saved = await patchManagerRunLog(logId, payload);
         Object.assign(row, payload, {
+          assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
           shift: "",
           runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
           submittedBy: "manager",
@@ -10059,6 +10101,7 @@ function bindForms() {
         });
       } else {
         Object.assign(row, payload, {
+          assignedShift: backendShift,
           shift: "",
           runCrewingPattern,
           submittedBy: "manager",
@@ -10234,8 +10277,9 @@ function bindForms() {
       if (!patternInput) return;
       const date = inlineValue(rowNode, "date") || state.selectedDate || todayISO();
       const startTime = inlineValue(rowNode, "productionStartTime");
+      const selectedShift = normalizeLogAssignableShift(inlineValue(rowNode, "assignedShift"));
       const fallbackShift = String(patternBtn.getAttribute("data-pattern-shift") || state.selectedShift || "Day");
-      const shift = inferShiftForLog(state, date, startTime, fallbackShift);
+      const shift = selectedShift || inferShiftForLog(state, date, startTime, fallbackShift);
       openRunCrewingPatternModal({
         line: state,
         shift,
@@ -10420,6 +10464,7 @@ function bindDataControls() {
         ? parsed.runRows.map((row) => ({
             ...row,
             runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
+            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
             shift: ""
           }))
         : [];
@@ -11927,8 +11972,16 @@ function renderTrackingTables() {
     const editing = isInlineEditing("run", String(row.id || ""));
     const pending = isPendingRunLogRow(row);
     const htmlFields = ["action"];
-    if (editing) htmlFields.push("product", "productionStartTime", "finishTime", "unitsProduced", "notes");
-    const patternShift = inferShiftForLog(state, String(row.date || todayISO()), String(row.productionStartTime || ""), state.selectedShift || "Day");
+    if (editing) htmlFields.push("date", "assignedShift", "product", "productionStartTime", "finishTime", "unitsProduced", "notes");
+    const explicitAssignedShift = normalizeLogAssignableShift(row.assignedShift || row.shift);
+    const inferredAssignedShift = inferShiftForLog(
+      state,
+      String(row.date || todayISO()),
+      String(row.productionStartTime || ""),
+      state.selectedShift || "Day"
+    );
+    const editableAssignedShift = explicitAssignedShift || normalizeLogAssignableShift(inferredAssignedShift) || LOG_ASSIGNABLE_SHIFTS[0];
+    const patternShift = editing ? editableAssignedShift : explicitAssignedShift || inferredAssignedShift;
     const runPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, patternShift, { fallbackToIdeal: false });
     const runPatternRaw = Object.keys(runPattern).length ? JSON.stringify(runPattern) : "";
     const runPatternSummary = runCrewingPatternSummaryText(runPattern, state);
@@ -11936,8 +11989,14 @@ function renderTrackingTables() {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
       __htmlFields: htmlFields,
-      date: row.date,
-      assignedShift: resolveTimedLogShiftLabel(row, state, "productionStartTime", "finishTime"),
+      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
+      assignedShift: editing
+        ? inlineSelectHtml(
+          "assignedShift",
+          editableAssignedShift,
+          LOG_ASSIGNABLE_SHIFTS.map((shiftOption) => ({ value: shiftOption, label: shiftOption }))
+        )
+        : resolveTimedLogShiftLabel(row, state, "productionStartTime", "finishTime"),
       product: editing
         ? `
           <div class="table-inline-stack">

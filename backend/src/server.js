@@ -241,6 +241,8 @@ const shiftBreakUpdateSchema = z.object({
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const runLogUpdateSchema = z.object({
+  date: z.string().regex(isoDateRegex).optional(),
+  shift: z.enum(shiftValues).optional(),
   product: z.string().min(1).max(120).optional(),
   setUpStartTime: optionalTime.optional(),
   productionStartTime: optionalTime.optional(),
@@ -638,7 +640,7 @@ async function isActiveLine(lineId) {
 
 async function hasLineShiftAccess(user, lineId, shift) {
   if (!shiftValues.includes(shift)) return false;
-  if (user.role === 'manager') return isActiveLine(lineId);
+  if (user.role === 'manager') return true;
   const result = await dbQuery(
     `SELECT 1
      FROM supervisor_line_shift_assignments a
@@ -671,6 +673,14 @@ async function hasLineShiftAccess(user, lineId, shift) {
     [user.id, lineId, shift]
   );
   return result.rowCount > 0;
+}
+
+function canMutateSubmittedLog(user, submittedByUserId) {
+  if (!user) return false;
+  if (user.role === 'manager') return true;
+  const ownerId = String(submittedByUserId || '').trim();
+  const actorId = String(user.id || '').trim();
+  return Boolean(ownerId) && ownerId === actorId;
 }
 
 async function isLineStage(lineId, stageId) {
@@ -4116,8 +4126,8 @@ app.post('/api/logs/shifts/:logId/breaks', authMiddleware, asyncRoute(async (req
   const shiftLog = shiftResult.rows[0];
 
   if (!(await hasLineShiftAccess(req.user, shiftLog.lineId, shiftLog.shift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && shiftLog.submittedByUserId && shiftLog.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot update another user\'s shift log' });
+  if (!canMutateSubmittedLog(req.user, shiftLog.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only update their own shift logs' });
   }
   if (!shiftLog.isOpen && req.user.role !== 'manager') return res.status(400).json({ error: 'Shift is already complete' });
   if (!shiftLog.isOpen && creatingOpenBreak) {
@@ -4194,8 +4204,8 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
   const breakLog = breakResult.rows[0];
 
   if (!(await hasLineShiftAccess(req.user, breakLog.lineId, breakLog.shift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && breakLog.submittedByUserId && breakLog.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot update another user\'s break log' });
+  if (!canMutateSubmittedLog(req.user, breakLog.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only update their own break logs' });
   }
   if (!breakLog.shiftOpen && req.user.role !== 'manager') return res.status(400).json({ error: 'Shift is already complete' });
 
@@ -4364,8 +4374,8 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
   const data = parsed.data;
   const accessShift = data.shift || existing.shift;
   if (!(await hasLineShiftAccess(req.user, existing.lineId, accessShift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot edit logs submitted by another user' });
+  if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only edit their own logs' });
   }
 
   const notesProvided = Object.prototype.hasOwnProperty.call(data, 'notes');
@@ -4457,28 +4467,31 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
   if (!existingResult.rowCount) return res.status(404).json({ error: 'Run log not found' });
   const existing = existingResult.rows[0];
 
-  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot edit logs submitted by another user' });
+  const data = parsed.data;
+  const accessShift = data.shift || existing.shift;
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, accessShift))) return res.status(403).json({ error: 'Forbidden' });
+  if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only edit their own logs' });
   }
 
-  const data = parsed.data;
   const notesProvided = Object.prototype.hasOwnProperty.call(data, 'notes');
   const notesValue = notesProvided ? String(data.notes ?? '').trim() : '';
   const result = await dbQuery(
     `UPDATE run_logs
      SET
-       product = COALESCE(NULLIF($2, ''), product),
-       setup_start_time = CASE WHEN $3::text IS NULL THEN setup_start_time ELSE NULLIF($3, '')::time END,
-       production_start_time = COALESCE(NULLIF($4, '')::time, production_start_time),
-       finish_time = COALESCE(NULLIF($5, '')::time, finish_time),
-       units_produced = COALESCE($6, units_produced),
-       run_crewing_pattern = COALESCE($7::jsonb, run_crewing_pattern),
+       date = COALESCE($2::date, date),
+       shift = COALESCE($3, shift),
+       product = COALESCE(NULLIF($4, ''), product),
+       setup_start_time = CASE WHEN $5::text IS NULL THEN setup_start_time ELSE NULLIF($5, '')::time END,
+       production_start_time = COALESCE(NULLIF($6, '')::time, production_start_time),
+       finish_time = COALESCE(NULLIF($7, '')::time, finish_time),
+       units_produced = COALESCE($8, units_produced),
+       run_crewing_pattern = COALESCE($9::jsonb, run_crewing_pattern),
        notes = CASE
-         WHEN $8::boolean IS FALSE THEN notes
-         ELSE $9
+         WHEN $10::boolean IS FALSE THEN notes
+         ELSE $11
        END,
-       submitted_by_user_id = $10,
+       submitted_by_user_id = $12,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -4496,6 +4509,8 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        submitted_at AS "submittedAt"`,
     [
       logId,
+      data.date ?? null,
+      data.shift ?? null,
       data.product ?? null,
       data.setUpStartTime ?? null,
       data.productionStartTime ?? null,
@@ -4537,8 +4552,8 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   const existing = existingResult.rows[0];
 
   if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot edit logs submitted by another user' });
+  if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only edit their own logs' });
   }
 
   const data = parsed.data;
@@ -4628,8 +4643,8 @@ app.delete('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res
   const existing = existingResult.rows[0];
 
   if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot delete logs submitted by another user' });
+  if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only delete their own logs' });
   }
 
   await dbQuery(`DELETE FROM shift_logs WHERE id = $1`, [logId]);
@@ -4665,8 +4680,8 @@ app.delete('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) 
   const existing = existingResult.rows[0];
 
   if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot delete logs submitted by another user' });
+  if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only delete their own logs' });
   }
 
   await dbQuery(`DELETE FROM run_logs WHERE id = $1`, [logId]);
@@ -4702,8 +4717,8 @@ app.delete('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, r
   const existing = existingResult.rows[0];
 
   if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
-  if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
-    return res.status(403).json({ error: 'Cannot delete logs submitted by another user' });
+  if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only delete their own logs' });
   }
 
   await dbQuery(`DELETE FROM downtime_logs WHERE id = $1`, [logId]);
