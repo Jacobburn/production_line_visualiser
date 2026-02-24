@@ -2960,6 +2960,27 @@ function managerLogSubmittedByLabel(row) {
   return submittedBy;
 }
 
+function supervisorOwnsPendingLogRow(row, session = appState.supervisorSession) {
+  if (!row || !session) return false;
+  const rowUserId = String(row?.submittedByUserId || "").trim();
+  const sessionUserId = String(session?.userId || "").trim();
+  if (rowUserId && sessionUserId) return rowUserId === sessionUserId;
+  const rowSubmittedBy = String(row?.submittedBy || "").trim().toLowerCase();
+  if (!rowSubmittedBy) return false;
+  const assignedSupervisor = supervisorByUsername(session?.username || "");
+  const identityKeys = new Set(
+    [
+      session?.username,
+      session?.name,
+      assignedSupervisor?.username,
+      assignedSupervisor?.name
+    ]
+      .map((value) => String(value || "").trim().toLowerCase())
+      .filter(Boolean)
+  );
+  return identityKeys.has(rowSubmittedBy);
+}
+
 function breakRowsForShift(line, shiftLogOrId, fallback = {}) {
   const breakRows = Array.isArray(line?.breakRows) ? line.breakRows : [];
   const hasShiftLinkedBreaks = breakRows.some((row) => Boolean(String(row?.shiftLogId || "").trim()));
@@ -7195,7 +7216,11 @@ function bindHome() {
       if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
     }
     if (!shiftLog) {
-      shiftLog = latestBySubmittedAt((line.shiftRows || []).filter((row) => row.date === date && row.shift === shift && isOpenShiftRow(row)));
+      shiftLog = latestBySubmittedAt(
+        (line.shiftRows || []).filter(
+          (row) => row.date === date && row.shift === shift && isOpenShiftRow(row) && supervisorOwnsPendingLogRow(row, session)
+        )
+      );
     }
     if (!shiftLog?.id) {
       alert("Start the shift first, then you can log breaks.");
@@ -7265,7 +7290,11 @@ function bindHome() {
       if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
     }
     if (!shiftLog) {
-      shiftLog = latestBySubmittedAt((line.shiftRows || []).filter((row) => row.date === date && row.shift === shift && isOpenShiftRow(row)));
+      shiftLog = latestBySubmittedAt(
+        (line.shiftRows || []).filter(
+          (row) => row.date === date && row.shift === shift && isOpenShiftRow(row) && supervisorOwnsPendingLogRow(row, session)
+        )
+      );
     }
     if (!shiftLog?.id) {
       alert("No open shift found for this date/shift.");
@@ -9608,7 +9637,6 @@ function bindForms() {
               Object.assign(existingBreak, {
                 breakStart: savedStart,
                 breakFinish: savedFinish,
-                submittedBy: "manager",
                 submittedAt: savedBreak?.submittedAt || nowIso()
               });
               changed = true;
@@ -9617,7 +9645,6 @@ function bindForms() {
             Object.assign(existingBreak, {
               breakStart: nextStart,
               breakFinish: nextFinish,
-              submittedBy: "manager",
               submittedAt: nowIso()
             });
             changed = true;
@@ -9718,12 +9745,10 @@ function bindForms() {
         if (canPatchServer) {
           const saved = await patchManagerShiftLog(logId, payload);
           Object.assign(row, payload, {
-            submittedBy: "manager",
             submittedAt: saved?.submittedAt || nowIso()
           });
         } else {
           Object.assign(row, payload, {
-            submittedBy: "manager",
             submittedAt: nowIso()
           });
         }
@@ -9809,7 +9834,6 @@ function bindForms() {
             notes,
             shift: "",
             runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, assignedShift, { fallbackToIdeal: false }),
-            submittedBy: "manager",
             submittedAt: saved?.submittedAt || nowIso()
           });
         } else {
@@ -9824,7 +9848,6 @@ function bindForms() {
             notes,
             shift: "",
             runCrewingPattern,
-            submittedBy: "manager",
             submittedAt: nowIso()
           });
         }
@@ -9910,14 +9933,12 @@ function bindForms() {
           Object.assign(row, updatedValues, {
             assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
             shift: "",
-            submittedBy: "manager",
             submittedAt: saved?.submittedAt || nowIso()
           });
         } else {
           Object.assign(row, updatedValues, {
             assignedShift: shift,
             shift: "",
-            submittedBy: "manager",
             submittedAt: nowIso()
           });
         }
@@ -10023,14 +10044,12 @@ function bindForms() {
             breakStart: nextBreakStart || breakStart,
             breakFinish: nextBreakFinish || breakFinish,
             breakMins: Math.max(0, diffMinutes(nextBreakStart || breakStart, nextBreakFinish || breakFinish)),
-            submittedBy: "manager",
             submittedAt: savedBreak?.submittedAt || nowIso()
           });
         } else {
           Object.assign(openBreak, {
             breakFinish,
             breakMins: Math.max(0, diffMinutes(breakStart, breakFinish)),
-            submittedBy: "manager",
             submittedAt: nowIso()
           });
         }
@@ -10064,7 +10083,6 @@ function bindForms() {
       const { saved, persistedLogId } = await persistManagerFinalisedShift(row, logId, payload);
       Object.assign(row, rowPayload, {
         id: persistedLogId || row.id,
-        submittedBy: "manager",
         submittedAt: saved?.submittedAt || nowIso()
       });
       clearManagerInlineEditIfTarget("shift", logId);
@@ -10128,7 +10146,6 @@ function bindForms() {
           assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
           shift: "",
           runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
-          submittedBy: "manager",
           submittedAt: saved?.submittedAt || nowIso()
         });
       } else {
@@ -10136,7 +10153,6 @@ function bindForms() {
           assignedShift: backendShift,
           shift: "",
           runCrewingPattern,
-          submittedBy: "manager",
           submittedAt: nowIso()
         });
       }
@@ -10214,14 +10230,12 @@ function bindForms() {
         Object.assign(row, updatedValues, {
           assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
           shift: "",
-          submittedBy: "manager",
           submittedAt: saved?.submittedAt || nowIso()
         });
       } else {
         Object.assign(row, updatedValues, {
           assignedShift: normalizeLogAssignableShift(shift),
           shift: "",
-          submittedBy: "manager",
           submittedAt: nowIso()
         });
       }
@@ -11928,12 +11942,12 @@ function renderTrackingTables() {
     (rows || [])
       .slice()
       .sort((a, b) => {
+        const dateCmp = String(b?.date || "").localeCompare(String(a?.date || ""));
+        if (dateCmp !== 0) return dateCmp;
         const tsDiff = rowNewestSortValue(b, primaryTimeField) - rowNewestSortValue(a, primaryTimeField);
         if (tsDiff !== 0) return tsDiff;
         const submittedCmp = String(b?.submittedAt || "").localeCompare(String(a?.submittedAt || ""));
         if (submittedCmp !== 0) return submittedCmp;
-        const dateCmp = String(b?.date || "").localeCompare(String(a?.date || ""));
-        if (dateCmp !== 0) return dateCmp;
         return String(b?.id || "").localeCompare(String(a?.id || ""));
       });
 
@@ -12853,7 +12867,12 @@ function renderHome() {
     const shiftKeyDate = shiftDateInput.value || appState.supervisorSelectedDate;
     const shiftKeyShift = shiftShiftInput?.value || appState.supervisorSelectedShift;
     const shiftOpenRows = (activeLine.shiftRows || [])
-      .filter((row) => rowMatchesDateShift(row, shiftKeyDate, shiftKeyShift) && isShiftOpen(row))
+      .filter(
+        (row) =>
+          rowMatchesDateShift(row, shiftKeyDate, shiftKeyShift) &&
+          isShiftOpen(row) &&
+          supervisorOwnsPendingLogRow(row, session)
+      )
       .slice()
       .sort((a, b) => {
         const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
@@ -12956,7 +12975,8 @@ function renderHome() {
             startField: "productionStartTime",
             finishField: "finishTime"
           }) &&
-          isRunOpen(row)
+          isRunOpen(row) &&
+          supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
       .sort((a, b) => {
@@ -13006,7 +13026,8 @@ function renderHome() {
             startField: "downtimeStart",
             finishField: "downtimeFinish"
           }) &&
-          isDownOpen(row)
+          isDownOpen(row) &&
+          supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
       .sort((a, b) => {

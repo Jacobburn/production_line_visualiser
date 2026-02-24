@@ -4220,7 +4220,6 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
      SET
        break_start = COALESCE($2::time, break_start),
        break_finish = COALESCE($3::time, break_finish),
-       submitted_by_user_id = $4,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -4232,7 +4231,7 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
        to_char(break_start, 'HH24:MI') AS "breakStart",
        COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
        submitted_at AS "submittedAt"`,
-    [breakId, parsed.data.breakStart || null, parsed.data.breakFinish || null, req.user.id]
+    [breakId, parsed.data.breakStart || null, parsed.data.breakFinish || null]
   );
 
   const changedFields = [];
@@ -4395,7 +4394,6 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
            WHEN $7::boolean IS FALSE THEN notes
            ELSE $8
          END,
-         submitted_by_user_id = $9,
          submitted_at = NOW()
        WHERE id = $1
        RETURNING
@@ -4436,8 +4434,7 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
       data.startTime ?? null,
       data.finishTime ?? null,
       notesProvided,
-      notesValue,
-      req.user.id
+      notesValue
     ]
   );
 
@@ -4493,7 +4490,6 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
          WHEN $10::boolean IS FALSE THEN notes
          ELSE $11
        END,
-       submitted_by_user_id = $12,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -4520,8 +4516,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
       data.unitsProduced,
       data.runCrewingPattern === undefined ? null : JSON.stringify(data.runCrewingPattern || {}),
       notesProvided,
-      notesValue,
-      req.user.id
+      notesValue
     ]
   );
 
@@ -4588,7 +4583,6 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
          WHEN $10::boolean IS FALSE THEN notes
          ELSE $11
        END,
-       submitted_by_user_id = $12,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -4613,8 +4607,7 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
       reasonProvided,
       reasonValue,
       notesProvided,
-      notesValue,
-      req.user.id
+      notesValue
     ]
   );
 
