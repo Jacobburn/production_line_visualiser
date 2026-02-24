@@ -146,6 +146,8 @@ appState.supervisorActions = normalizeSupervisorActions(appState.supervisorActio
 setProductCatalogEntries(appState.productCatalogEntries);
 let lineModelSyncTimer = null;
 const deferredLineModelSyncIds = new Set();
+const pendingLineSettingsSaveIds = new Set();
+const lineSettingsSaveInFlightIds = new Set();
 let lineShiftTrackerResizeTimer = null;
 let lineTileFeedbackTimer = null;
 let hostedRefreshErrorShown = false;
@@ -292,10 +294,11 @@ function parseManagerDataTabId(value) {
 }
 
 function activeManagerLineTabId() {
+  const activeStateTab = parseManagerLineTabId(appState.managerLineTab);
+  if (activeStateTab) return activeStateTab;
   const activeDomTab = parseManagerLineTabId(document.querySelector(".tab-btn[data-tab].active")?.dataset?.tab);
   if (activeDomTab) return activeDomTab;
-  const activeStateTab = parseManagerLineTabId(appState.managerLineTab);
-  return activeStateTab || "visualiser";
+  return "visualiser";
 }
 
 function setActiveManagerLineTab(tabId) {
@@ -357,7 +360,13 @@ function applyRouteSnapshot(route) {
 function currentRouteSnapshot() {
   const routeMode = APP_VARIANT === "supervisor" ? "supervisor" : "manager";
   const activeLine = appState.lines?.[appState.activeLineId] || state || null;
-  const managerDataTab = parseManagerDataTabId(activeLine?.activeDataTab) || "dataShift";
+  const pendingTabId = parseManagerDataTabId(pendingManagerDataTabRestore.tabId);
+  const pendingLineId = String(pendingManagerDataTabRestore.lineId || "");
+  const activeLineId = String(activeLine?.id || appState.activeLineId || "");
+  const managerDataTab =
+    pendingTabId && (!pendingLineId || pendingLineId === activeLineId)
+      ? pendingTabId
+      : parseManagerDataTabId(activeLine?.activeDataTab) || "dataShift";
   return {
     mode: routeMode,
     view: appState.activeView === "line" ? "line" : "home",
@@ -515,10 +524,22 @@ function enforcePermanentCrewAndThroughput(line) {
     if (!templated) return;
     const crew = defaultCrewForStage(stage);
     const maxThroughput = defaultMaxThroughputForStage(stage);
-    stage.crew = crew;
-    line.crewsByShift.Day[stage.id] = { ...(line.crewsByShift.Day[stage.id] || {}), crew };
-    line.crewsByShift.Night[stage.id] = { ...(line.crewsByShift.Night[stage.id] || {}), crew };
-    line.stageSettings[stage.id] = { ...(line.stageSettings[stage.id] || {}), maxThroughput };
+    const stageCrew = Number(stage?.crew);
+    if (!Number.isFinite(stageCrew) || stageCrew < 0) {
+      stage.crew = crew;
+    }
+    const dayCrew = Number(line.crewsByShift.Day?.[stage.id]?.crew);
+    if (!Number.isFinite(dayCrew) || dayCrew < 0) {
+      line.crewsByShift.Day[stage.id] = { ...(line.crewsByShift.Day[stage.id] || {}), crew };
+    }
+    const nightCrew = Number(line.crewsByShift.Night?.[stage.id]?.crew);
+    if (!Number.isFinite(nightCrew) || nightCrew < 0) {
+      line.crewsByShift.Night[stage.id] = { ...(line.crewsByShift.Night[stage.id] || {}), crew };
+    }
+    const maxValue = Number(line.stageSettings?.[stage.id]?.maxThroughput);
+    if (!Number.isFinite(maxValue) || maxValue < 0) {
+      line.stageSettings[stage.id] = { ...(line.stageSettings[stage.id] || {}), maxThroughput };
+    }
   });
 }
 
@@ -1891,11 +1912,15 @@ function listProductCatalogOptions(options = {}) {
     const value = includeCodeInValue && code && code.toLowerCase() !== canonicalValue.toLowerCase()
       ? `${code} - ${canonicalValue}`
       : canonicalValue;
+    const displayLabel = code && code.toLowerCase() !== canonicalValue.toLowerCase()
+      ? `${code} - ${canonicalValue}`
+      : canonicalValue;
     deduped.push({
       value,
       canonicalValue,
       code,
-      label: [entry.code, entry.desc2].filter(Boolean).join(" | ")
+      label: [entry.code, entry.desc2].filter(Boolean).join(" | "),
+      displayLabel
     });
   });
   return deduped;
@@ -1919,16 +1944,47 @@ function syncRunProductInputsFromCatalog() {
 
   const supervisorInput = document.getElementById("superRunProduct");
   if (supervisorInput) {
-    const supervisorDatalist = ensureRunProductDatalistById(PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID);
     const supervisorLineId = selectedSupervisorProductCatalogLineId();
-    const supervisorOptions = supervisorLineId
-      ? listProductCatalogOptions({ lineId: supervisorLineId, includeCodeInValue: true })
-      : [];
-    supervisorDatalist.innerHTML = supervisorOptions
-      .map((item) => `<option value="${htmlEscape(item.value)}">${htmlEscape(item.label || item.value)}</option>`)
-      .join("");
-    supervisorInput.setAttribute("list", PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID);
-    supervisorInput.setAttribute("autocomplete", "off");
+    const supervisorInputTag = String(supervisorInput.tagName || "").toUpperCase();
+    if (supervisorInputTag === "SELECT") {
+      const selectedValue = String(supervisorInput.value || "").trim();
+      const supervisorOptions = supervisorLineId
+        ? listProductCatalogOptions({ lineId: supervisorLineId, includeCodeInValue: false })
+        : [];
+      const selectedOption = selectedValue
+        ? supervisorOptions.find((item) => String(item.canonicalValue || item.value || "").trim().toLowerCase() === selectedValue.toLowerCase())
+        : null;
+      const selectedOptionHtml =
+        selectedValue && !selectedOption
+          ? `<option value="${htmlEscape(selectedValue)}">${htmlEscape(selectedValue)}</option>`
+          : "";
+      supervisorInput.innerHTML = [
+        `<option value="">Product Code</option>`,
+        selectedOptionHtml,
+        ...supervisorOptions.map((item) => {
+          const value = String(item.canonicalValue || item.value || "").trim();
+          const text = String(item.displayLabel || item.label || value).trim() || value;
+          return `<option value="${htmlEscape(value)}">${htmlEscape(text)}</option>`;
+        })
+      ].join("");
+      supervisorInput.value = selectedOption
+        ? String(selectedOption.canonicalValue || selectedOption.value || "").trim()
+        : selectedOptionHtml
+          ? selectedValue
+          : "";
+      supervisorInput.removeAttribute("list");
+      supervisorInput.removeAttribute("autocomplete");
+    } else {
+      const supervisorDatalist = ensureRunProductDatalistById(PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID);
+      const supervisorOptions = supervisorLineId
+        ? listProductCatalogOptions({ lineId: supervisorLineId, includeCodeInValue: true })
+        : [];
+      supervisorDatalist.innerHTML = supervisorOptions
+        .map((item) => `<option value="${htmlEscape(item.value)}">${htmlEscape(item.displayLabel || item.label || item.value)}</option>`)
+        .join("");
+      supervisorInput.setAttribute("list", PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID);
+      supervisorInput.setAttribute("autocomplete", "off");
+    }
   }
 }
 
@@ -2129,12 +2185,13 @@ function restoreAuthSessionsFromStorage() {
 }
 
 function queueLineModelSync(lineId, { delayMs = 300 } = {}) {
-  if (!lineId || !UUID_RE.test(String(lineId))) return;
+  const safeLineId = String(lineId || "").trim();
+  if (!safeLineId) return;
   if (lineModelSyncTimer) clearTimeout(lineModelSyncTimer);
   const runSync = async () => {
     lineModelSyncTimer = null;
     try {
-      await saveLineModelToBackend(lineId);
+      await saveLineModelToBackend(safeLineId);
     } catch (error) {
       console.warn("Backend line model sync failed:", error);
       if (document.visibilityState === "visible") {
@@ -2901,9 +2958,35 @@ function managerLogSubmittedByLabel(row) {
   return submittedBy;
 }
 
-function breakRowsForShift(line, shiftLogId) {
-  return (line?.breakRows || [])
-    .filter((row) => String(row?.shiftLogId || "") === String(shiftLogId || ""))
+function breakRowsForShift(line, shiftLogOrId, fallback = {}) {
+  const breakRows = Array.isArray(line?.breakRows) ? line.breakRows : [];
+  const hasShiftLinkedBreaks = breakRows.some((row) => Boolean(String(row?.shiftLogId || "").trim()));
+  const shiftMeta = (typeof shiftLogOrId === "object" && shiftLogOrId)
+    ? shiftLogOrId
+    : {
+      id: shiftLogOrId,
+      date: fallback.date,
+      shift: fallback.shift
+    };
+  const shiftLogId = String(shiftMeta?.id || "").trim();
+  const shiftDate = String(shiftMeta?.date || "").trim();
+  const shiftName = String(shiftMeta?.shift || "").trim();
+  return breakRows
+    .filter((row) => {
+      if (hasShiftLinkedBreaks) {
+        const rowShiftLogId = String(row?.shiftLogId || "").trim();
+        if (rowShiftLogId && shiftLogId) return rowShiftLogId === shiftLogId;
+        if (!rowShiftLogId && shiftDate && shiftName) {
+          return String(row?.date || "") === shiftDate && String(row?.shift || "") === shiftName;
+        }
+        return false;
+      }
+      if (shiftDate && shiftName) {
+        return String(row?.date || "") === shiftDate && String(row?.shift || "") === shiftName;
+      }
+      if (!shiftLogId) return false;
+      return String(row?.shiftLogId || "") === shiftLogId;
+    })
     .slice()
     .sort((a, b) => {
       const startCmp = String(a?.breakStart || "").localeCompare(String(b?.breakStart || ""));
@@ -3175,6 +3258,76 @@ function crewSettingsShiftForLine(line) {
   const explicit = String(line?.crewSettingsShift || "").trim();
   if (CREW_SETTINGS_SHIFTS.includes(explicit)) return explicit;
   return fallbackShiftValue(line?.selectedShift || "Day");
+}
+
+function isLineSettingsDirty(lineId = state?.id) {
+  const safeLineId = String(lineId || "").trim();
+  return Boolean(safeLineId) && pendingLineSettingsSaveIds.has(safeLineId);
+}
+
+function isLineSettingsSaveInFlight(lineId = state?.id) {
+  const safeLineId = String(lineId || "").trim();
+  return Boolean(safeLineId) && lineSettingsSaveInFlightIds.has(safeLineId);
+}
+
+function markLineSettingsDirty(lineId = state?.id) {
+  const safeLineId = String(lineId || "").trim();
+  if (!safeLineId) return;
+  pendingLineSettingsSaveIds.add(safeLineId);
+  syncLineSettingsSaveUI();
+}
+
+function clearLineSettingsDirty(lineId = state?.id) {
+  const safeLineId = String(lineId || "").trim();
+  if (!safeLineId) return;
+  pendingLineSettingsSaveIds.delete(safeLineId);
+  syncLineSettingsSaveUI();
+}
+
+function syncLineSettingsSaveUI() {
+  const saveBtn = document.getElementById("saveStageCrewSettingsBtn");
+  const saveStatus = document.getElementById("stageCrewSaveStatus");
+  if (!saveBtn && !saveStatus) return;
+  const activeLineId = String(state?.id || "").trim();
+  const hasLine = Boolean(activeLineId);
+  const dirty = hasLine && isLineSettingsDirty(activeLineId);
+  const saving = hasLine && isLineSettingsSaveInFlight(activeLineId);
+  if (saveBtn) {
+    saveBtn.disabled = !hasLine || !dirty || saving;
+    saveBtn.textContent = saving ? "Saving..." : "Save Stage Settings";
+  }
+  if (saveStatus) {
+    if (!hasLine) {
+      saveStatus.textContent = "";
+    } else if (saving) {
+      saveStatus.textContent = "Saving stage settings...";
+    } else if (dirty) {
+      saveStatus.textContent = "Unsaved changes.";
+    } else {
+      saveStatus.textContent = "All stage settings saved.";
+    }
+  }
+}
+
+async function saveCurrentLineSettings() {
+  const activeLineId = String(state?.id || "").trim();
+  if (!activeLineId || !isLineSettingsDirty(activeLineId) || isLineSettingsSaveInFlight(activeLineId)) {
+    syncLineSettingsSaveUI();
+    return;
+  }
+  lineSettingsSaveInFlightIds.add(activeLineId);
+  syncLineSettingsSaveUI();
+  try {
+    await saveLineModelToBackend(activeLineId);
+    clearLineSettingsDirty(activeLineId);
+    saveState();
+  } catch (error) {
+    console.warn("Stage settings save failed:", error);
+    alert(`Could not save stage settings.\n${error?.message || "Please retry."}`);
+  } finally {
+    lineSettingsSaveInFlightIds.delete(activeLineId);
+    syncLineSettingsSaveUI();
+  }
 }
 
 function isWithinShiftWindow(targetMins, startMins, finishMins) {
@@ -3547,6 +3700,8 @@ async function refreshHostedState(preferredSession = null) {
       appState.dataSources = normalizeDataSources(snapshot.dataSources);
     }
     const ids = Object.keys(hostedLines);
+    pendingLineSettingsSaveIds.clear();
+    lineSettingsSaveInFlightIds.clear();
     appState.activeLineId = hostedLines[appState.activeLineId] ? appState.activeLineId : ids[0] || "";
     state = appState.lines[appState.activeLineId] || null;
     if (pendingManagerDataTabRestore.lineId && !hostedLines[pendingManagerDataTabRestore.lineId]) {
@@ -3806,6 +3961,20 @@ async function patchManagerShiftLog(logId, payload) {
   return response?.shiftLog || null;
 }
 
+async function startManagerShiftBreak(shiftLogId, breakStart, breakFinish = null) {
+  const session = await ensureManagerBackendSession();
+  const payload = {
+    breakStart
+  };
+  if (strictTimeValid(String(breakFinish || ""))) payload.breakFinish = String(breakFinish).trim();
+  const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks`, {
+    method: "POST",
+    token: session.backendToken,
+    body: payload
+  });
+  return response?.breakLog || null;
+}
+
 async function patchManagerShiftBreak(shiftLogId, breakId, payload) {
   const session = await ensureManagerBackendSession();
   const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
@@ -3874,8 +4043,12 @@ async function deleteManagerDowntimeLog(logId) {
 
 async function saveLineModelToBackend(lineId) {
   const session = await ensureManagerBackendSession();
-  const line = appState.lines[lineId];
+  const localLineId = String(lineId || "").trim();
+  if (!localLineId) return;
+  const line = appState.lines[localLineId];
   if (!line) return;
+  const backendLineId = UUID_RE.test(localLineId) ? localLineId : await ensureBackendLineId(localLineId, session);
+  if (!backendLineId) throw new Error("Line is not synced to server.");
   const stages = (line.stages || []).map((stage, index) => ({
     stageOrder: index + 1,
     stageName: stageBaseName(stage.name) || "Stage",
@@ -3898,7 +4071,7 @@ async function saveLineModelToBackend(lineId) {
     angle: num(guide.angle),
     src: guide.type === "shape" ? guide.src || "" : ""
   }));
-  await apiRequest(`/api/lines/${lineId}/model`, {
+  await apiRequest(`/api/lines/${backendLineId}/model`, {
     method: "PUT",
     token: session.backendToken,
     body: { stages, guides }
@@ -8521,6 +8694,7 @@ function bindVisualiserControls() {
   const lineTrendPrevBtn = document.getElementById("lineTrendPrevPeriod");
   const lineTrendNextBtn = document.getElementById("lineTrendNextPeriod");
   const lineTrendRangeButtons = Array.from(document.querySelectorAll("[data-line-trend-range]"));
+  const saveStageSettingsBtn = document.getElementById("saveStageCrewSettingsBtn");
   let layoutDragState = null;
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -8595,6 +8769,13 @@ function bindVisualiserControls() {
       renderCrewInputs();
     });
   });
+
+  if (saveStageSettingsBtn) {
+    saveStageSettingsBtn.addEventListener("click", async () => {
+      await saveCurrentLineSettings();
+    });
+  }
+  syncLineSettingsSaveUI();
 
   prevButtons.forEach((btn) => btn.addEventListener("click", () => moveShift(-1)));
   nextButtons.forEach((btn) => btn.addEventListener("click", () => moveShift(1)));
@@ -9320,6 +9501,142 @@ function bindForms() {
 
   const inlineValue = (rowNode, field) => String(rowNode?.querySelector(`[data-inline-field="${field}"]`)?.value || "").trim();
 
+  const saveManagerShiftBreakEdits = async (
+    shiftLog,
+    rowNode,
+    { suppressNoChangesAlert = false } = {}
+  ) => {
+    if (!shiftLog?.id || !rowNode) return true;
+    if (!Array.isArray(state.breakRows)) state.breakRows = [];
+    const editorRows = Array.from(rowNode.querySelectorAll("[data-manager-break-editor-row]"));
+    if (!editorRows.length) return true;
+    try {
+      let changed = false;
+      const warnings = new Set();
+      for (const editorRow of editorRows) {
+        const breakId = String(editorRow.getAttribute("data-break-id") || "");
+        const breakIndex = Number(editorRow.getAttribute("data-break-index"));
+        const startValue = String(editorRow.querySelector('[data-break-field="start"]')?.value || "").trim();
+        const finishValue = String(editorRow.querySelector('[data-break-field="finish"]')?.value || "").trim();
+        if (startValue && !strictTimeValid(startValue)) {
+          alert("Break start time must be HH:MM.");
+          return false;
+        }
+        if (finishValue && !strictTimeValid(finishValue)) {
+          alert("Break finish time must be HH:MM.");
+          return false;
+        }
+        const shiftBreakRows = breakRowsForShift(state, shiftLog);
+        let existingBreak = null;
+        if (breakId) {
+          existingBreak = shiftBreakRows.find((row) => String(row.id || "") === breakId) || null;
+        }
+        if (!existingBreak && Number.isInteger(breakIndex) && breakIndex >= 0) {
+          existingBreak = shiftBreakRows[breakIndex] || null;
+        }
+
+        if (existingBreak) {
+          const originalStart = String(existingBreak.breakStart || "").trim();
+          const originalFinish = String(existingBreak.breakFinish || "").trim();
+          const nextStart = startValue || originalStart;
+          const nextFinish = finishValue;
+          if (!nextStart || !strictTimeValid(nextStart)) {
+            alert("Each existing break must have a valid start time.");
+            return false;
+          }
+          const isBackendBreak = UUID_RE.test(String(shiftLog.id || "")) && UUID_RE.test(String(existingBreak.id || ""));
+          if (isBackendBreak) {
+            const breakPatch = {};
+            if (nextStart !== originalStart) breakPatch.breakStart = nextStart;
+            if (nextFinish !== originalFinish) {
+              if (!nextFinish && originalFinish) warnings.add("Break finish cannot be cleared once set.");
+              else if (nextFinish) breakPatch.breakFinish = nextFinish;
+            }
+            if (Object.keys(breakPatch).length) {
+              const savedBreak = await patchManagerShiftBreak(shiftLog.id, existingBreak.id, breakPatch);
+              const savedStart = savedBreak?.breakStart || breakPatch.breakStart || originalStart;
+              const savedFinish = savedBreak?.breakFinish !== undefined
+                ? String(savedBreak.breakFinish || "")
+                : breakPatch.breakFinish !== undefined
+                  ? breakPatch.breakFinish
+                  : originalFinish;
+              Object.assign(existingBreak, {
+                breakStart: savedStart,
+                breakFinish: savedFinish,
+                submittedBy: "manager",
+                submittedAt: savedBreak?.submittedAt || nowIso()
+              });
+              changed = true;
+            }
+          } else if (nextStart !== originalStart || nextFinish !== originalFinish) {
+            Object.assign(existingBreak, {
+              breakStart: nextStart,
+              breakFinish: nextFinish,
+              submittedBy: "manager",
+              submittedAt: nowIso()
+            });
+            changed = true;
+          }
+          continue;
+        }
+
+        if (!startValue && !finishValue) continue;
+        if (!startValue) {
+          alert("New break rows need a start time.");
+          return false;
+        }
+
+        if (UUID_RE.test(String(shiftLog.id || ""))) {
+          if (!finishValue && !isPendingShiftLogRow(shiftLog)) {
+            alert("Completed shifts require a break finish time.");
+            return false;
+          }
+          const savedBreak = await startManagerShiftBreak(shiftLog.id, startValue, finishValue || null);
+          upsertRowById(state.breakRows, {
+            id: savedBreak?.id || makeLocalLogId("break"),
+            lineId: shiftLog.lineId || state.id,
+            date: shiftLog.date || todayISO(),
+            shift: shiftLog.shift || "Day",
+            shiftLogId: shiftLog.id,
+            breakStart: savedBreak?.breakStart || startValue,
+            breakFinish: savedBreak?.breakFinish || finishValue || "",
+            submittedBy: "manager",
+            submittedAt: savedBreak?.submittedAt || nowIso()
+          });
+          changed = true;
+        } else {
+          upsertRowById(state.breakRows, {
+            id: makeLocalLogId("break"),
+            lineId: shiftLog.lineId || state.id,
+            date: shiftLog.date || todayISO(),
+            shift: shiftLog.shift || "Day",
+            shiftLogId: shiftLog.id,
+            breakStart: startValue,
+            breakFinish: finishValue || "",
+            submittedBy: "manager",
+            submittedAt: nowIso()
+          });
+          changed = true;
+        }
+      }
+
+      if (warnings.size) alert(Array.from(warnings).join("\n"));
+      if (!changed) {
+        if (!warnings.size && !suppressNoChangesAlert) alert("No break changes to save.");
+        return true;
+      }
+      addAudit(
+        state,
+        "MANAGER_BREAK_EDIT",
+        `Manager updated break logs (${shiftLog.shift || "Shift"} ${shiftLog.date || todayISO()})`
+      );
+      return true;
+    } catch (error) {
+      alert(`Could not save break edits.\n${error?.message || "Please try again."}`);
+      return false;
+    }
+  };
+
   const saveManagerLogInlineEdit = async (type, logId, rowNode) => {
     if (!state?.id || !logId || !rowNode) return;
     const isInlineEditing = isManagerLogInlineEditRow(state.id, type, logId);
@@ -9332,8 +9649,10 @@ function bindForms() {
         alert("Shift row could not be found. Refresh and try again.");
         return;
       }
-      const date = String(row.date || "").trim();
-      const shift = String(row.shift || "").trim();
+      const previousDate = String(row.date || "").trim();
+      const previousShift = String(row.shift || "").trim();
+      const date = inlineValue(rowNode, "date");
+      const shift = inlineValue(rowNode, "shift");
       const crewOnShift = Math.max(0, Math.floor(num(inlineValue(rowNode, "crewOnShift"))));
       const startTime = inlineValue(rowNode, "startTime");
       const finishTime = inlineValue(rowNode, "finishTime");
@@ -9346,7 +9665,9 @@ function bindForms() {
         alert("Times must be HH:MM (24h).");
         return;
       }
-      const payload = { crewOnShift, startTime, finishTime, notes };
+      const breakEditsSaved = await saveManagerShiftBreakEdits(row, rowNode, { suppressNoChangesAlert: true });
+      if (breakEditsSaved === false) return;
+      const payload = { date, shift, crewOnShift, startTime, finishTime, notes };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
         if (canPatchServer) {
@@ -9361,11 +9682,19 @@ function bindForms() {
             submittedAt: nowIso()
           });
         }
+        const linkedBreakRows = breakRowsForShift(state, { id: row.id, date: previousDate, shift: previousShift });
+        linkedBreakRows.forEach((breakRow) => {
+          breakRow.date = date;
+          breakRow.shift = shift;
+          if (!breakRow.shiftLogId) breakRow.shiftLogId = row.id;
+        });
         clearManagerLogInlineEdit();
         addAudit(state, "MANAGER_SHIFT_EDIT", `Manager edited shift row for ${row.date} (${row.shift})`);
         saveState();
         renderAll();
       } catch (error) {
+        saveState();
+        renderAll();
         alert(`Could not update shift row.\n${error?.message || "Please try again."}`);
       }
       return;
@@ -9552,6 +9881,28 @@ function bindForms() {
     if (isManagerLogInlineEditRow(state.id, type, logId)) clearManagerLogInlineEdit();
   };
 
+  const persistManagerFinalisedShift = async (row, logId, payload) => {
+    const safeLogId = String(logId || "").trim();
+    if (UUID_RE.test(safeLogId)) {
+      const saved = await patchManagerShiftLog(safeLogId, payload);
+      return { saved, persistedLogId: safeLogId };
+    }
+    const saved = await syncManagerShiftLog(payload);
+    const persistedLogId = String(saved?.id || "").trim();
+    if (!UUID_RE.test(persistedLogId)) {
+      throw new Error("Shift finalise did not return a backend log id.");
+    }
+    const previousLogId = String(row?.id || "");
+    if (previousLogId && previousLogId !== persistedLogId) {
+      (state.breakRows || []).forEach((breakRow) => {
+        if (String(breakRow?.shiftLogId || "") === previousLogId) {
+          breakRow.shiftLogId = persistedLogId;
+        }
+      });
+    }
+    return { saved, persistedLogId };
+  };
+
   const finaliseManagerShiftLogById = async (logId) => {
     const row = (state.shiftRows || []).find((item) => String(item?.id || "") === String(logId || ""));
     if (!row) {
@@ -9628,6 +9979,7 @@ function bindForms() {
       return;
     }
     const payload = {
+      lineId: state.id,
       date: row.date,
       shift: row.shift || inferShiftForLog(state, row.date, startTime, state.selectedShift || "Day"),
       crewOnShift: Math.max(0, Math.floor(num(row.crewOnShift))),
@@ -9635,14 +9987,14 @@ function bindForms() {
       finishTime,
       notes: String(row.notes || "")
     };
-    const canPatchServer = UUID_RE.test(String(logId || ""));
     try {
-      if (canPatchServer) {
-        const saved = await patchManagerShiftLog(logId, payload);
-        Object.assign(row, payload, { submittedBy: "manager", submittedAt: saved?.submittedAt || nowIso() });
-      } else {
-        Object.assign(row, payload, { submittedBy: "manager", submittedAt: nowIso() });
-      }
+      const { lineId: _ignoredLineId, ...rowPayload } = payload;
+      const { saved, persistedLogId } = await persistManagerFinalisedShift(row, logId, payload);
+      Object.assign(row, rowPayload, {
+        id: persistedLogId || row.id,
+        submittedBy: "manager",
+        submittedAt: saved?.submittedAt || nowIso()
+      });
       clearManagerInlineEditIfTarget("shift", logId);
       addAudit(state, "MANAGER_SHIFT_COMPLETE", `Manager finalised shift row for ${row.date} (${row.shift})`);
       saveState();
@@ -10141,7 +10493,8 @@ function renderCrewInputs() {
       if (!state.crewsByShift[crewShift]) state.crewsByShift[crewShift] = defaultStageCrew(getStages());
       if (!state.crewsByShift[crewShift][stage.id]) state.crewsByShift[crewShift][stage.id] = {};
       state.crewsByShift[crewShift][stage.id].crew = num(input.value);
-      saveState({ syncModel: true, forceSyncModel: true, immediateSyncModel: true });
+      markLineSettingsDirty(state.id);
+      saveState();
       renderVisualiser();
       renderStageTrend();
     });
@@ -10149,6 +10502,7 @@ function renderCrewInputs() {
     row.append(name, input);
     form.append(row);
   });
+  syncLineSettingsSaveUI();
 }
 
 function renderThroughputInputs() {
@@ -10171,7 +10525,8 @@ function renderThroughputInputs() {
     input.addEventListener("change", () => {
       if (!state.stageSettings[stage.id]) state.stageSettings[stage.id] = {};
       state.stageSettings[stage.id].maxThroughput = num(input.value);
-      saveState({ syncModel: true, forceSyncModel: true, immediateSyncModel: true });
+      markLineSettingsDirty(state.id);
+      saveState();
       renderVisualiser();
       renderStageTrend();
     });
@@ -10179,6 +10534,7 @@ function renderThroughputInputs() {
     row.append(name, input);
     form.append(row);
   });
+  syncLineSettingsSaveUI();
 }
 
 function renderTable(tableId, columns, rows, fieldMap) {
@@ -11492,44 +11848,62 @@ function renderTrackingTables() {
         return String(b?.id || "").localeCompare(String(a?.id || ""));
       });
 
-  const openBreakByShiftLogId = new Set(
-    (data.breakRows || [])
-      .filter((row) => isPendingBreakLogRow(row))
-      .map((row) => String(row.shiftLogId || ""))
-      .filter(Boolean)
-  );
-  const breakSummaryByShift = new Map();
-  (data.breakRows || []).forEach((row) => {
-    const key = `${row.date}__${row.shift}`;
-    const prev = breakSummaryByShift.get(key) || { count: 0, mins: 0 };
-    breakSummaryByShift.set(key, {
-      count: prev.count + 1,
-      mins: prev.mins + Math.max(0, num(row.breakMins))
-    });
-  });
   const displayShiftRows = sortNewestFirst(data.shiftRows, "startTime").map((row) => {
-    const key = `${row.date}__${row.shift}`;
-    const summary = breakSummaryByShift.get(key) || { count: 0, mins: 0 };
-    const breakCount = Math.max(0, Math.floor(num(summary.count)));
-    const breakTimeMins = Math.max(0, num(summary.mins));
+    const rowBreakRows = breakRowsForShift(state, row);
+    const breakCount = Math.max(0, Math.floor(num(rowBreakRows.length)));
+    const breakTimeMins = rowBreakRows.reduce((sum, breakRow) => sum + Math.max(0, num(breakRow.breakMins)), 0);
     const editing = isInlineEditing("shift", String(row.id || ""));
-    const hasOpenBreak = openBreakByShiftLogId.has(String(row.id || ""));
+    const hasOpenBreak = rowBreakRows.some((breakRow) => isPendingBreakLogRow(breakRow));
     const shiftPending = isPendingShiftLogRow(row);
     const pending = shiftPending || hasOpenBreak;
     const htmlFields = ["action"];
-    if (editing) htmlFields.push("crewOnShift", "startTime", "finishTime", "notes");
+    if (editing) htmlFields.push("date", "shift", "crewOnShift", "startTime", "finishTime", "notes");
+    const breakEditorRowsHtml = rowBreakRows
+      .map(
+        (breakRow, index) => `
+          <div class="pending-break-editor-row" data-manager-break-editor-row data-break-id="${htmlEscape(breakRow.id || "")}" data-break-index="${index}">
+            <span class="pending-break-editor-label">Break ${index + 1}</span>
+            <input class="pending-break-editor-input" data-break-field="start" value="${htmlEscape(breakRow.breakStart || "")}" placeholder="Start HH:MM" />
+            <input class="pending-break-editor-input" data-break-field="finish" value="${htmlEscape(breakRow.breakFinish || "")}" placeholder="Finish HH:MM" />
+          </div>
+        `
+      )
+      .join("");
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
       __htmlFields: htmlFields,
-      date: row.date,
-      shift: row.shift,
+      date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
+      shift: editing
+        ? inlineSelectHtml(
+          "shift",
+          String(row.shift || ""),
+          SHIFT_OPTIONS.map((shiftOption) => ({ value: shiftOption, label: shiftOption }))
+        )
+        : row.shift,
       crewOnShift: editing ? inlineInputHtml("crewOnShift", Math.max(0, num(row.crewOnShift)), { type: "number", min: "0", step: "1" }) : row.crewOnShift,
       startTime: editing ? inlineInputHtml("startTime", String(row.startTime || ""), { placeholder: "HH:MM" }) : row.startTime,
       finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
       breakCount,
       breakTimeMins,
-      notes: editing ? inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" }) : String(row.notes || ""),
+      notes: editing
+        ? `
+          <div class="table-inline-stack">
+            ${inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" })}
+            <div class="pending-break-editor">
+              <h6>Shift Breaks</h6>
+              <div class="pending-break-editor-list">
+                ${breakEditorRowsHtml || `<p class="pending-break-editor-empty">No breaks logged yet.</p>`}
+                <div class="pending-break-editor-row pending-break-editor-row-new" data-manager-break-editor-row data-break-id="" data-break-index="-1">
+                  <span class="pending-break-editor-label">New Break</span>
+                  <input class="pending-break-editor-input" data-break-field="start" value="" placeholder="Start HH:MM" />
+                  <input class="pending-break-editor-input" data-break-field="finish" value="" placeholder="Finish HH:MM" />
+                </div>
+              </div>
+            </div>
+          </div>
+        `
+        : String(row.notes || ""),
       submittedBy: managerLogSubmittedByLabel(row),
       action: actionHtml("shift", row, { editing, pending: shiftPending })
     };
@@ -12746,6 +13120,7 @@ function renderAll() {
   renderVisualiser();
   renderDayVisualiser();
   renderLineTrends();
+  syncLineSettingsSaveUI();
 }
 
 function setActiveDataSubtab() {

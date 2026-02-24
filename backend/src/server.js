@@ -222,6 +222,8 @@ const LINE_ORDER_BY_SQL = `
 `;
 
 const shiftLogUpdateSchema = z.object({
+  date: z.string().regex(isoDateRegex).optional(),
+  shift: z.enum(shiftValues).optional(),
   crewOnShift: z.number().int().min(0).optional(),
   startTime: optionalTime.optional(),
   finishTime: optionalTime.optional(),
@@ -229,7 +231,8 @@ const shiftLogUpdateSchema = z.object({
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const shiftBreakStartSchema = z.object({
-  breakStart: z.string().regex(timeRegex)
+  breakStart: z.string().regex(timeRegex),
+  breakFinish: optionalTime.optional()
 });
 
 const shiftBreakUpdateSchema = z.object({
@@ -4093,6 +4096,9 @@ app.post('/api/logs/shifts/:logId/breaks', authMiddleware, asyncRoute(async (req
   if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
   const parsed = shiftBreakStartSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ error: 'Invalid break start payload' });
+  const breakFinishRaw = String(parsed.data.breakFinish ?? '').trim();
+  const breakFinish = breakFinishRaw || null;
+  const creatingOpenBreak = !breakFinish;
 
   const shiftResult = await dbQuery(
     `SELECT
@@ -4113,21 +4119,26 @@ app.post('/api/logs/shifts/:logId/breaks', authMiddleware, asyncRoute(async (req
   if (req.user.role !== 'manager' && shiftLog.submittedByUserId && shiftLog.submittedByUserId !== req.user.id) {
     return res.status(403).json({ error: 'Cannot update another user\'s shift log' });
   }
-  if (!shiftLog.isOpen) return res.status(400).json({ error: 'Shift is already complete' });
+  if (!shiftLog.isOpen && req.user.role !== 'manager') return res.status(400).json({ error: 'Shift is already complete' });
+  if (!shiftLog.isOpen && creatingOpenBreak) {
+    return res.status(400).json({ error: 'Completed shifts require a break finish time' });
+  }
 
-  const openBreakResult = await dbQuery(
-    `SELECT id
-     FROM shift_break_logs
-     WHERE shift_log_id = $1
-       AND break_finish IS NULL
-     LIMIT 1`,
-    [logId]
-  );
-  if (openBreakResult.rowCount) return res.status(400).json({ error: 'An open break already exists for this shift' });
+  if (creatingOpenBreak) {
+    const openBreakResult = await dbQuery(
+      `SELECT id
+       FROM shift_break_logs
+       WHERE shift_log_id = $1
+         AND break_finish IS NULL
+       LIMIT 1`,
+      [logId]
+    );
+    if (openBreakResult.rowCount) return res.status(400).json({ error: 'An open break already exists for this shift' });
+  }
 
   const result = await dbQuery(
-    `INSERT INTO shift_break_logs(shift_log_id, line_id, date, shift, break_start, submitted_by_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6)
+    `INSERT INTO shift_break_logs(shift_log_id, line_id, date, shift, break_start, break_finish, submitted_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, NULLIF($6, '')::time, $7)
      RETURNING
        id,
        shift_log_id AS "shiftLogId",
@@ -4137,7 +4148,7 @@ app.post('/api/logs/shifts/:logId/breaks', authMiddleware, asyncRoute(async (req
        to_char(break_start, 'HH24:MI') AS "breakStart",
        COALESCE(to_char(break_finish, 'HH24:MI'), '') AS "breakFinish",
        submitted_at AS "submittedAt"`,
-    [logId, shiftLog.lineId, shiftLog.date, shiftLog.shift, parsed.data.breakStart, req.user.id]
+    [logId, shiftLog.lineId, shiftLog.date, shiftLog.shift, parsed.data.breakStart, breakFinish, req.user.id]
   );
 
   await writeAudit({
@@ -4145,8 +4156,10 @@ app.post('/api/logs/shifts/:logId/breaks', authMiddleware, asyncRoute(async (req
     actorUserId: req.user.id,
     actorName: req.user.name,
     actorRole: req.user.role,
-    action: 'START_SHIFT_BREAK',
-    details: `${shiftLog.shift} ${shiftLog.date} break started ${parsed.data.breakStart}`
+    action: creatingOpenBreak ? 'START_SHIFT_BREAK' : 'CREATE_SHIFT_BREAK',
+    details: creatingOpenBreak
+      ? `${shiftLog.shift} ${shiftLog.date} break started ${parsed.data.breakStart}`
+      : `${shiftLog.shift} ${shiftLog.date} break logged ${parsed.data.breakStart} to ${breakFinish}`
   });
 
   return res.status(201).json({ breakLog: result.rows[0] });
@@ -4184,7 +4197,7 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
   if (req.user.role !== 'manager' && breakLog.submittedByUserId && breakLog.submittedByUserId !== req.user.id) {
     return res.status(403).json({ error: 'Cannot update another user\'s break log' });
   }
-  if (!breakLog.shiftOpen) return res.status(400).json({ error: 'Shift is already complete' });
+  if (!breakLog.shiftOpen && req.user.role !== 'manager') return res.status(400).json({ error: 'Shift is already complete' });
 
   if (parsed.data.breakFinish === undefined && parsed.data.breakStart === undefined) {
     return res.status(400).json({ error: 'At least one break field must be provided' });
@@ -4348,39 +4361,65 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
   if (!existingResult.rowCount) return res.status(404).json({ error: 'Shift log not found' });
   const existing = existingResult.rows[0];
 
-  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  const data = parsed.data;
+  const accessShift = data.shift || existing.shift;
+  if (!(await hasLineShiftAccess(req.user, existing.lineId, accessShift))) return res.status(403).json({ error: 'Forbidden' });
   if (req.user.role !== 'manager' && existing.submittedByUserId && existing.submittedByUserId !== req.user.id) {
     return res.status(403).json({ error: 'Cannot edit logs submitted by another user' });
   }
 
-  const data = parsed.data;
   const notesProvided = Object.prototype.hasOwnProperty.call(data, 'notes');
   const notesValue = notesProvided ? String(data.notes ?? '').trim() : '';
   const result = await dbQuery(
-    `UPDATE shift_logs
-     SET
-       crew_on_shift = COALESCE($2, crew_on_shift),
-       start_time = COALESCE(NULLIF($3, '')::time, start_time),
-       finish_time = COALESCE(NULLIF($4, '')::time, finish_time),
-       notes = CASE
-         WHEN $5::boolean IS FALSE THEN notes
-         ELSE $6
-       END,
-       submitted_by_user_id = $7,
-       submitted_at = NOW()
-     WHERE id = $1
-     RETURNING
+    `WITH updated_shift AS (
+       UPDATE shift_logs
+       SET
+         date = COALESCE($2::date, date),
+         shift = COALESCE($3, shift),
+         crew_on_shift = COALESCE($4, crew_on_shift),
+         start_time = COALESCE(NULLIF($5, '')::time, start_time),
+         finish_time = COALESCE(NULLIF($6, '')::time, finish_time),
+         notes = CASE
+           WHEN $7::boolean IS FALSE THEN notes
+           ELSE $8
+         END,
+         submitted_by_user_id = $9,
+         submitted_at = NOW()
+       WHERE id = $1
+       RETURNING
+         id,
+         line_id AS "lineId",
+         date,
+         shift,
+         crew_on_shift AS "crewOnShift",
+         to_char(start_time, 'HH24:MI') AS "startTime",
+         to_char(finish_time, 'HH24:MI') AS "finishTime",
+         COALESCE(notes, '') AS notes,
+         submitted_at AS "submittedAt"
+     ),
+     synced_breaks AS (
+       UPDATE shift_break_logs b
+       SET
+         date = u.date::date,
+         shift = u.shift
+       FROM updated_shift u
+       WHERE b.shift_log_id = u.id
+     )
+     SELECT
        id,
-       line_id AS "lineId",
+       "lineId",
        date::TEXT AS date,
        shift,
-       crew_on_shift AS "crewOnShift",
-       to_char(start_time, 'HH24:MI') AS "startTime",
-       to_char(finish_time, 'HH24:MI') AS "finishTime",
-       COALESCE(notes, '') AS notes,
-       submitted_at AS "submittedAt"`,
+       "crewOnShift",
+       "startTime",
+       "finishTime",
+       notes,
+       "submittedAt"
+     FROM updated_shift`,
     [
       logId,
+      data.date ?? null,
+      data.shift ?? null,
       data.crewOnShift,
       data.startTime ?? null,
       data.finishTime ?? null,

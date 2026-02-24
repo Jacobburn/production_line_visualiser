@@ -378,7 +378,9 @@
                   <input id="superRunLogId" type="hidden" />
                   <input id="superRunCrewingPattern" type="hidden" />
                   <input id="superRunDate" type="date" required />
-                  <input id="superRunProduct" placeholder="Product" required />
+                  <select id="superRunProduct" required>
+                    <option value="">Product Code</option>
+                  </select>
                   <label class="input-now-wrap" data-time-prefix="START">
                     <input id="superRunProdStart" placeholder="Production Start Time (HH:MM)" aria-label="Production start time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superRunProdStart">Now</button>
@@ -929,6 +931,10 @@
               <h2>Stage Max Throughput</h2>
               <p class="muted">Units/min per crew member. Total stage max = (per-crew max) x (crew count).</p>
               <form id="throughputForm" class="crew-grid"></form>
+              <div class="action-row stage-settings-save-row">
+                <button id="saveStageCrewSettingsBtn" type="button">Save Stage Settings</button>
+                <span id="stageCrewSaveStatus" class="muted stage-settings-save-status">All stage settings saved.</span>
+              </div>
             </section>
           </div>
         </section>

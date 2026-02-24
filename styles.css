@@ -3403,6 +3403,14 @@ th {
   align-items: center;
 }
 
+.stage-settings-save-row {
+  margin-top: 0.7rem;
+}
+
+.stage-settings-save-status {
+  margin: 0;
+}
+
 .import-label {
   border: 1px solid var(--stroke);
   border-radius: var(--control-radius);
