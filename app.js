@@ -11967,8 +11967,9 @@ function renderTrackingTables() {
         return String(b?.id || "").localeCompare(String(a?.id || ""));
       });
 
+  const derivedBreakContext = { breakRows: data.breakRows };
   const displayShiftRows = sortNewestFirst(data.shiftRows, "startTime").map((row) => {
-    const rowBreakRows = breakRowsForShift(state, row);
+    const rowBreakRows = breakRowsForShift(derivedBreakContext, row);
     const breakCount = Math.max(0, Math.floor(num(rowBreakRows.length)));
     const breakTimeMins = rowBreakRows.reduce((sum, breakRow) => sum + Math.max(0, num(breakRow.breakMins)), 0);
     const editing = isInlineEditing("shift", String(row.id || ""));
