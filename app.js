@@ -4025,6 +4025,14 @@ async function patchManagerShiftBreak(shiftLogId, breakId, payload) {
   return response?.breakLog || null;
 }
 
+async function deleteManagerShiftBreak(shiftLogId, breakId) {
+  const session = await ensureManagerBackendSession();
+  await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
+    method: "DELETE",
+    token: session.backendToken
+  });
+}
+
 async function patchManagerRunLog(logId, payload) {
   const session = await ensureManagerBackendSession();
   const response = await apiRequest(`/api/logs/runs/${logId}`, {
@@ -9628,13 +9636,24 @@ function bindForms() {
         if (existingBreak) {
           const originalStart = String(existingBreak.breakStart || "").trim();
           const originalFinish = String(existingBreak.breakFinish || "").trim();
+          const isDeleteRequested = !startValue && !finishValue;
+          const isBackendBreak = UUID_RE.test(String(shiftLog.id || "")) && UUID_RE.test(String(existingBreak.id || ""));
+          if (isDeleteRequested) {
+            if (isBackendBreak) await deleteManagerShiftBreak(shiftLog.id, existingBreak.id);
+            const existingBreakId = String(existingBreak.id || "").trim();
+            state.breakRows = (state.breakRows || []).filter((breakRow) => {
+              if (existingBreakId && String(breakRow?.id || "").trim() === existingBreakId) return false;
+              return breakRow !== existingBreak;
+            });
+            changed = true;
+            continue;
+          }
           const nextStart = startValue || originalStart;
           const nextFinish = finishValue;
           if (!nextStart || !strictTimeValid(nextStart)) {
             alert("Each existing break must have a valid start time.");
             return false;
           }
-          const isBackendBreak = UUID_RE.test(String(shiftLog.id || "")) && UUID_RE.test(String(existingBreak.id || ""));
           if (isBackendBreak) {
             const breakPatch = {};
             if (nextStart !== originalStart) breakPatch.breakStart = nextStart;
@@ -10359,6 +10378,16 @@ function bindForms() {
         inputEl: patternInput,
         summaryEl: patternSummary
       });
+      return;
+    }
+    const breakDeleteBtn = event.target.closest("[data-manager-break-delete]");
+    if (breakDeleteBtn) {
+      const breakRowNode = breakDeleteBtn.closest("[data-manager-break-editor-row]");
+      if (!breakRowNode) return;
+      const startInput = breakRowNode.querySelector('[data-break-field="start"]');
+      const finishInput = breakRowNode.querySelector('[data-break-field="finish"]');
+      if (startInput) startInput.value = "";
+      if (finishInput) finishInput.value = "";
       return;
     }
     const btn = event.target.closest("[data-log-action]");
@@ -11985,6 +12014,7 @@ function renderTrackingTables() {
             <span class="pending-break-editor-label">Break ${index + 1}</span>
             <input class="pending-break-editor-input" data-break-field="start" value="${htmlEscape(breakRow.breakStart || "")}" placeholder="Start HH:MM" />
             <input class="pending-break-editor-input" data-break-field="finish" value="${htmlEscape(breakRow.breakFinish || "")}" placeholder="Finish HH:MM" />
+            <button type="button" class="table-edit-pill table-delete-pill pending-break-delete-pill" data-manager-break-delete>Delete</button>
           </div>
         `
       )

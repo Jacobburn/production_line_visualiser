@@ -4255,6 +4255,50 @@ app.patch('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(
   return res.json({ breakLog: result.rows[0] });
 }));
 
+app.delete('/api/logs/shifts/:logId/breaks/:breakId', authMiddleware, asyncRoute(async (req, res) => {
+  const logId = req.params.logId;
+  const breakId = req.params.breakId;
+  if (!z.string().uuid().safeParse(logId).success) return res.status(400).json({ error: 'Invalid shift log id' });
+  if (!z.string().uuid().safeParse(breakId).success) return res.status(400).json({ error: 'Invalid break log id' });
+
+  const breakResult = await dbQuery(
+    `SELECT
+       b.id,
+       b.line_id AS "lineId",
+       b.date::TEXT AS date,
+       b.shift,
+       to_char(b.break_start, 'HH24:MI') AS "breakStart",
+       COALESCE(to_char(b.break_finish, 'HH24:MI'), '') AS "breakFinish",
+       b.submitted_by_user_id AS "submittedByUserId",
+       (s.start_time = s.finish_time) AS "shiftOpen"
+     FROM shift_break_logs b
+     INNER JOIN shift_logs s ON s.id = b.shift_log_id
+     WHERE b.id = $1
+       AND b.shift_log_id = $2`,
+    [breakId, logId]
+  );
+  if (!breakResult.rowCount) return res.status(404).json({ error: 'Break log not found' });
+  const breakLog = breakResult.rows[0];
+
+  if (!(await hasLineShiftAccess(req.user, breakLog.lineId, breakLog.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (!canMutateSubmittedLog(req.user, breakLog.submittedByUserId)) {
+    return res.status(403).json({ error: 'Supervisors can only delete their own break logs' });
+  }
+  if (!breakLog.shiftOpen && req.user.role !== 'manager') return res.status(400).json({ error: 'Shift is already complete' });
+
+  await dbQuery(`DELETE FROM shift_break_logs WHERE id = $1`, [breakId]);
+  await writeAudit({
+    lineId: breakLog.lineId,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'DELETE_SHIFT_BREAK',
+    details: `${breakLog.shift} ${breakLog.date} break deleted (${breakLog.breakStart}${breakLog.breakFinish ? ` to ${breakLog.breakFinish}` : ''})`
+  });
+
+  return res.status(204).send();
+}));
+
 app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
   await ensureLogSchema();
   const parsed = runLogSchema.safeParse(req.body);
