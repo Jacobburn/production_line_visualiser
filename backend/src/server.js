@@ -39,9 +39,13 @@ app.use(express.json({ limit: '1mb' }));
 
 const shiftValues = ['Day', 'Night', 'Full Day'];
 const supervisorShiftValues = ['Day', 'Night'];
+const actionPriorityValues = ['Low', 'Medium', 'High', 'Critical'];
+const actionStatusValues = ['Open', 'In Progress', 'Blocked', 'Completed'];
 const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
+const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const optionalTime = z.string().regex(timeRegex).optional().or(z.literal('')).or(z.null());
 const optionalLogNotes = z.string().max(2000).optional().or(z.literal('')).or(z.null());
+const optionalIsoDate = z.string().regex(isoDateRegex).optional().or(z.literal('')).or(z.null());
 
 const loginSchema = z.object({
   username: z.string().min(1),
@@ -149,7 +153,7 @@ const supervisorUpdateSchema = z.object({
 
 const shiftLogSchema = z.object({
   lineId: z.string().uuid(),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  date: z.string().regex(isoDateRegex),
   shift: z.enum(shiftValues),
   crewOnShift: z.number().int().min(0),
   startTime: z.string().regex(timeRegex),
@@ -159,7 +163,7 @@ const shiftLogSchema = z.object({
 
 const runLogSchema = z.object({
   lineId: z.string().uuid(),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  date: z.string().regex(isoDateRegex),
   shift: z.enum(shiftValues),
   product: z.string().min(1).max(120),
   setUpStartTime: optionalTime,
@@ -172,13 +176,27 @@ const runLogSchema = z.object({
 
 const downtimeLogSchema = z.object({
   lineId: z.string().uuid(),
-  date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  date: z.string().regex(isoDateRegex),
   shift: z.enum(shiftValues),
   downtimeStart: z.string().regex(timeRegex),
   downtimeFinish: z.string().regex(timeRegex),
   equipmentStageId: z.string().uuid().nullable().optional(),
   reason: z.string().max(250).optional().or(z.literal('')).or(z.null()),
   notes: optionalLogNotes
+});
+
+const supervisorActionCreateSchema = z.object({
+  supervisorUsername: z.string().min(1).max(60).optional(),
+  supervisorName: z.string().max(120).optional().or(z.literal('')).or(z.null()),
+  lineId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
+  title: z.string().trim().min(1).max(180),
+  description: z.string().max(4000).optional().or(z.literal('')).or(z.null()),
+  priority: z.enum(actionPriorityValues).optional().default('Medium'),
+  status: z.enum(actionStatusValues).optional().default('Open'),
+  dueDate: optionalIsoDate,
+  relatedEquipmentId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
+  relatedReasonCategory: z.string().max(120).optional().or(z.literal('')).or(z.null()),
+  relatedReasonDetail: z.string().max(240).optional().or(z.literal('')).or(z.null())
 });
 
 const hasAtLeastOneField = (obj) => Object.values(obj).some((value) => value !== undefined);
@@ -233,6 +251,20 @@ const downtimeLogUpdateSchema = z.object({
   equipmentStageId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
   reason: z.string().max(250).optional().or(z.literal('')).or(z.null()),
   notes: optionalLogNotes
+}).refine(hasAtLeastOneField, { message: 'At least one field is required' });
+
+const supervisorActionUpdateSchema = z.object({
+  supervisorUsername: z.string().min(1).max(60).optional(),
+  supervisorName: z.string().max(120).optional().or(z.literal('')).or(z.null()),
+  lineId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
+  title: z.string().trim().min(1).max(180).optional(),
+  description: z.string().max(4000).optional().or(z.literal('')).or(z.null()),
+  priority: z.enum(actionPriorityValues).optional(),
+  status: z.enum(actionStatusValues).optional(),
+  dueDate: optionalIsoDate,
+  relatedEquipmentId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
+  relatedReasonCategory: z.string().max(120).optional().or(z.literal('')).or(z.null()),
+  relatedReasonDetail: z.string().max(240).optional().or(z.literal('')).or(z.null())
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const clearLineDataSchema = z.object({
@@ -663,6 +695,121 @@ async function writeAudit({ lineId = null, actorUserId = null, actorName = null,
   );
 }
 
+function normalizeIsoDate(value) {
+  const trimmed = String(value || '').trim();
+  return isoDateRegex.test(trimmed) ? trimmed : '';
+}
+
+function normalizeActionReasonCategory(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed || '';
+}
+
+function normalizeActionReasonDetail(value, category = '') {
+  const trimmed = String(value || '').trim();
+  if (!category) return '';
+  return trimmed;
+}
+
+function normalizeActionAssigneeUsername(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function mapSupervisorActionRow(row = {}) {
+  return {
+    id: row.id,
+    supervisorUsername: normalizeActionAssigneeUsername(row.supervisorUsername),
+    supervisorName: String(row.supervisorName || '').trim(),
+    lineId: String(row.lineId || '').trim(),
+    title: String(row.title || '').trim(),
+    description: String(row.description || '').trim(),
+    priority: actionPriorityValues.includes(String(row.priority || '').trim()) ? String(row.priority).trim() : 'Medium',
+    status: actionStatusValues.includes(String(row.status || '').trim()) ? String(row.status).trim() : 'Open',
+    dueDate: normalizeIsoDate(row.dueDate),
+    relatedEquipmentId: String(row.relatedEquipmentId || '').trim(),
+    relatedReasonCategory: normalizeActionReasonCategory(row.relatedReasonCategory),
+    relatedReasonDetail: normalizeActionReasonDetail(row.relatedReasonDetail, row.relatedReasonCategory),
+    createdAt: row.createdAt,
+    createdBy: String(row.createdBy || '').trim()
+  };
+}
+
+async function resolveSupervisorActionAssignee(usernameInput, fallbackName = '') {
+  const requestedUsername = normalizeActionAssigneeUsername(usernameInput);
+  if (!requestedUsername) return null;
+  const supervisorResult = await dbQuery(
+    `SELECT id, username, name
+     FROM users
+     WHERE role = 'supervisor'
+       AND is_active = TRUE
+       AND LOWER(username) = $1
+     LIMIT 1`,
+    [requestedUsername]
+  );
+  if (!supervisorResult.rowCount) {
+    return {
+      supervisorUserId: null,
+      supervisorUsername: requestedUsername,
+      supervisorName: String(fallbackName || requestedUsername).trim() || requestedUsername
+    };
+  }
+  const row = supervisorResult.rows[0];
+  const username = normalizeActionAssigneeUsername(row.username) || requestedUsername;
+  const supervisorName = String(row.name || username).trim() || username;
+  return {
+    supervisorUserId: row.id,
+    supervisorUsername: username,
+    supervisorName
+  };
+}
+
+async function fetchSupervisorActionsForUser(user) {
+  const isManager = user?.role === 'manager';
+  const result = await dbQuery(
+    isManager
+      ? `SELECT
+           sa.id,
+           sa.supervisor_username AS "supervisorUsername",
+           sa.supervisor_name AS "supervisorName",
+           COALESCE(sa.line_id::TEXT, '') AS "lineId",
+           sa.title,
+           COALESCE(sa.description, '') AS description,
+           sa.priority,
+           sa.status,
+           COALESCE(sa.due_date::TEXT, '') AS "dueDate",
+           COALESCE(sa.related_equipment_stage_id::TEXT, '') AS "relatedEquipmentId",
+           COALESCE(sa.related_reason_category, '') AS "relatedReasonCategory",
+           COALESCE(sa.related_reason_detail, '') AS "relatedReasonDetail",
+           sa.created_at AS "createdAt",
+           COALESCE(sa.created_by_name, '') AS "createdBy"
+         FROM supervisor_actions sa
+         ORDER BY sa.created_at DESC, sa.id DESC`
+      : `SELECT
+           sa.id,
+           sa.supervisor_username AS "supervisorUsername",
+           sa.supervisor_name AS "supervisorName",
+           COALESCE(sa.line_id::TEXT, '') AS "lineId",
+           sa.title,
+           COALESCE(sa.description, '') AS description,
+           sa.priority,
+           sa.status,
+           COALESCE(sa.due_date::TEXT, '') AS "dueDate",
+           COALESCE(sa.related_equipment_stage_id::TEXT, '') AS "relatedEquipmentId",
+           COALESCE(sa.related_reason_category, '') AS "relatedReasonCategory",
+           COALESCE(sa.related_reason_detail, '') AS "relatedReasonDetail",
+           sa.created_at AS "createdAt",
+           COALESCE(sa.created_by_name, '') AS "createdBy"
+         FROM supervisor_actions sa
+         WHERE (
+             sa.supervisor_user_id = $1
+             OR LOWER(sa.supervisor_username) = $2
+           )
+         ORDER BY sa.created_at DESC, sa.id DESC`,
+    isManager ? [] : [user.id, normalizeActionAssigneeUsername(user?.username || '')]
+  );
+  return result.rows.map((row) => mapSupervisorActionRow(row)).filter((row) => row && row.supervisorUsername);
+}
+
 function formatDateUtc(date) {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
@@ -1081,6 +1228,121 @@ async function ensureLogSchema() {
       throw error;
     });
   return logSchemaPromise;
+}
+
+let supervisorActionSchemaReady = false;
+let supervisorActionSchemaPromise = null;
+
+async function ensureSupervisorActionSchema() {
+  if (supervisorActionSchemaReady) return;
+  if (supervisorActionSchemaPromise) return supervisorActionSchemaPromise;
+  supervisorActionSchemaPromise = (async () => {
+    await dbQuery(
+      `CREATE TABLE IF NOT EXISTS supervisor_actions (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         supervisor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+         supervisor_username TEXT NOT NULL,
+         supervisor_name TEXT NOT NULL DEFAULT '',
+         line_id UUID REFERENCES production_lines(id) ON DELETE SET NULL,
+         title TEXT NOT NULL,
+         description TEXT NOT NULL DEFAULT '',
+         priority TEXT NOT NULL DEFAULT 'Medium',
+         status TEXT NOT NULL DEFAULT 'Open',
+         due_date DATE,
+         related_equipment_stage_id UUID REFERENCES line_stages(id) ON DELETE SET NULL,
+         related_reason_category TEXT,
+         related_reason_detail TEXT,
+         created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+         created_by_name TEXT NOT NULL DEFAULT '',
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+         CONSTRAINT supervisor_actions_priority_check CHECK (priority IN ('Low', 'Medium', 'High', 'Critical')),
+         CONSTRAINT supervisor_actions_status_check CHECK (status IN ('Open', 'In Progress', 'Blocked', 'Completed'))
+       )`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS supervisor_user_id UUID REFERENCES users(id) ON DELETE SET NULL`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS supervisor_username TEXT NOT NULL DEFAULT ''`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS supervisor_name TEXT NOT NULL DEFAULT ''`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS line_id UUID REFERENCES production_lines(id) ON DELETE SET NULL`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS title TEXT NOT NULL DEFAULT ''`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS description TEXT NOT NULL DEFAULT ''`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS priority TEXT NOT NULL DEFAULT 'Medium'`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'Open'`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS due_date DATE`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS related_equipment_stage_id UUID REFERENCES line_stages(id) ON DELETE SET NULL`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS related_reason_category TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS related_reason_detail TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS created_by_user_id UUID REFERENCES users(id) ON DELETE SET NULL`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS created_by_name TEXT NOT NULL DEFAULT ''`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+    );
+    await dbQuery(
+      `ALTER TABLE supervisor_actions
+       ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_supervisor_actions_assignee
+       ON supervisor_actions (LOWER(supervisor_username), created_at DESC)`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_supervisor_actions_line
+       ON supervisor_actions (line_id, created_at DESC)`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_supervisor_actions_due_date
+       ON supervisor_actions (due_date ASC NULLS LAST, created_at DESC)`
+    );
+    supervisorActionSchemaReady = true;
+  })()
+    .catch((error) => {
+      supervisorActionSchemaPromise = null;
+      throw error;
+    });
+  return supervisorActionSchemaPromise;
 }
 
 app.get('/api/health', asyncRoute(async (_req, res) => {
@@ -1594,6 +1856,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   await ensureLineGroupSchema();
   await ensureDataSourceSchema();
   await ensureLogSchema();
+  await ensureSupervisorActionSchema();
   const linesQuery = req.user.role === 'manager'
     ? `SELECT
          l.id,
@@ -1658,7 +1921,8 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   const lineRows = linesResult.rows;
   const lineIds = lineRows.map((line) => line.id);
   if (!lineIds.length) {
-    const payload = { lines: [], supervisors: [], lineGroups: [], dataSources: [] };
+    const payload = { lines: [], supervisors: [], lineGroups: [], dataSources: [], supervisorActions: [] };
+    payload.supervisorActions = await fetchSupervisorActionsForUser(req.user);
     if (req.user.role === 'manager') {
       const [supervisors, lineGroups, dataSources] = await Promise.all([
         fetchSupervisorsWithAssignments(),
@@ -2002,7 +2266,8 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     downtimeRows: downtimeByLine.get(line.id) || []
   }));
 
-  const payload = { lines, supervisors: [], lineGroups: [], dataSources: [] };
+  const payload = { lines, supervisors: [], lineGroups: [], dataSources: [], supervisorActions: [] };
+  payload.supervisorActions = await fetchSupervisorActionsForUser(req.user);
   if (req.user.role === 'manager') {
     const [supervisors, lineGroups, dataSources] = await Promise.all([
       fetchSupervisorsWithAssignments(),
@@ -2086,14 +2351,47 @@ app.post('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
-    const insertUser = await client.query(
-      `INSERT INTO users(name, username, password_hash, role, is_active)
-       VALUES ($1, $2, $3, 'supervisor', TRUE)
-       RETURNING id, name, username, is_active AS "isActive"`,
-      [name, username, passwordHash]
+    const existingUserResult = await client.query(
+      `SELECT id, role, is_active AS "isActive"
+       FROM users
+       WHERE username = $1
+       FOR UPDATE`,
+      [username]
     );
-    const supervisor = insertUser.rows[0];
+    const existingUser = existingUserResult.rows[0] || null;
+    let supervisor = null;
+
+    if (existingUser) {
+      if (existingUser.role !== 'supervisor' || existingUser.isActive) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Supervisor username already exists' });
+      }
+      const reactivated = await client.query(
+        `UPDATE users
+         SET name = $2,
+             username = $3,
+             password_hash = $4,
+             role = 'supervisor',
+             is_active = TRUE,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, name, username, is_active AS "isActive"`,
+        [existingUser.id, name, username, passwordHash]
+      );
+      supervisor = reactivated.rows[0];
+      await client.query(
+        `DELETE FROM supervisor_line_shift_assignments WHERE supervisor_user_id = $1`,
+        [supervisor.id]
+      );
+    } else {
+      const insertUser = await client.query(
+        `INSERT INTO users(name, username, password_hash, role, is_active)
+         VALUES ($1, $2, $3, 'supervisor', TRUE)
+         RETURNING id, name, username, is_active AS "isActive"`,
+        [name, username, passwordHash]
+      );
+      supervisor = insertUser.rows[0];
+    }
 
     if (assignedPairs.length) {
       for (const pair of assignedPairs) {
@@ -2246,6 +2544,294 @@ app.delete('/api/supervisors/:supervisorId', authMiddleware, requireRole('manage
   } finally {
     client.release();
   }
+}));
+
+app.post('/api/supervisor-actions', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureSupervisorActionSchema();
+  const parsed = supervisorActionCreateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid action payload' });
+
+  const data = parsed.data;
+  const lineId = String(data.lineId || '').trim();
+  if (lineId) {
+    if (!(await isActiveLine(lineId))) return res.status(404).json({ error: 'Line not found' });
+    if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
+  }
+
+  const relatedEquipmentId = String(data.relatedEquipmentId || '').trim();
+  if (relatedEquipmentId && !lineId) {
+    return res.status(400).json({ error: 'Related equipment requires a valid line.' });
+  }
+  if (relatedEquipmentId && !(await isLineStage(lineId, relatedEquipmentId))) {
+    return res.status(400).json({ error: 'Related equipment does not belong to the selected line.' });
+  }
+
+  const requestedAssigneeUsername = req.user.role === 'manager'
+    ? normalizeActionAssigneeUsername(data.supervisorUsername)
+    : normalizeActionAssigneeUsername(req.user.username);
+  if (!requestedAssigneeUsername) {
+    return res.status(400).json({ error: 'Supervisor username is required.' });
+  }
+  const assignee = await resolveSupervisorActionAssignee(
+    requestedAssigneeUsername,
+    req.user.role === 'manager' ? data.supervisorName : req.user.name
+  );
+  if (!assignee) return res.status(400).json({ error: 'Supervisor username is required.' });
+
+  const title = String(data.title || '').trim();
+  if (!title) return res.status(400).json({ error: 'Action title is required.' });
+  const description = String(data.description || '').trim();
+  const dueDate = normalizeIsoDate(data.dueDate);
+  const relatedReasonCategory = normalizeActionReasonCategory(data.relatedReasonCategory);
+  const relatedReasonDetail = normalizeActionReasonDetail(data.relatedReasonDetail, relatedReasonCategory);
+  const createdByName = String(req.user.name || req.user.username || req.user.role).trim() || String(req.user.role || 'system').trim();
+
+  const inserted = await dbQuery(
+    `INSERT INTO supervisor_actions(
+       supervisor_user_id,
+       supervisor_username,
+       supervisor_name,
+       line_id,
+       title,
+       description,
+       priority,
+       status,
+       due_date,
+       related_equipment_stage_id,
+       related_reason_category,
+       related_reason_detail,
+       created_by_user_id,
+       created_by_name
+     )
+     VALUES (
+       $1,
+       $2,
+       $3,
+       NULLIF($4, '')::UUID,
+       $5,
+       $6,
+       $7,
+       $8,
+       NULLIF($9, '')::DATE,
+       NULLIF($10, '')::UUID,
+       NULLIF($11, ''),
+       NULLIF($12, ''),
+       $13,
+       $14
+     )
+     RETURNING
+       id,
+       supervisor_username AS "supervisorUsername",
+       supervisor_name AS "supervisorName",
+       COALESCE(line_id::TEXT, '') AS "lineId",
+       title,
+       COALESCE(description, '') AS description,
+       priority,
+       status,
+       COALESCE(due_date::TEXT, '') AS "dueDate",
+       COALESCE(related_equipment_stage_id::TEXT, '') AS "relatedEquipmentId",
+       COALESCE(related_reason_category, '') AS "relatedReasonCategory",
+       COALESCE(related_reason_detail, '') AS "relatedReasonDetail",
+       created_at AS "createdAt",
+       COALESCE(created_by_name, '') AS "createdBy"`,
+    [
+      assignee.supervisorUserId,
+      assignee.supervisorUsername,
+      assignee.supervisorName,
+      lineId,
+      title,
+      description,
+      data.priority,
+      data.status,
+      dueDate,
+      relatedEquipmentId,
+      relatedReasonCategory,
+      relatedReasonDetail,
+      req.user.id,
+      createdByName
+    ]
+  );
+
+  await writeAudit({
+    lineId: lineId || null,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'CREATE_SUPERVISOR_ACTION',
+    details: `Action created for ${assignee.supervisorUsername}: ${title}`
+  });
+
+  return res.status(201).json({ action: mapSupervisorActionRow(inserted.rows[0]) });
+}));
+
+app.patch('/api/supervisor-actions/:actionId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureSupervisorActionSchema();
+  const actionId = req.params.actionId;
+  if (!z.string().uuid().safeParse(actionId).success) return res.status(400).json({ error: 'Invalid action id' });
+  const parsed = supervisorActionUpdateSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid action update payload' });
+
+  const existingResult = await dbQuery(
+    `SELECT
+       id,
+       supervisor_user_id AS "supervisorUserId",
+       supervisor_username AS "supervisorUsername",
+       supervisor_name AS "supervisorName",
+       COALESCE(line_id::TEXT, '') AS "lineId",
+       title,
+       COALESCE(description, '') AS description,
+       priority,
+       status,
+       COALESCE(due_date::TEXT, '') AS "dueDate",
+       COALESCE(related_equipment_stage_id::TEXT, '') AS "relatedEquipmentId",
+       COALESCE(related_reason_category, '') AS "relatedReasonCategory",
+       COALESCE(related_reason_detail, '') AS "relatedReasonDetail"
+     FROM supervisor_actions
+     WHERE id = $1`,
+    [actionId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Action not found' });
+  const existing = existingResult.rows[0];
+
+  const data = parsed.data;
+  const lineProvided = Object.prototype.hasOwnProperty.call(data, 'lineId');
+  const nextLineId = lineProvided ? String(data.lineId || '').trim() : String(existing.lineId || '').trim();
+  if (nextLineId && !(await isActiveLine(nextLineId))) return res.status(404).json({ error: 'Line not found' });
+
+  const equipmentProvided = Object.prototype.hasOwnProperty.call(data, 'relatedEquipmentId');
+  const nextEquipmentId = equipmentProvided ? String(data.relatedEquipmentId || '').trim() : String(existing.relatedEquipmentId || '').trim();
+  if (nextEquipmentId && !nextLineId) {
+    return res.status(400).json({ error: 'Related equipment requires a valid line.' });
+  }
+  if (nextEquipmentId && !(await isLineStage(nextLineId, nextEquipmentId))) {
+    return res.status(400).json({ error: 'Related equipment does not belong to the selected line.' });
+  }
+
+  const assigneeProvided = Object.prototype.hasOwnProperty.call(data, 'supervisorUsername');
+  const assignee = assigneeProvided
+    ? await resolveSupervisorActionAssignee(data.supervisorUsername, data.supervisorName)
+    : {
+        supervisorUserId: existing.supervisorUserId || null,
+        supervisorUsername: normalizeActionAssigneeUsername(existing.supervisorUsername),
+        supervisorName: String(existing.supervisorName || existing.supervisorUsername || '').trim()
+      };
+  if (!assignee?.supervisorUsername) {
+    return res.status(400).json({ error: 'Supervisor username is required.' });
+  }
+
+  const titleProvided = Object.prototype.hasOwnProperty.call(data, 'title');
+  const nextTitle = titleProvided ? String(data.title || '').trim() : String(existing.title || '').trim();
+  if (!nextTitle) return res.status(400).json({ error: 'Action title is required.' });
+
+  const descriptionProvided = Object.prototype.hasOwnProperty.call(data, 'description');
+  const nextDescription = descriptionProvided ? String(data.description || '').trim() : String(existing.description || '').trim();
+  const nextPriorityRaw = String(data.priority || existing.priority || '').trim();
+  const nextPriority = actionPriorityValues.includes(nextPriorityRaw) ? nextPriorityRaw : 'Medium';
+  const nextStatusRaw = String(data.status || existing.status || '').trim();
+  const nextStatus = actionStatusValues.includes(nextStatusRaw) ? nextStatusRaw : 'Open';
+
+  const dueDateProvided = Object.prototype.hasOwnProperty.call(data, 'dueDate');
+  const nextDueDate = dueDateProvided ? normalizeIsoDate(data.dueDate) : normalizeIsoDate(existing.dueDate);
+
+  const reasonCategoryProvided = Object.prototype.hasOwnProperty.call(data, 'relatedReasonCategory');
+  const reasonDetailProvided = Object.prototype.hasOwnProperty.call(data, 'relatedReasonDetail');
+  const nextReasonCategory = reasonCategoryProvided
+    ? normalizeActionReasonCategory(data.relatedReasonCategory)
+    : normalizeActionReasonCategory(existing.relatedReasonCategory);
+  const nextReasonDetail = normalizeActionReasonDetail(
+    reasonDetailProvided ? data.relatedReasonDetail : existing.relatedReasonDetail,
+    nextReasonCategory
+  );
+
+  const updated = await dbQuery(
+    `UPDATE supervisor_actions
+     SET
+       supervisor_user_id = $2,
+       supervisor_username = $3,
+       supervisor_name = $4,
+       line_id = NULLIF($5, '')::UUID,
+       title = $6,
+       description = $7,
+       priority = $8,
+       status = $9,
+       due_date = NULLIF($10, '')::DATE,
+       related_equipment_stage_id = NULLIF($11, '')::UUID,
+       related_reason_category = NULLIF($12, ''),
+       related_reason_detail = NULLIF($13, ''),
+       updated_at = NOW()
+     WHERE id = $1
+     RETURNING
+       id,
+       supervisor_username AS "supervisorUsername",
+       supervisor_name AS "supervisorName",
+       COALESCE(line_id::TEXT, '') AS "lineId",
+       title,
+       COALESCE(description, '') AS description,
+       priority,
+       status,
+       COALESCE(due_date::TEXT, '') AS "dueDate",
+       COALESCE(related_equipment_stage_id::TEXT, '') AS "relatedEquipmentId",
+       COALESCE(related_reason_category, '') AS "relatedReasonCategory",
+       COALESCE(related_reason_detail, '') AS "relatedReasonDetail",
+       created_at AS "createdAt",
+       COALESCE(created_by_name, '') AS "createdBy"`,
+    [
+      actionId,
+      assignee.supervisorUserId,
+      assignee.supervisorUsername,
+      assignee.supervisorName,
+      nextLineId,
+      nextTitle,
+      nextDescription,
+      nextPriority,
+      nextStatus,
+      nextDueDate,
+      nextEquipmentId,
+      nextReasonCategory,
+      nextReasonDetail
+    ]
+  );
+
+  await writeAudit({
+    lineId: nextLineId || null,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'UPDATE_SUPERVISOR_ACTION',
+    details: `Action ${actionId} updated`
+  });
+
+  return res.json({ action: mapSupervisorActionRow(updated.rows[0]) });
+}));
+
+app.delete('/api/supervisor-actions/:actionId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureSupervisorActionSchema();
+  const actionId = req.params.actionId;
+  if (!z.string().uuid().safeParse(actionId).success) return res.status(400).json({ error: 'Invalid action id' });
+
+  const existingResult = await dbQuery(
+    `SELECT
+       id,
+       COALESCE(line_id::TEXT, '') AS "lineId",
+       title
+     FROM supervisor_actions
+     WHERE id = $1`,
+    [actionId]
+  );
+  if (!existingResult.rowCount) return res.status(404).json({ error: 'Action not found' });
+  const existing = existingResult.rows[0];
+
+  await dbQuery(`DELETE FROM supervisor_actions WHERE id = $1`, [actionId]);
+  await writeAudit({
+    lineId: existing.lineId || null,
+    actorUserId: req.user.id,
+    actorName: req.user.name,
+    actorRole: req.user.role,
+    action: 'DELETE_SUPERVISOR_ACTION',
+    details: `Action deleted: ${String(existing.title || actionId).trim() || actionId}`
+  });
+
+  return res.status(204).send();
 }));
 
 app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
@@ -3235,7 +3821,14 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
 app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   await ensureLogSchema();
   const parsed = downtimeLogSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log payload' });
+  if (!parsed.success) {
+    const details = parsed.error.issues
+      .map((issue) => `${issue.path.join('.') || 'payload'}: ${issue.message}`)
+      .join('; ');
+    return res.status(400).json({
+      error: details ? `Invalid downtime log payload: ${details}` : 'Invalid downtime log payload'
+    });
+  }
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
   if (parsed.data.equipmentStageId && !(await isLineStage(parsed.data.lineId, parsed.data.equipmentStageId))) {

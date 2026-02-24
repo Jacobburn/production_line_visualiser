@@ -4,6 +4,7 @@ const AUTH_STORAGE_KEY = "kebab-line-auth-v1";
 const ROUTE_STORAGE_KEY = "kebab-line-route-v1";
 const HOME_UI_STORAGE_KEY = "kebab-line-home-ui-v1";
 const SUPERVISOR_ACTIONS_STORAGE_KEY = "kebab-line-supervisor-actions-v1";
+const SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY = "kebab-line-supervisor-actions-seeded-v1";
 const APP_VARIANT = (() => {
   const raw = String(window.PRODUCTION_LINE_APP_VARIANT || "").trim().toLowerCase();
   return raw === "supervisor" ? "supervisor" : "manager";
@@ -64,6 +65,9 @@ const LINE_SHIFT_TRACKER_CELL_GAP = 2;
 const LINE_TILE_FEEDBACK_REFRESH_MS = 30000;
 const LINE_TILE_DOWNTIME_CRITICAL_MINS = 15;
 const SUPERVISOR_SHIFT_OPTIONS = ["Day", "Night"];
+const CREW_SETTINGS_SHIFTS = ["Day", "Night"];
+const BACKEND_LOG_NOTES_MAX_LENGTH = 2000;
+const BACKEND_DOWNTIME_REASON_MAX_LENGTH = 250;
 const DOWNTIME_REASON_PRESETS = {
   "Donor Meat": ["Stock Out", "Late Delivery", "Quality Hold", "Temperature Hold"],
   People: ["Understaffed", "Training", "Handover Delay", "Absence"],
@@ -293,6 +297,23 @@ function writeSupervisorActionsStorage(actions) {
     } else {
       window.localStorage.removeItem(SUPERVISOR_ACTIONS_STORAGE_KEY);
     }
+  } catch {
+    // Ignore storage failures (private mode, quota, disabled storage).
+  }
+}
+
+function readSupervisorActionsSeededStorage() {
+  try {
+    return window.localStorage.getItem(SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeSupervisorActionsSeededStorage(isSeeded) {
+  try {
+    if (isSeeded) window.localStorage.setItem(SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY, "1");
+    else window.localStorage.removeItem(SUPERVISOR_ACTIONS_SEEDED_STORAGE_KEY);
   } catch {
     // Ignore storage failures (private mode, quota, disabled storage).
   }
@@ -1051,7 +1072,13 @@ function dayOffsetISO(baseDateIso, daysToAdd) {
 }
 
 function seedSampleActionsForSupervisors() {
+  if (managerBackendSession.backendToken || appState.supervisorSession?.backendToken) return false;
+  if (readSupervisorActionsSeededStorage()) return false;
   const actions = ensureSupervisorActionsState();
+  if (actions.length) {
+    writeSupervisorActionsSeededStorage(true);
+    return false;
+  }
   const existingIds = new Set(actions.map((action) => String(action.id || "").trim()).filter(Boolean));
   let changed = false;
   (appState.supervisors || []).forEach((sup) => {
@@ -1091,6 +1118,10 @@ function seedSampleActionsForSupervisors() {
       .filter(Boolean)
       .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
     persistSupervisorActions();
+    writeSupervisorActionsSeededStorage(true);
+  }
+  if (!changed && (appState.supervisors || []).length) {
+    writeSupervisorActionsSeededStorage(true);
   }
   return changed;
 }
@@ -1580,18 +1611,10 @@ function derivedDataForLine(line) {
     .map((row) => decorateTimedLogShift(row, line, "downtimeStart", "downtimeFinish"));
   const shiftRows = (line?.shiftRows || []).map(computeShiftRow);
   const breakRows = (line?.breakRows || []).map(computeBreakRow);
-  const downtimeByShift = new Map();
-  downtimeRows.forEach((row) => {
-    LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
-      const mins = Math.max(0, num(row?.__shiftMinutes?.[shiftKey]));
-      if (mins <= 0) return;
-      const key = `${row.date}__${shiftKey}`;
-      downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + mins);
-    });
-  });
+  const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
   const runRows = (line?.runRows || [])
     .map((row) => decorateTimedLogShift(row, line, "productionStartTime", "finishTime"))
-    .map((row) => computeRunRow(row, downtimeByShift));
+    .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
   return { shiftRows, breakRows, runRows, downtimeRows };
 }
 
@@ -1783,8 +1806,34 @@ function listProductCatalogNames(options = {}) {
   return names;
 }
 
+function catalogProductCanonicalName(value, options = {}) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const target = raw.toLowerCase();
+  const entries = listProductCatalogEntries(options);
+  let canonicalFromCode = "";
+  for (const entry of entries) {
+    const code = String(entry.code || "").trim();
+    const canonicalName = String(entry.desc1 || entry.code || "").trim();
+    if (!canonicalName) continue;
+    if (target === canonicalName.toLowerCase()) return canonicalName;
+    if (code && target === code.toLowerCase()) canonicalFromCode = canonicalName;
+    if (!code) continue;
+    if (target === `${code} - ${canonicalName}`.toLowerCase()) return canonicalName;
+    if (target === `${code} | ${canonicalName}`.toLowerCase()) return canonicalName;
+  }
+  if (canonicalFromCode) return canonicalFromCode;
+  const composite = raw.match(/^([A-Za-z0-9._/-]+)\s*[-|:]\s*(.+)$/);
+  if (composite) {
+    const inputCode = String(composite[1] || "").trim().toLowerCase();
+    const codeMatch = entries.find((entry) => String(entry.code || "").trim().toLowerCase() === inputCode);
+    if (codeMatch) return String(codeMatch.desc1 || codeMatch.code || "").trim();
+  }
+  return raw;
+}
+
 function isCatalogProductName(value, options = {}) {
-  const target = String(value || "").trim().toLowerCase();
+  const target = catalogProductCanonicalName(value, options).toLowerCase();
   if (!target) return false;
   return listProductCatalogNames(options).some((name) => name.toLowerCase() === target);
 }
@@ -1891,14 +1940,21 @@ function ensureRunProductDatalistById(datalistId) {
 function listProductCatalogOptions(options = {}) {
   const seen = new Set();
   const deduped = [];
+  const includeCodeInValue = Boolean(options?.includeCodeInValue);
   listProductCatalogEntries(options).forEach((entry) => {
-    const value = String(entry.desc1 || entry.code || "").trim();
-    if (!value) return;
-    const key = value.toLowerCase();
+    const canonicalValue = String(entry.desc1 || entry.code || "").trim();
+    if (!canonicalValue) return;
+    const key = canonicalValue.toLowerCase();
     if (seen.has(key)) return;
     seen.add(key);
+    const code = String(entry.code || "").trim();
+    const value = includeCodeInValue && code && code.toLowerCase() !== canonicalValue.toLowerCase()
+      ? `${code} - ${canonicalValue}`
+      : canonicalValue;
     deduped.push({
       value,
+      canonicalValue,
+      code,
       label: [entry.code, entry.desc2].filter(Boolean).join(" | ")
     });
   });
@@ -1925,7 +1981,9 @@ function syncRunProductInputsFromCatalog() {
   if (supervisorInput) {
     const supervisorDatalist = ensureRunProductDatalistById(PRODUCT_CATALOG_SUPERVISOR_DATALIST_ID);
     const supervisorLineId = selectedSupervisorProductCatalogLineId();
-    const supervisorOptions = supervisorLineId ? listProductCatalogOptions({ lineId: supervisorLineId }) : [];
+    const supervisorOptions = supervisorLineId
+      ? listProductCatalogOptions({ lineId: supervisorLineId, includeCodeInValue: true })
+      : [];
     supervisorDatalist.innerHTML = supervisorOptions
       .map((item) => `<option value="${htmlEscape(item.value)}">${htmlEscape(item.label || item.value)}</option>`)
       .join("");
@@ -1973,7 +2031,7 @@ function loadState() {
     managerHomeTab: "dashboard",
     dashboardDate: todayISO(),
     dashboardShift: "Day",
-    supervisorMobileMode: false,
+    supervisorMobileMode: APP_VARIANT === "supervisor",
     supervisorMainTab: "supervisorDay",
     supervisorTab: "superShift",
     supervisorSelectedLineId: "",
@@ -2146,6 +2204,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     secretKey: generateSecretKey(),
     selectedDate: todayISO(),
     selectedShift: "Day",
+    crewSettingsShift: "Day",
     visualEditMode: false,
     flowGuides: [],
     selectedStageId: STAGES[0].id,
@@ -2180,6 +2239,9 @@ function normalizeLine(id, line) {
     groupId: String(line?.groupId || "").trim(),
     displayOrder: Number.isFinite(displayOrderRaw) ? Math.max(0, Math.floor(displayOrderRaw)) : base.displayOrder,
     secretKey: line?.secretKey || base.secretKey,
+    crewSettingsShift: CREW_SETTINGS_SHIFTS.includes(String(line?.crewSettingsShift || ""))
+      ? String(line.crewSettingsShift)
+      : fallbackShiftValue(line?.selectedShift || base.selectedShift),
     visualEditMode: Boolean(line?.visualEditMode),
     flowGuides: normalizeFlowGuides(line?.flowGuides),
     crewsByShift: normalizeCrewByShift(line || {}, stages),
@@ -2957,6 +3019,36 @@ function intervalsFromTimes(startValue, finishValue) {
     .filter((segment) => segment.end > segment.start);
 }
 
+function overlapMinutesBetweenIntervalSets(leftIntervals = [], rightIntervals = []) {
+  if (!Array.isArray(leftIntervals) || !Array.isArray(rightIntervals)) return 0;
+  if (!leftIntervals.length || !rightIntervals.length) return 0;
+  return leftIntervals.reduce(
+    (sum, left) => sum + rightIntervals.reduce((inner, right) => inner + intervalOverlapMinutes(left, right), 0),
+    0
+  );
+}
+
+function buildNonProductionIntervalsByDate(breakRows = [], downtimeRows = []) {
+  const byDate = new Map();
+  const addIntervals = (rows, startField, finishField) => {
+    (rows || []).forEach((row) => {
+      const date = String(row?.date || "").trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return;
+      const intervals = intervalsFromTimes(row?.[startField], row?.[finishField]);
+      if (!intervals.length) return;
+      const existing = byDate.get(date) || [];
+      existing.push(...intervals);
+      byDate.set(date, existing);
+    });
+  };
+  addIntervals(breakRows, "breakStart", "breakFinish");
+  addIntervals(downtimeRows, "downtimeStart", "downtimeFinish");
+  byDate.forEach((intervals, date) => {
+    byDate.set(date, mergeMinuteIntervals(intervals));
+  });
+  return byDate;
+}
+
 function shiftIntervalsForDate(line, date) {
   const byShift = Object.fromEntries(LOG_ASSIGNABLE_SHIFTS.map((shift) => [shift, []]));
   (line?.shiftRows || [])
@@ -3092,6 +3184,12 @@ function rowMatchesDateShift(row, date, shift, { line = null, startField = "", f
 
 function fallbackShiftValue(shift) {
   return shift === "Night" ? "Night" : "Day";
+}
+
+function crewSettingsShiftForLine(line) {
+  const explicit = String(line?.crewSettingsShift || "").trim();
+  if (CREW_SETTINGS_SHIFTS.includes(explicit)) return explicit;
+  return fallbackShiftValue(line?.selectedShift || "Day");
 }
 
 function isWithinShiftWindow(targetMins, startMins, finishMins) {
@@ -3485,6 +3583,10 @@ async function refreshHostedState(preferredSession = null) {
         assignedLineIds: Object.keys(assignedLineShifts)
       };
     });
+    if (Array.isArray(snapshot?.supervisorActions)) {
+      appState.supervisorActions = normalizeSupervisorActions(snapshot.supervisorActions);
+      writeSupervisorActionsSeededStorage(true);
+    }
 
     if (appState.supervisorSession) {
       const current = appState.supervisors.find((sup) => sup.username === appState.supervisorSession.username);
@@ -3629,6 +3731,8 @@ async function syncManagerRunLog(payload) {
 }
 
 async function syncManagerDowntimeLog(payload) {
+  const validationError = validateDowntimeBackendPayload(payload);
+  if (validationError) throw new Error(validationError);
   const session = await ensureManagerBackendSession();
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
@@ -3681,6 +3785,8 @@ async function patchManagerRunLog(logId, payload) {
 }
 
 async function patchManagerDowntimeLog(logId, payload) {
+  const validationError = validateDowntimeBackendPayload(payload);
+  if (validationError) throw new Error(validationError);
   const session = await ensureManagerBackendSession();
   const backendEquipmentId = payload.equipment
     ? await ensureBackendStageId(payload.lineId || state.id, payload.equipment, session)
@@ -3880,6 +3986,8 @@ async function patchSupervisorRunLog(session, logId, payload) {
 }
 
 async function syncSupervisorDowntimeLog(session, payload) {
+  const validationError = validateDowntimeBackendPayload(payload);
+  if (validationError) throw new Error(validationError);
   const backendLineId = await ensureBackendLineId(payload.lineId, session);
   if (!backendLineId) throw new Error("Line is not synced to server.");
   const backendEquipmentId = payload.equipment
@@ -3903,6 +4011,8 @@ async function syncSupervisorDowntimeLog(session, payload) {
 }
 
 async function patchSupervisorDowntimeLog(session, logId, payload) {
+  const validationError = validateDowntimeBackendPayload(payload);
+  if (validationError) throw new Error(validationError);
   const backendEquipmentId = payload.equipment
     ? await ensureBackendStageId(payload.lineId, payload.equipment, session)
     : null;
@@ -3918,6 +4028,69 @@ async function patchSupervisorDowntimeLog(session, logId, payload) {
     }
   });
   return response?.downtimeLog || null;
+}
+
+async function syncSupervisorAction(session, payload) {
+  const localLineId = String(payload.lineId || "").trim();
+  const backendLineId = localLineId ? await ensureBackendLineId(localLineId, session) : "";
+  if (localLineId && !backendLineId) throw new Error("Line is not synced to server.");
+  const localEquipmentId = String(payload.relatedEquipmentId || "").trim();
+  const backendEquipmentId = localEquipmentId
+    ? await ensureBackendStageId(localLineId, localEquipmentId, session)
+    : "";
+  if (localEquipmentId && !backendEquipmentId) throw new Error("Related equipment could not be mapped to the backend line.");
+  const response = await apiRequest("/api/supervisor-actions", {
+    method: "POST",
+    token: session.backendToken,
+    body: {
+      lineId: backendLineId || "",
+      title: String(payload.title || ""),
+      description: String(payload.description || ""),
+      priority: normalizeActionPriority(payload.priority),
+      status: normalizeActionStatus(payload.status),
+      dueDate: /^\d{4}-\d{2}-\d{2}$/.test(String(payload.dueDate || "").trim()) ? String(payload.dueDate).trim() : "",
+      relatedEquipmentId: backendEquipmentId || "",
+      relatedReasonCategory: normalizeActionReasonCategory(payload.relatedReasonCategory),
+      relatedReasonDetail: String(payload.relatedReasonDetail || "").trim()
+    }
+  });
+  return response?.action || null;
+}
+
+async function patchManagerSupervisorAction(actionId, payload) {
+  const session = await ensureManagerBackendSession();
+  const localLineId = String(payload.lineId || "").trim();
+  const backendLineId = localLineId ? await ensureBackendLineId(localLineId, session) : "";
+  if (localLineId && !backendLineId) throw new Error("Line is not synced to server.");
+  const localEquipmentId = String(payload.relatedEquipmentId || "").trim();
+  const backendEquipmentId = localEquipmentId
+    ? await ensureBackendStageId(localLineId, localEquipmentId, session)
+    : "";
+  if (localEquipmentId && !backendEquipmentId) throw new Error("Related equipment could not be mapped to the backend line.");
+  const response = await apiRequest(`/api/supervisor-actions/${encodeURIComponent(String(actionId || ""))}`, {
+    method: "PATCH",
+    token: session.backendToken,
+    body: {
+      supervisorUsername: String(payload.supervisorUsername || "").trim().toLowerCase(),
+      supervisorName: String(payload.supervisorName || "").trim(),
+      lineId: backendLineId || "",
+      priority: normalizeActionPriority(payload.priority),
+      status: normalizeActionStatus(payload.status),
+      dueDate: /^\d{4}-\d{2}-\d{2}$/.test(String(payload.dueDate || "").trim()) ? String(payload.dueDate).trim() : "",
+      relatedEquipmentId: backendEquipmentId || "",
+      relatedReasonCategory: normalizeActionReasonCategory(payload.relatedReasonCategory),
+      relatedReasonDetail: String(payload.relatedReasonDetail || "").trim()
+    }
+  });
+  return response?.action || null;
+}
+
+async function deleteManagerSupervisorAction(actionId) {
+  const session = await ensureManagerBackendSession();
+  await apiRequest(`/api/supervisor-actions/${encodeURIComponent(String(actionId || ""))}`, {
+    method: "DELETE",
+    token: session.backendToken
+  });
 }
 
 function requiredCrewForLineShift(line, shift) {
@@ -4054,6 +4227,28 @@ function buildDowntimeReasonText(line, category, detail, note) {
   if (!noteText) return `${group} > ${detailText}`;
   if (!detailText) return `${group} > ${noteText}`;
   return `${group} > ${detailText} > ${noteText}`;
+}
+
+function validateDowntimeBackendPayload(payload) {
+  const date = String(payload?.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "Date is invalid.";
+  const shift = String(payload?.shift || "").trim();
+  if (!SHIFT_OPTIONS.includes(shift)) return "Shift is invalid.";
+  const downtimeStart = String(payload?.downtimeStart || "").trim();
+  const downtimeFinish = String(payload?.downtimeFinish || "").trim();
+  if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
+    return "Downtime start and finish must be HH:MM (24h).";
+  }
+  const reason = String(payload?.reason || "").trim();
+  if (!reason) return "Reason is required.";
+  if (reason.length > BACKEND_DOWNTIME_REASON_MAX_LENGTH) {
+    return `Reason is too long (${reason.length}/${BACKEND_DOWNTIME_REASON_MAX_LENGTH}). Shorten Reason Notes.`;
+  }
+  const notes = String(payload?.notes || "").trim();
+  if (notes.length > BACKEND_LOG_NOTES_MAX_LENGTH) {
+    return `Notes are too long (${notes.length}/${BACKEND_LOG_NOTES_MAX_LENGTH}).`;
+  }
+  return "";
 }
 
 function parseDowntimeReasonParts(reasonText, equipment = "") {
@@ -4375,32 +4570,27 @@ function computeBreakRow(row) {
   return { ...row, breakMins: calc > 0 ? calc : fallback };
 }
 
-function computeRunRow(row, downtimeByShift) {
+function computeRunRow(row, nonProductionIntervalsByDate) {
   const grossFallback = num(row.grossProductionTime);
   const grossCalc = diffMinutes(row.productionStartTime, row.finishTime);
   const grossProductionTime = grossCalc > 0 ? grossCalc : grossFallback;
 
   const associatedFallback = num(row.associatedDownTime);
-  const perShiftMinutes = row?.__shiftMinutes;
-  const coveredShiftMinutes = LOG_ASSIGNABLE_SHIFTS.reduce((sum, shiftKey) => sum + Math.max(0, num(perShiftMinutes?.[shiftKey])), 0);
-  let associatedFromDowntime = 0;
-  if (coveredShiftMinutes > 0) {
-    LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
-      const mins = Math.max(0, num(perShiftMinutes?.[shiftKey]));
-      if (mins <= 0) return;
-      const downForShift = Math.max(0, num(downtimeByShift.get(`${row.date}__${shiftKey}`) || 0));
-      associatedFromDowntime += (mins / coveredShiftMinutes) * downForShift;
-    });
-  }
-  const associatedDownTime = associatedFromDowntime > 0 ? associatedFromDowntime : associatedFallback;
+  const runIntervals = intervalsFromTimes(row.productionStartTime, row.finishTime);
+  const runDate = String(row?.date || "").trim();
+  const nonProductionIntervals = nonProductionIntervalsByDate?.get(runDate) || [];
+  const hasComputedOverlap = runIntervals.length > 0;
+  const associatedDownTime = hasComputedOverlap
+    ? overlapMinutesBetweenIntervalSets(runIntervals, nonProductionIntervals)
+    : associatedFallback;
 
   const netFallback = num(row.netProductionTime);
   const netCalc = Math.max(0, grossProductionTime - associatedDownTime);
-  const netProductionTime = netCalc > 0 ? netCalc : netFallback;
+  const netProductionTime = hasComputedOverlap ? netCalc : netFallback;
 
   const unitsProduced = num(row.unitsProduced);
   const grossRunRate = grossProductionTime > 0 ? unitsProduced / grossProductionTime : num(row.grossRunRate);
-  const netRunRate = netProductionTime > 0 ? unitsProduced / netProductionTime : num(row.netRunRate);
+  const netRunRate = netProductionTime > 0 ? unitsProduced / netProductionTime : hasComputedOverlap ? 0 : num(row.netRunRate);
 
   return {
     ...row,
@@ -4418,18 +4608,10 @@ function derivedData() {
     .map((row) => decorateTimedLogShift(row, state, "downtimeStart", "downtimeFinish"));
   const shiftRows = state.shiftRows.map(computeShiftRow);
   const breakRows = (state.breakRows || []).map(computeBreakRow);
-  const downtimeByShift = new Map();
-  downtimeRows.forEach((row) => {
-    LOG_ASSIGNABLE_SHIFTS.forEach((shiftKey) => {
-      const mins = Math.max(0, num(row?.__shiftMinutes?.[shiftKey]));
-      if (mins <= 0) return;
-      const key = `${row.date}__${shiftKey}`;
-      downtimeByShift.set(key, (downtimeByShift.get(key) || 0) + mins);
-    });
-  });
+  const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
   const runRows = state.runRows
     .map((row) => decorateTimedLogShift(row, state, "productionStartTime", "finishTime"))
-    .map((row) => computeRunRow(row, downtimeByShift));
+    .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
   return { shiftRows, breakRows, runRows, downtimeRows };
 }
 
@@ -5746,7 +5928,7 @@ function bindHome() {
       setActionReasonDetailOptions(reasonDetailSelect, line, String(categorySelect.value || ""), reasonDetailSelect.value || "");
     });
 
-    managerActionList.addEventListener("click", (event) => {
+    managerActionList.addEventListener("click", async (event) => {
       const editBtn = event.target.closest("[data-manager-action-edit]");
       if (editBtn) {
         if (appState.appMode !== "manager" || !managerBackendSession.backendToken) return;
@@ -5771,11 +5953,18 @@ function bindHome() {
         const action = actions[actionIndex];
         const actionTitle = String(action?.title || "this action").trim() || "this action";
         if (!window.confirm(`Delete "${actionTitle}"?`)) return;
-        actions.splice(actionIndex, 1);
-        if (isManagerActionTicketEditRow(actionId)) clearManagerActionTicketEdit();
-        appState.supervisorActions = normalizeSupervisorActions(actions);
-        saveState();
-        renderHome();
+        try {
+          if (UUID_RE.test(actionId)) {
+            await deleteManagerSupervisorAction(actionId);
+          }
+          actions.splice(actionIndex, 1);
+          if (isManagerActionTicketEditRow(actionId)) clearManagerActionTicketEdit();
+          appState.supervisorActions = normalizeSupervisorActions(actions);
+          saveState();
+          renderHome();
+        } catch (error) {
+          alert(`Could not delete action.\n${error?.message || "Please try again."}`);
+        }
         return;
       }
 
@@ -5794,6 +5983,10 @@ function bindHome() {
       const relatedReasonCategorySelect = row?.querySelector("[data-manager-action-reason-category]");
       const relatedReasonDetailSelect = row?.querySelector("[data-manager-action-reason-detail]");
       const nextUsername = String(supervisorSelect.value || "").trim().toLowerCase();
+      if (!nextUsername) {
+        alert("Assigned owner is required.");
+        return;
+      }
       const actions = ensureSupervisorActionsState();
       const action = actions.find((item) => String(item?.id || "") === actionId);
       if (!action) {
@@ -5845,17 +6038,49 @@ function bindHome() {
         renderHome();
         return;
       }
-      action.supervisorUsername = nextUsername;
-      action.supervisorName = actionAssignmentLabel(nextUsername, action.supervisorName);
-      action.priority = nextPriority;
-      action.status = nextStatus;
-      action.dueDate = nextDueDate;
-      action.relatedEquipmentId = nextRelatedEquipmentId;
-      action.relatedReasonCategory = nextRelatedReasonCategory;
-      action.relatedReasonDetail = nextRelatedReasonDetail;
-      clearManagerActionTicketEdit();
-      saveState();
-      renderHome();
+      const nextSupervisorName = actionAssignmentLabel(nextUsername, action.supervisorName);
+      const nextValues = {
+        supervisorUsername: nextUsername,
+        supervisorName: nextSupervisorName,
+        priority: nextPriority,
+        status: nextStatus,
+        dueDate: nextDueDate,
+        relatedEquipmentId: nextRelatedEquipmentId,
+        relatedReasonCategory: nextRelatedReasonCategory,
+        relatedReasonDetail: nextRelatedReasonDetail
+      };
+      try {
+        let updatedAction = null;
+        if (UUID_RE.test(actionId)) {
+          const savedAction = await patchManagerSupervisorAction(actionId, {
+            supervisorUsername: nextUsername,
+            supervisorName: nextSupervisorName,
+            lineId: action.lineId,
+            priority: nextPriority,
+            status: nextStatus,
+            dueDate: nextDueDate,
+            relatedEquipmentId: nextRelatedEquipmentId,
+            relatedReasonCategory: nextRelatedReasonCategory,
+            relatedReasonDetail: nextRelatedReasonDetail
+          });
+          updatedAction = normalizeSupervisorAction(savedAction);
+        }
+        if (!updatedAction) {
+          updatedAction = normalizeSupervisorAction({
+            ...action,
+            ...nextValues
+          });
+        }
+        if (!updatedAction) throw new Error("Action update returned invalid data.");
+        appState.supervisorActions = normalizeSupervisorActions(
+          actions.map((item) => (String(item?.id || "") === actionId ? updatedAction : item))
+        );
+        clearManagerActionTicketEdit();
+        saveState();
+        renderHome();
+      } catch (error) {
+        alert(`Could not update action.\n${error?.message || "Please try again."}`);
+      }
     });
   }
 
@@ -6476,7 +6701,7 @@ function bindHome() {
   supervisorRunForm.addEventListener("submit", (event) => event.preventDefault());
   supervisorDownForm.addEventListener("submit", (event) => event.preventDefault());
   if (supervisorActionForm) {
-    supervisorActionForm.addEventListener("submit", (event) => {
+    supervisorActionForm.addEventListener("submit", async (event) => {
       event.preventDefault();
       const session = appState.supervisorSession;
       if (!session?.username) {
@@ -6545,7 +6770,31 @@ function bindHome() {
         alert("Could not lodge action. Please try again.");
         return;
       }
-      ensureSupervisorActionsState().unshift(createdAction);
+      let nextAction = createdAction;
+      if (session.backendToken) {
+        try {
+          const savedAction = await syncSupervisorAction(session, {
+            lineId: selectedLineId,
+            title,
+            description,
+            priority: normalizeActionPriority(supervisorActionPriorityInput?.value),
+            status: normalizeActionStatus(supervisorActionStatusInput?.value),
+            dueDate,
+            relatedEquipmentId: relatedEquipmentRaw,
+            relatedReasonCategory,
+            relatedReasonDetail
+          });
+          const normalizedSaved = normalizeSupervisorAction(savedAction);
+          if (!normalizedSaved) throw new Error("Server returned invalid action data.");
+          nextAction = normalizedSaved;
+        } catch (error) {
+          alert(`Could not lodge action.\n${error?.message || "Please try again."}`);
+          return;
+        }
+      }
+      const actions = ensureSupervisorActionsState();
+      actions.unshift(nextAction);
+      appState.supervisorActions = normalizeSupervisorActions(actions);
       supervisorActionForm.reset();
       if (supervisorActionLineInput && selectedLineId && assignedLineIds.includes(selectedLineId)) {
         supervisorActionLineInput.value = selectedLineId;
@@ -6649,6 +6898,14 @@ function bindHome() {
       return;
     }
 
+    if (existing?.id && selectedShiftTileNode) {
+      const breakEditsSaved = await saveSupervisorShiftBreakEdits(existing.id, selectedShiftTileNode, {
+        suppressNoChangesAlert: true,
+        skipPersist: true
+      });
+      if (breakEditsSaved === false) return;
+    }
+
     const payload = { lineId, date, shift, crewOnShift, startTime, finishTime, notes };
     try {
       const saved = existing?.id
@@ -6663,12 +6920,6 @@ function bindHome() {
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.shiftRows, savedRow);
-      if (existing?.id && selectedShiftTileNode) {
-        await saveSupervisorShiftBreakEdits(existing.id, selectedShiftTileNode, {
-          suppressNoChangesAlert: true,
-          skipPersist: true
-        });
-      }
       if (complete) {
         superShiftLogIdInput.value = "";
         if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
@@ -6858,20 +7109,20 @@ function bindHome() {
     { suppressNoChangesAlert = false, skipPersist = false } = {}
   ) => {
     const session = appState.supervisorSession;
-    if (!session) return;
+    if (!session) return false;
     const lineId = selectedSupervisorLineId();
     const line = appState.lines[lineId];
     if (!session.assignedLineIds.includes(lineId) || !line) {
       alert("You are not assigned to that line.");
-      return;
+      return false;
     }
     const shiftLog = (line.shiftRows || []).find((row) => row.id === shiftId) || null;
     if (!shiftLog?.id) {
       alert("Shift log could not be found.");
-      return;
+      return false;
     }
     const editorRows = Array.from(tileNode?.querySelectorAll("[data-break-editor-row]") || []);
-    if (!editorRows.length) return;
+    if (!editorRows.length) return true;
 
     try {
       let changed = false;
@@ -6883,11 +7134,11 @@ function bindHome() {
         const finishValue = String(editorRow.querySelector('[data-break-field="finish"]')?.value || "").trim();
         if (startValue && !strictTimeValid(startValue)) {
           alert("Break start time must be HH:MM.");
-          return;
+          return false;
         }
         if (finishValue && !strictTimeValid(finishValue)) {
           alert("Break finish time must be HH:MM.");
-          return;
+          return false;
         }
 
         const shiftBreakRows = breakRowsForShift(line, shiftId);
@@ -6906,7 +7157,7 @@ function bindHome() {
           const nextFinish = finishValue;
           if (!nextStart || !strictTimeValid(nextStart)) {
             alert("Each existing break must have a valid start time.");
-            return;
+            return false;
           }
           const isBackendBreak = UUID_RE.test(String(existingBreak.id || ""));
           if (isBackendBreak) {
@@ -6952,7 +7203,7 @@ function bindHome() {
         if (!startValue && !finishValue) continue;
         if (!startValue) {
           alert("New break rows need a start time.");
-          return;
+          return false;
         }
 
         if (UUID_RE.test(String(shiftLog.id || ""))) {
@@ -7002,7 +7253,7 @@ function bindHome() {
       if (warnings.size) alert(Array.from(warnings).join("\n"));
       if (!changed) {
         if (!warnings.size && !suppressNoChangesAlert) alert("No break changes to save.");
-        return;
+        return true;
       }
       addAudit(
         line,
@@ -7013,8 +7264,10 @@ function bindHome() {
         saveState();
         renderAll();
       }
+      return true;
     } catch (error) {
       alert(`Could not save break edits.\n${error?.message || "Please try again."}`);
+      return false;
     }
   };
 
@@ -7054,14 +7307,16 @@ function bindHome() {
       }
     }
 
-    const product = String(productInput || existing?.product || "").trim();
+    const catalogOptions = { lineId };
+    const product = catalogProductCanonicalName(productInput || existing?.product || "", catalogOptions);
     if (!product) {
       alert("Product is required.");
       return;
     }
-    const productChanged = Boolean(productInput) && product !== String(existing?.product || "").trim();
+    const existingProduct = catalogProductCanonicalName(existing?.product || "", catalogOptions);
+    const productChanged = Boolean(productInput) && product !== existingProduct;
     const requiresCatalogValidation = !existing || productChanged;
-    if (requiresCatalogValidation && !isCatalogProductName(product, { lineId })) {
+    if (requiresCatalogValidation && !isCatalogProductName(product, catalogOptions)) {
       alert("Select a product from Manage Products before starting a run.");
       return;
     }
@@ -7299,6 +7554,16 @@ function bindHome() {
       alert("Shift start time is invalid. Edit the shift and set a valid start time first.");
       return;
     }
+    const shiftTileNode = superShiftOpenList
+      ?.querySelector(`[data-super-shift-edit="${shiftId}"]`)
+      ?.closest(".pending-log-item") || null;
+    if (shiftTileNode) {
+      const breakEditsSaved = await saveSupervisorShiftBreakEdits(shiftId, shiftTileNode, {
+        suppressNoChangesAlert: true,
+        skipPersist: true
+      });
+      if (breakEditsSaved === false) return;
+    }
     const openBreak = latestBySubmittedAt((line.breakRows || []).filter((breakRow) => breakRow.shiftLogId === row.id && isOpenBreakRow(breakRow)));
     if (openBreak?.id) {
       alert("End the current break before finalising the shift.");
@@ -7350,6 +7615,8 @@ function bindHome() {
         const activeBreak = (line.breakRows || []).find((breakRow) => breakRow.id === superShiftOpenBreakIdInput.value);
         if (activeBreak?.shiftLogId === row.id) superShiftOpenBreakIdInput.value = "";
       }
+      if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
+      supervisorShiftTileEditId = "";
       addAudit(
         line,
         "SUPERVISOR_SHIFT_COMPLETE",
@@ -7701,10 +7968,6 @@ function bindHome() {
       if (completeBtn) {
         const shiftId = completeBtn.getAttribute("data-super-shift-complete");
         if (shiftId) {
-          if (superShiftLogIdInput) superShiftLogIdInput.value = "";
-          if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
-          supervisorShiftTileEditId = "";
-          updateSupervisorProgressButtonLabels();
           completeSupervisorShiftById(shiftId);
         }
       }
@@ -8234,6 +8497,7 @@ function bindDataSubtabs() {
 function bindVisualiserControls() {
   const dateInputs = Array.from(document.querySelectorAll("[data-manager-date]"));
   const shiftButtons = Array.from(document.querySelectorAll(".shift-option[data-shift], .shift-option[data-day-shift]"));
+  const crewShiftButtons = Array.from(document.querySelectorAll(".shift-option[data-crew-shift]"));
   const map = document.getElementById("lineMap");
   const editBtn = document.getElementById("toggleLayoutEdit");
   const addLineBtn = document.getElementById("addFlowLine");
@@ -8305,6 +8569,18 @@ function bindVisualiserControls() {
       setShiftToggleUI();
       saveState();
       renderAll();
+    });
+  });
+  crewShiftButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!state) return;
+      const nextCrewShift = String(btn.dataset.crewShift || "");
+      if (!CREW_SETTINGS_SHIFTS.includes(nextCrewShift)) return;
+      if (crewSettingsShiftForLine(state) === nextCrewShift) return;
+      state.crewSettingsShift = nextCrewShift;
+      setShiftToggleUI();
+      saveState();
+      renderCrewInputs();
     });
   });
 
@@ -8804,8 +9080,15 @@ function moveLineTrendPeriod(direction) {
 }
 
 function setShiftToggleUI() {
+  const selectedShift = state?.selectedShift || "Day";
+  const crewShift = crewSettingsShiftForLine(state);
   document.querySelectorAll(".shift-option[data-shift], .shift-option[data-day-shift]").forEach((btn) => {
-    const active = Boolean(state) && (btn.dataset.shift || btn.dataset.dayShift) === state.selectedShift;
+    const active = Boolean(state) && (btn.dataset.shift || btn.dataset.dayShift) === selectedShift;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-pressed", String(active));
+  });
+  document.querySelectorAll(".shift-option[data-crew-shift]").forEach((btn) => {
+    const active = Boolean(state) && btn.dataset.crewShift === crewShift;
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
@@ -8904,7 +9187,7 @@ function bindForms() {
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
     data.notes = String(data.notes || "").trim();
-    data.product = String(data.product || "").trim();
+    data.product = catalogProductCanonicalName(String(data.product || "").trim());
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data.date || ""))) {
       alert("Date is required.");
       return;
@@ -9128,7 +9411,7 @@ function bindForms() {
       const row = (state.runRows || []).find((item) => item.id === logId);
       if (!row) return;
       const date = inlineValue(rowNode, "date");
-      const product = String(inlineValue(rowNode, "product") || "").trim();
+      const product = catalogProductCanonicalName(String(inlineValue(rowNode, "product") || "").trim());
       const productionStartTime = inlineValue(rowNode, "productionStartTime");
       const finishTime = inlineValue(rowNode, "finishTime");
       const unitsProduced = Math.max(0, num(inlineValue(rowNode, "unitsProduced")));
@@ -9141,7 +9424,7 @@ function bindForms() {
         alert("Product is required.");
         return;
       }
-      const productChanged = product !== String(row.product || "").trim();
+      const productChanged = product !== catalogProductCanonicalName(String(row.product || "").trim());
       if (productChanged && !isCatalogProductName(product)) {
         alert("Product must be selected from Manage Products.");
         return;
@@ -9859,8 +10142,10 @@ function renderCrewInputs() {
   const shiftNote = document.getElementById("crewShiftNote");
   if (!form || !shiftNote) return;
   form.innerHTML = "";
-  shiftNote.textContent = `Crew values for ${state.selectedShift} shift.`;
-  const activeCrew = state.crewsByShift[state.selectedShift] || defaultStageCrew();
+  const crewShift = crewSettingsShiftForLine(state);
+  if (state.crewSettingsShift !== crewShift) state.crewSettingsShift = crewShift;
+  shiftNote.textContent = `Crew values for ${crewShift} shift.`;
+  const activeCrew = state.crewsByShift[crewShift] || defaultStageCrew(getStages());
 
   getStages().forEach((stage, index) => {
     const row = document.createElement("label");
@@ -9875,9 +10160,9 @@ function renderCrewInputs() {
     input.step = "1";
     input.value = activeCrew?.[stage.id]?.crew ?? stage.crew;
     input.addEventListener("change", () => {
-      if (!state.crewsByShift[state.selectedShift]) state.crewsByShift[state.selectedShift] = defaultStageCrew();
-      if (!state.crewsByShift[state.selectedShift][stage.id]) state.crewsByShift[state.selectedShift][stage.id] = {};
-      state.crewsByShift[state.selectedShift][stage.id].crew = num(input.value);
+      if (!state.crewsByShift[crewShift]) state.crewsByShift[crewShift] = defaultStageCrew(getStages());
+      if (!state.crewsByShift[crewShift][stage.id]) state.crewsByShift[crewShift][stage.id] = {};
+      state.crewsByShift[crewShift][stage.id].crew = num(input.value);
       saveState({ syncModel: true });
       renderVisualiser();
       renderStageTrend();
