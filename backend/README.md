@@ -64,7 +64,8 @@ curl http://localhost:4000/api/health
 ```
 
 ## 7) Seed login users
-- Manager: `manager` / `manager123`
+- Manager: `jeremy` / `do4c6B-N=(bLRo7YwQ5v`
+- Manager: `jacob` / `(CLM]E2hY]$Rdhc%yV3d`
 - Supervisor: `supervisor` / `supervisor123`
 
 ## API routes (current)

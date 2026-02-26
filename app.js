@@ -2836,6 +2836,96 @@ function renderManagerDataSourcesList(rootNode) {
   `;
 }
 
+function renderIncomingDataSourcesStatus(rootNode) {
+  if (!rootNode) return;
+  const sources = (appState.dataSources || []).filter((source) => source.isActive !== false);
+  const assignments = dataSourceAssignments(appState.lines);
+  if (!sources.length) {
+    rootNode.innerHTML = `<p class="data-source-empty">No incoming data sources are configured yet.</p>`;
+    return;
+  }
+
+  const rows = sources.map((source) => {
+    const sourceAssignments = assignments.get(source.id) || [];
+    const connectionConfigured = source.connectionMode === "sql" ? source.hasSqlCredentials : source.hasApiKey;
+    const testState = dataSourceConnectionTestFor(source.id);
+    const testFailed = Boolean(testState && !testState.ok);
+    const hasConflict = sourceAssignments.length > 1;
+    const isAssigned = sourceAssignments.length > 0;
+    let tone = "is-ok";
+    let statusText = "Ready";
+
+    if (!connectionConfigured) {
+      tone = "is-attention";
+      statusText = "Connection Pending";
+    } else if (testFailed) {
+      tone = "is-failed";
+      statusText = "Test Failed";
+    } else if (hasConflict) {
+      tone = "is-attention";
+      statusText = `${sourceAssignments.length} Assignments`;
+    } else if (!isAssigned) {
+      tone = "is-attention";
+      statusText = "Unassigned";
+    } else if (!testState) {
+      tone = "is-attention";
+      statusText = "Not Tested";
+    }
+
+    const machineText = source.machineNo || source.scaleNumber || source.deviceId || source.deviceName || "-";
+    const detailBits = [
+      `Machine ${machineText}`,
+      source.connectionMode === "sql" ? "SQL Feed" : "API Feed",
+      isAssigned ? `${sourceAssignments.length} stage${sourceAssignments.length === 1 ? "" : "s"}` : "0 stages"
+    ];
+
+    return {
+      sourceName: source.sourceName,
+      detailText: detailBits.join(" | "),
+      tone,
+      statusText
+    };
+  });
+
+  const total = rows.length;
+  const readyCount = rows.filter((row) => row.tone === "is-ok").length;
+  const attentionCount = rows.filter((row) => row.tone === "is-attention").length;
+  const failedCount = rows.filter((row) => row.tone === "is-failed").length;
+  const summaryClass = failedCount ? " is-failed" : attentionCount ? " is-attention" : " is-ok";
+  const summaryText = failedCount
+    ? `${formatNum(failedCount, 0)} source${failedCount === 1 ? "" : "s"} failing checks`
+    : attentionCount
+      ? `${formatNum(attentionCount, 0)} source${attentionCount === 1 ? "" : "s"} need attention`
+      : "All incoming sources ready";
+
+  rootNode.innerHTML = `
+    <div class="incoming-source-summary">
+      <span class="incoming-source-summary-pill${summaryClass}">${htmlEscape(summaryText)}</span>
+      <div class="incoming-source-metrics">
+        <span><strong>${formatNum(total, 0)}</strong> total</span>
+        <span><strong>${formatNum(readyCount, 0)}</strong> ready</span>
+        <span><strong>${formatNum(attentionCount, 0)}</strong> attention</span>
+        <span><strong>${formatNum(failedCount, 0)}</strong> failed</span>
+      </div>
+    </div>
+    <ul class="incoming-source-status-list">
+      ${rows
+        .map(
+          (row) => `
+            <li class="incoming-source-status-item">
+              <div class="incoming-source-status-copy">
+                <strong>${htmlEscape(row.sourceName)}</strong>
+                <span>${htmlEscape(row.detailText)}</span>
+              </div>
+              <span class="incoming-source-state-pill ${row.tone}">${htmlEscape(row.statusText)}</span>
+            </li>
+          `
+        )
+        .join("")}
+    </ul>
+  `;
+}
+
 function stageLiveDowntimePillHtml(liveDown) {
   if (!liveDown) return "";
   const mins = Math.max(1, Math.floor(num(liveDown.minutes)));
@@ -4927,7 +5017,6 @@ function bindHome() {
   const managerLoginForm = document.getElementById("managerLoginForm");
   const managerUserInput = document.getElementById("managerUser");
   const managerPassInput = document.getElementById("managerPass");
-  const managerTestLoginBtn = document.getElementById("managerTestLoginBtn");
   const supervisorLoginForm = document.getElementById("supervisorLoginForm");
   const supervisorUserInput = document.getElementById("supervisorUser");
   const supervisorPassInput = document.getElementById("supervisorPass");
@@ -4977,6 +5066,7 @@ function bindHome() {
   const manageProductCatalogBtn = document.getElementById("manageProductCatalogBtn");
   const connectDataSourceBtn = document.getElementById("connectDataSourceBtn");
   const dataSourcesList = document.getElementById("dataSourcesList");
+  const incomingDataSourcesStatus = document.getElementById("incomingDataSourcesStatus");
   const addSupervisorBtn = document.getElementById("addSupervisorBtn");
   const manageSupervisorsModal = document.getElementById("manageSupervisorsModal");
   const closeManageSupervisorsModalBtn = document.getElementById("closeManageSupervisorsModal");
@@ -5917,18 +6007,6 @@ function bindHome() {
     downloadTextFile(`line-dashboard-${appState.dashboardDate || todayISO()}-${appState.dashboardShift || "Day"}.csv`, toCsv(csvRows, DASHBOARD_COLUMNS), "text/csv;charset=utf-8");
   });
 
-  if (managerTestLoginBtn && managerUserInput && managerPassInput) {
-    managerTestLoginBtn.addEventListener("click", () => {
-      managerUserInput.value = "manager";
-      managerPassInput.value = "manager123";
-      if (typeof managerLoginForm.requestSubmit === "function") {
-        managerLoginForm.requestSubmit();
-      } else {
-        managerLoginForm.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
-      }
-    });
-  }
-
   managerLoginForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const username = String(managerUserInput.value || "").trim().toLowerCase();
@@ -6439,6 +6517,7 @@ function bindHome() {
       const test = response?.test || null;
       if (test) rememberDataSourceConnectionTest(safeDataSourceId, test);
       renderManagerDataSourcesList(dataSourcesList);
+      renderIncomingDataSourcesStatus(incomingDataSourcesStatus);
       if (test?.ok) {
         alert(`${sourceLabel} connection passed.\n${String(test.message || "Connection successful.")}`);
       } else {
@@ -6451,6 +6530,7 @@ function bindHome() {
         message: String(error?.message || "Connection test failed.")
       });
       renderManagerDataSourcesList(dataSourcesList);
+      renderIncomingDataSourcesStatus(incomingDataSourcesStatus);
       alert(`Could not test data source connection.\n${error?.message || "Please try again."}`);
     }
   };
@@ -11078,16 +11158,18 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         .filter(Boolean);
       const grossMins = runIntervals.reduce((sum, interval) => sum + (interval.end - interval.start), 0);
       const downInRunMins = intervalsOverlapMinutes(runIntervals, downtimeIntervals);
-      const netRunMins = Math.max(0, grossMins - downInRunMins);
-      const traysPerMin = netRunMins > 0 ? units / netRunMins : 0;
-      const traffic = productionTrafficForRate(traysPerMin, netRunMins);
+      const computedNetRunMins = Math.max(0, num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift));
+      const fallbackNetRunMins = Math.max(0, grossMins - downInRunMins);
+      const netRunMins = computedNetRunMins > 0 ? computedNetRunMins : fallbackNetRunMins;
+      const netTraysPerMin = netRunMins > 0 ? units / netRunMins : 0;
+      const traffic = productionTrafficForRate(netTraysPerMin, netRunMins);
       return `
         <article class="day-glance-run-tile">
           <div class="day-glance-run-main">
             <span class="day-glance-light ${traffic.className}" aria-hidden="true"></span>
             <div class="day-glance-run-copy">
               <h5 class="day-glance-run-title">${htmlEscape(productName)}</h5>
-              <span class="day-glance-run-rate">${formatNum(traysPerMin, 2)} trays / min</span>
+              <span class="day-glance-run-rate">${formatNum(netTraysPerMin, 2)} net trays / min</span>
             </div>
           </div>
           <div class="day-glance-run-callouts">
@@ -11217,7 +11299,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         </article>
         <article class="day-glance-card">
           <h4>Production Runs</h4>
-          <p class="day-glance-meta">Per-run net trays/min. Downtime overlapping each run is excluded.</p>
+          <p class="day-glance-meta">Per-run net run rate (net trays/min). Uses net production time for each run.</p>
           <div class="day-glance-run-list">
             ${productionRunTiles || `<p class="day-glance-empty">No production runs in this selection.</p>`}
           </div>
@@ -12372,6 +12454,7 @@ function renderHome() {
   const dashboardShiftButtons = Array.from(document.querySelectorAll("[data-dash-shift]"));
   const dashboardTable = document.getElementById("dashboardTable");
   const dataSourcesList = document.getElementById("dataSourcesList");
+  const incomingDataSourcesStatus = document.getElementById("incomingDataSourcesStatus");
   const managerActionList = document.getElementById("managerActionList");
   const loginSection = document.getElementById("supervisorLoginSection");
   const appSection = document.getElementById("supervisorAppSection");
@@ -12543,6 +12626,7 @@ function renderHome() {
 
   if (!isSupervisor) {
     renderManagerDataSourcesList(dataSourcesList);
+    renderIncomingDataSourcesStatus(incomingDataSourcesStatus);
     if (managerActionList) {
       const managerActions = ensureSupervisorActionsState()
         .slice()

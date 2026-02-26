@@ -15,12 +15,27 @@ async function upsertUser({ name, username, password, role }) {
 }
 
 async function run() {
-  const manager = await upsertUser({
-    name: 'Manager',
-    username: 'manager',
-    password: 'manager123',
+  const jeremyManager = await upsertUser({
+    name: 'Jeremy',
+    username: 'jeremy',
+    password: 'do4c6B-N=(bLRo7YwQ5v',
     role: 'manager'
   });
+
+  await upsertUser({
+    name: 'Jacob',
+    username: 'jacob',
+    password: '(CLM]E2hY]$Rdhc%yV3d',
+    role: 'manager'
+  });
+
+  await dbQuery(
+    `UPDATE users
+     SET is_active = FALSE,
+         updated_at = NOW()
+     WHERE username = $1`,
+    ['manager']
+  );
 
   const supervisor = await upsertUser({
     name: 'Supervisor',
@@ -35,7 +50,7 @@ async function run() {
      ON CONFLICT (name)
      DO UPDATE SET updated_at = NOW()
      RETURNING id, name`,
-    ['Production Line 1', 'SEED-KEY-001', manager.id]
+    ['Production Line 1', 'SEED-KEY-001', jeremyManager.id]
   );
   const baseLine = baseLineRes.rows[0];
 
@@ -45,7 +60,7 @@ async function run() {
      ON CONFLICT (name)
      DO UPDATE SET updated_at = NOW()
      RETURNING id, name`,
-    ['Demo #1', 'DEMO-KEY-001', manager.id]
+    ['Demo #1', 'DEMO-KEY-001', jeremyManager.id]
   );
   const demoLine = demoLineRes.rows[0];
 
@@ -55,7 +70,7 @@ async function run() {
         `INSERT INTO supervisor_line_shift_assignments(supervisor_user_id, line_id, shift, assigned_by_user_id)
          VALUES ($1, $2, $3, $4)
          ON CONFLICT (supervisor_user_id, line_id, shift) DO NOTHING`,
-        [supervisor.id, lineId, shift, manager.id]
+        [supervisor.id, lineId, shift, jeremyManager.id]
       );
     }
   }
@@ -251,7 +266,8 @@ async function run() {
   }
 
   console.log('Seed complete');
-  console.log(`Manager login: manager / manager123`);
+  console.log(`Manager login: jeremy / do4c6B-N=(bLRo7YwQ5v`);
+  console.log(`Manager login: jacob / (CLM]E2hY]$Rdhc%yV3d`);
   console.log(`Supervisor login: supervisor / supervisor123`);
   console.log(`Demo line with sample data: Demo #1`);
 }

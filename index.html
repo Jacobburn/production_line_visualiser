@@ -104,10 +104,8 @@
               <form id="managerLoginForm" class="form-grid">
                 <input id="managerUser" placeholder="Username" required />
                 <input id="managerPass" type="password" placeholder="Password" required />
-                <button id="managerTestLoginBtn" class="ghost-btn" type="button">Test Login</button>
                 <button type="submit">Log In</button>
               </form>
-              <p class="muted">Demo credentials: manager / manager123</p>
             </section>
 
             <div id="managerAppSection" class="dashboard-grid hidden">
@@ -227,6 +225,12 @@
                     </tbody>
                   </table>
                 </div>
+              </section>
+
+              <section class="dash-card incoming-data-sources-card manager-settings-card">
+                <h2>Incoming Data Sources</h2>
+                <p class="muted">Equipment feed readiness status, separate from app API connection details.</p>
+                <div id="incomingDataSourcesStatus"></div>
               </section>
 
               <section class="dash-card data-sources-card manager-settings-card">
