@@ -2852,18 +2852,10 @@ function renderManagerDataSourcesList(rootNode) {
 }
 
 function isBizerbaIncomingSource(source) {
-  const haystack = [
-    source?.sourceName,
-    source?.sourceKey,
-    source?.deviceName,
-    source?.deviceId,
-    source?.machineNo,
-    source?.scaleNumber
-  ]
-    .map((value) => String(value || "").trim().toLowerCase())
-    .filter(Boolean)
-    .join(" ");
-  return /bizerba|bizberba/.test(haystack);
+  const bizerbaPattern = /bizerba|bizberba/;
+  const sourceName = String(source?.sourceName || "").trim().toLowerCase();
+  const deviceName = String(source?.deviceName || "").trim().toLowerCase();
+  return bizerbaPattern.test(sourceName) || bizerbaPattern.test(deviceName);
 }
 
 function renderIncomingDataSourcesStatus(rootNode) {
@@ -2906,7 +2898,7 @@ function renderIncomingDataSourcesStatus(rootNode) {
     ];
 
     row = {
-      sourceName: source.sourceName || "Bizerba Data Feed",
+      sourceName: "Bizerba Data Feed",
       detailText: detailBits.join(" | "),
       tone,
       statusText
