@@ -85,7 +85,7 @@
                 <span id="homeUserAvatar" class="avatar-dot">M</span>
                 <div>
                   <strong id="homeUserRole">Manager</strong>
-                  <span id="homeUserIdentity">production@plant.local</span>
+                  <span id="homeUserIdentity">manager</span>
                 </div>
               </div>
               <button id="managerSettingsTabBtn" class="tab-btn home-btn home-settings-tab hidden" type="button" aria-pressed="false">Settings</button>
@@ -233,7 +233,7 @@
                 <div id="incomingDataSourcesStatus"></div>
               </section>
 
-              <section class="dash-card data-sources-card manager-settings-card">
+              <section class="dash-card data-sources-card manager-settings-card hidden">
                 <h2>Data Sources</h2>
                 <p class="muted">Live SQL equipment feeds available for assignment to line stages.</p>
                 <div class="action-row data-sources-actions">
@@ -757,10 +757,10 @@
         </div>
         <div class="topbar-right manager-workspace-actions">
           <div id="lineWorkspaceUserChip" class="user-chip">
-            <span class="avatar-dot">M</span>
+            <span id="lineWorkspaceUserAvatar" class="avatar-dot">M</span>
             <div>
-              <strong>Manager</strong>
-              <span>production@plant.local</span>
+              <strong id="lineWorkspaceUserRole">Manager</strong>
+              <span id="lineWorkspaceUserIdentity">manager</span>
             </div>
           </div>
           <div class="shift-toggle" role="group" aria-label="Line workspace app mode">

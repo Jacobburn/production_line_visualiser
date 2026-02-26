@@ -4446,12 +4446,12 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 
 #homeView.dashboard-page .add-line-card,
 #homeView.dashboard-page .manage-super-card,
-#homeView.dashboard-page .manage-products-card,
-#homeView.dashboard-page .incoming-data-sources-card {
+#homeView.dashboard-page .manage-products-card {
   grid-column: span 4;
   min-height: 170px;
 }
 
+#homeView.dashboard-page .incoming-data-sources-card,
 #homeView.dashboard-page .data-sources-card {
   grid-column: span 12;
   min-height: 220px;
@@ -5478,9 +5478,14 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   #homeView.dashboard-page .project-list-card,
   #homeView.dashboard-page .add-line-card,
   #homeView.dashboard-page .manage-super-card,
-  #homeView.dashboard-page .manage-products-card,
-  #homeView.dashboard-page .incoming-data-sources-card {
+  #homeView.dashboard-page .manage-products-card {
     grid-column: span 6;
+    grid-row: auto;
+  }
+
+  #homeView.dashboard-page .incoming-data-sources-card,
+  #homeView.dashboard-page .data-sources-card {
+    grid-column: span 12;
     grid-row: auto;
   }
 }

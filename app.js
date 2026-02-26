@@ -158,7 +158,9 @@ let managerBackendSession = {
   backendToken: "",
   backendLineMap: {},
   backendStageMap: {},
-  role: "manager"
+  role: "manager",
+  name: "",
+  username: ""
 };
 let pendingManagerDataTabRestore = { lineId: "", tabId: "" };
 const dataSourceConnectionTestState = new Map();
@@ -2113,6 +2115,8 @@ function clearLegacyStateStorage() {
 
 function persistAuthSessions() {
   const managerToken = String(managerBackendSession?.backendToken || "").trim();
+  const managerName = String(managerBackendSession?.name || "").trim();
+  const managerUsername = String(managerBackendSession?.username || "").trim().toLowerCase();
   const supervisorSession = appState?.supervisorSession;
   const supervisorToken = String(supervisorSession?.backendToken || "").trim();
   const supervisorUsername = String(supervisorSession?.username || "").trim().toLowerCase();
@@ -2121,7 +2125,14 @@ function persistAuthSessions() {
     return;
   }
   writeAuthStorage({
-    manager: managerToken ? { backendToken: managerToken } : null,
+    manager:
+      managerToken
+        ? {
+            backendToken: managerToken,
+            name: managerName,
+            username: managerUsername
+          }
+        : null,
     supervisor:
       supervisorToken && supervisorUsername
         ? {
@@ -2146,9 +2157,13 @@ function restoreAuthSessionsFromStorage() {
   const stored = readAuthStorage();
   if (!stored) return;
   const managerToken = String(stored?.manager?.backendToken || "").trim();
+  const managerName = String(stored?.manager?.name || "").trim();
+  const managerUsername = String(stored?.manager?.username || "").trim().toLowerCase();
   if (managerToken) {
     managerBackendSession.backendToken = managerToken;
     managerBackendSession.role = "manager";
+    managerBackendSession.name = managerName;
+    managerBackendSession.username = managerUsername;
   }
   const supervisorToken = String(stored?.supervisor?.backendToken || "").trim();
   const supervisorUsername = String(stored?.supervisor?.username || "").trim().toLowerCase();
@@ -2836,22 +2851,39 @@ function renderManagerDataSourcesList(rootNode) {
   `;
 }
 
+function isBizerbaIncomingSource(source) {
+  const haystack = [
+    source?.sourceName,
+    source?.sourceKey,
+    source?.deviceName,
+    source?.deviceId,
+    source?.machineNo,
+    source?.scaleNumber
+  ]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean)
+    .join(" ");
+  return /bizerba|bizberba/.test(haystack);
+}
+
 function renderIncomingDataSourcesStatus(rootNode) {
   if (!rootNode) return;
   const sources = (appState.dataSources || []).filter((source) => source.isActive !== false);
   const assignments = dataSourceAssignments(appState.lines);
-  if (!sources.length) {
-    rootNode.innerHTML = `<p class="data-source-empty">No incoming data sources are configured yet.</p>`;
-    return;
-  }
+  const source = sources.find((entry) => isBizerbaIncomingSource(entry)) || null;
 
-  const rows = sources.map((source) => {
+  let row = {
+    sourceName: "Bizerba Data Feed",
+    detailText: "Supabase ingest endpoint | awaiting source mapping",
+    tone: "is-attention",
+    statusText: "Not Configured"
+  };
+
+  if (source) {
     const sourceAssignments = assignments.get(source.id) || [];
     const connectionConfigured = source.connectionMode === "sql" ? source.hasSqlCredentials : source.hasApiKey;
     const testState = dataSourceConnectionTestFor(source.id);
     const testFailed = Boolean(testState && !testState.ok);
-    const hasConflict = sourceAssignments.length > 1;
-    const isAssigned = sourceAssignments.length > 0;
     let tone = "is-ok";
     let statusText = "Ready";
 
@@ -2861,12 +2893,6 @@ function renderIncomingDataSourcesStatus(rootNode) {
     } else if (testFailed) {
       tone = "is-failed";
       statusText = "Test Failed";
-    } else if (hasConflict) {
-      tone = "is-attention";
-      statusText = `${sourceAssignments.length} Assignments`;
-    } else if (!isAssigned) {
-      tone = "is-attention";
-      statusText = "Unassigned";
     } else if (!testState) {
       tone = "is-attention";
       statusText = "Not Tested";
@@ -2876,21 +2902,21 @@ function renderIncomingDataSourcesStatus(rootNode) {
     const detailBits = [
       `Machine ${machineText}`,
       source.connectionMode === "sql" ? "SQL Feed" : "API Feed",
-      isAssigned ? `${sourceAssignments.length} stage${sourceAssignments.length === 1 ? "" : "s"}` : "0 stages"
+      `${sourceAssignments.length} stage${sourceAssignments.length === 1 ? "" : "s"}`
     ];
 
-    return {
-      sourceName: source.sourceName,
+    row = {
+      sourceName: source.sourceName || "Bizerba Data Feed",
       detailText: detailBits.join(" | "),
       tone,
       statusText
     };
-  });
+  }
 
-  const total = rows.length;
-  const readyCount = rows.filter((row) => row.tone === "is-ok").length;
-  const attentionCount = rows.filter((row) => row.tone === "is-attention").length;
-  const failedCount = rows.filter((row) => row.tone === "is-failed").length;
+  const total = 1;
+  const readyCount = row.tone === "is-ok" ? 1 : 0;
+  const attentionCount = row.tone === "is-attention" ? 1 : 0;
+  const failedCount = row.tone === "is-failed" ? 1 : 0;
   const summaryClass = failedCount ? " is-failed" : attentionCount ? " is-attention" : " is-ok";
   const summaryText = failedCount
     ? `${formatNum(failedCount, 0)} source${failedCount === 1 ? "" : "s"} failing checks`
@@ -2909,19 +2935,13 @@ function renderIncomingDataSourcesStatus(rootNode) {
       </div>
     </div>
     <ul class="incoming-source-status-list">
-      ${rows
-        .map(
-          (row) => `
-            <li class="incoming-source-status-item">
-              <div class="incoming-source-status-copy">
-                <strong>${htmlEscape(row.sourceName)}</strong>
-                <span>${htmlEscape(row.detailText)}</span>
-              </div>
-              <span class="incoming-source-state-pill ${row.tone}">${htmlEscape(row.statusText)}</span>
-            </li>
-          `
-        )
-        .join("")}
+      <li class="incoming-source-status-item">
+        <div class="incoming-source-status-copy">
+          <strong>${htmlEscape(row.sourceName)}</strong>
+          <span>${htmlEscape(row.detailText)}</span>
+        </div>
+        <span class="incoming-source-state-pill ${row.tone}">${htmlEscape(row.statusText)}</span>
+      </li>
     </ul>
   `;
 }
@@ -3612,6 +3632,8 @@ function clearManagerBackendSession() {
   managerBackendSession.backendLineMap = {};
   managerBackendSession.backendStageMap = {};
   managerBackendSession.role = "manager";
+  managerBackendSession.name = "";
+  managerBackendSession.username = "";
   persistAuthSessions();
 }
 
@@ -3727,19 +3749,24 @@ async function refreshHostedState(preferredSession = null) {
   try {
     const activeSession = preferredSession || (await ensureManagerBackendSession());
     if (!activeSession?.backendToken) throw new Error("Missing backend token.");
-    if (
-      activeSession?.role === "supervisor" &&
-      appState.supervisorSession &&
-      !String(appState.supervisorSession.name || "").trim()
-    ) {
+    const activeSessionName = String(activeSession?.name || "").trim();
+    const activeSessionUsername = String(activeSession?.username || "").trim();
+    if (!activeSessionName || !activeSessionUsername) {
       try {
         const mePayload = await apiRequest("/api/me", { token: activeSession.backendToken });
         const meName = String(mePayload?.user?.name || "").trim();
         const meUsername = String(mePayload?.user?.username || "").trim().toLowerCase();
-        if (meName) appState.supervisorSession.name = meName;
-        if (meUsername) appState.supervisorSession.username = meUsername;
+        if (activeSession?.role === "manager") {
+          if (meName) managerBackendSession.name = meName;
+          if (meUsername) managerBackendSession.username = meUsername;
+          persistManagerBackendSession();
+        } else if (activeSession?.role === "supervisor" && appState.supervisorSession) {
+          if (meName) appState.supervisorSession.name = meName;
+          if (meUsername) appState.supervisorSession.username = meUsername;
+          saveState();
+        }
       } catch (profileError) {
-        console.warn("Could not load supervisor profile details:", profileError);
+        console.warn("Could not load user profile details:", profileError);
       }
     }
     let snapshot = null;
@@ -6024,6 +6051,8 @@ function bindHome() {
       managerBackendSession.backendLineMap = {};
       managerBackendSession.backendStageMap = {};
       managerBackendSession.role = "manager";
+      managerBackendSession.name = String(loginPayload?.user?.name || loginPayload?.user?.username || username).trim();
+      managerBackendSession.username = String(loginPayload?.user?.username || username).trim().toLowerCase();
       persistManagerBackendSession();
       appState.appMode = "manager";
       appState.managerHomeTab = "dashboard";
@@ -12440,6 +12469,10 @@ function renderHome() {
   const homeUserAvatar = document.getElementById("homeUserAvatar");
   const homeUserRole = document.getElementById("homeUserRole");
   const homeUserIdentity = document.getElementById("homeUserIdentity");
+  const lineWorkspaceUserChip = document.getElementById("lineWorkspaceUserChip");
+  const lineWorkspaceUserAvatar = document.getElementById("lineWorkspaceUserAvatar");
+  const lineWorkspaceUserRole = document.getElementById("lineWorkspaceUserRole");
+  const lineWorkspaceUserIdentity = document.getElementById("lineWorkspaceUserIdentity");
   const managerHome = document.getElementById("managerHome");
   const supervisorHome = document.getElementById("supervisorHome");
   const modeManagerBtn = document.getElementById("modeManager");
@@ -12513,20 +12546,30 @@ function renderHome() {
     managerSettingsTabBtn.classList.toggle("active", managerSettingsActive);
     managerSettingsTabBtn.setAttribute("aria-pressed", String(managerSettingsActive));
   }
+  const showSupervisorTile = isSupervisor && Boolean(session);
+  const showManagerTile = !isSupervisor && managerSessionActive;
+  const setUserChip = (roleEl, identityEl, avatarEl, label, username, fallbackAvatar = "M") => {
+    const safeLabel = String(label || "").trim() || "Manager";
+    const safeUsername = String(username || "").trim() || "manager";
+    if (roleEl) roleEl.textContent = safeLabel;
+    if (identityEl) identityEl.textContent = safeUsername;
+    if (avatarEl) avatarEl.textContent = (safeLabel.charAt(0) || fallbackAvatar).toUpperCase();
+  };
   if (homeUserChip) {
-    const showSupervisorTile = isSupervisor && Boolean(session);
-    const showManagerTile = !isSupervisor && managerSessionActive;
     homeUserChip.classList.toggle("hidden", !(showManagerTile || showSupervisorTile));
-    if (showSupervisorTile) {
-      const supervisorLabel = String(activeSupervisor?.name || session?.name || session?.username || "Supervisor").trim() || "Supervisor";
-      if (homeUserRole) homeUserRole.textContent = supervisorLabel;
-      if (homeUserIdentity) homeUserIdentity.textContent = String(session?.username || "").trim();
-      if (homeUserAvatar) homeUserAvatar.textContent = (supervisorLabel.charAt(0) || "S").toUpperCase();
-    } else {
-      if (homeUserRole) homeUserRole.textContent = "Manager";
-      if (homeUserIdentity) homeUserIdentity.textContent = "production@plant.local";
-      if (homeUserAvatar) homeUserAvatar.textContent = "M";
-    }
+  }
+  if (lineWorkspaceUserChip) {
+    lineWorkspaceUserChip.classList.toggle("hidden", !showManagerTile);
+  }
+  if (showSupervisorTile) {
+    const supervisorLabel = String(activeSupervisor?.name || session?.name || session?.username || "Supervisor").trim() || "Supervisor";
+    const supervisorUsername = String(session?.username || "").trim();
+    setUserChip(homeUserRole, homeUserIdentity, homeUserAvatar, supervisorLabel, supervisorUsername, "S");
+  } else {
+    const managerLabel = String(managerBackendSession?.name || managerBackendSession?.username || "Manager").trim() || "Manager";
+    const managerUsername = String(managerBackendSession?.username || "").trim().toLowerCase() || "manager";
+    setUserChip(homeUserRole, homeUserIdentity, homeUserAvatar, managerLabel, managerUsername, "M");
+    setUserChip(lineWorkspaceUserRole, lineWorkspaceUserIdentity, lineWorkspaceUserAvatar, managerLabel, managerUsername, "M");
   }
 
   managerHome.classList.toggle("hidden", isSupervisor);
