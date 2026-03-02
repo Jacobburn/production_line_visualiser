@@ -4488,10 +4488,17 @@ function ensureManagerLogRowIds(line) {
   if (!line) return;
   const ensureRows = (rows, prefix) => {
     if (!Array.isArray(rows)) return [];
+    const seenIds = new Set();
     rows.forEach((row) => {
-      if (row && typeof row === "object" && !String(row.id || "").trim()) {
-        row.id = makeLocalLogId(prefix);
+      if (!row || typeof row !== "object") return;
+      let rowId = String(row.id || "").trim();
+      if (!rowId || seenIds.has(rowId)) {
+        do {
+          rowId = makeLocalLogId(prefix);
+        } while (seenIds.has(rowId));
+        row.id = rowId;
       }
+      seenIds.add(rowId);
     });
     return rows;
   };
@@ -10682,9 +10689,9 @@ function bindDataControls() {
         : state.lineTrendRange;
       state.crewsByShift = normalizeCrewByShift(parsed);
       state.stageSettings = normalizeStageSettings(parsed);
-      state.shiftRows = parsed.shiftRows || [];
-      state.breakRows = parsed.breakRows || [];
-      state.runRows = Array.isArray(parsed.runRows)
+      const importedShiftRows = Array.isArray(parsed.shiftRows) ? parsed.shiftRows : [];
+      const importedBreakRows = Array.isArray(parsed.breakRows) ? parsed.breakRows : [];
+      const importedRunRows = Array.isArray(parsed.runRows)
         ? parsed.runRows.map((row) => ({
             ...row,
             runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
@@ -10692,13 +10699,17 @@ function bindDataControls() {
             shift: ""
           }))
         : [];
-      state.downtimeRows = Array.isArray(parsed.downtimeRows)
+      const importedDowntimeRows = Array.isArray(parsed.downtimeRows)
         ? parsed.downtimeRows.map((row) => ({
             ...row,
             assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
             shift: ""
           }))
         : [];
+      state.shiftRows = [...(Array.isArray(state.shiftRows) ? state.shiftRows : []), ...importedShiftRows];
+      state.breakRows = [...(Array.isArray(state.breakRows) ? state.breakRows : []), ...importedBreakRows];
+      state.runRows = [...(Array.isArray(state.runRows) ? state.runRows : []), ...importedRunRows];
+      state.downtimeRows = [...(Array.isArray(state.downtimeRows) ? state.downtimeRows : []), ...importedDowntimeRows];
       ensureManagerLogRowIds(state);
       addAudit(state, "IMPORT_JSON", "Line JSON imported");
       saveState();
