@@ -3231,6 +3231,16 @@ th {
   background: #eaf9f5;
 }
 
+.pending-complete-pill {
+  display: inline-block;
+  margin-left: 0.25rem;
+  padding: 0.08rem 0.38rem;
+  border: 1px solid #1f7f6b;
+  font-size: 0.66rem;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
 .table-edit-pill.finalise-pill:hover,
 .pending-complete-pill:hover {
   border-color: #176756;

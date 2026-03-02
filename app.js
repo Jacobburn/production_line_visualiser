@@ -7204,21 +7204,18 @@ function bindHome() {
     if (selectedShiftId) {
       existing = (line.shiftRows || []).find((row) => row.id === selectedShiftId) || null;
       if (!existing) {
-        alert("Selected shift log could not be found. Re-open it from Pending Shift Logs and try again.");
-        return;
-      }
-      if (!isOpenShiftRow(existing)) {
-        alert("Selected shift log is no longer open.");
+        alert("Selected shift log could not be found. Re-open it from Shift Logs and try again.");
         return;
       }
       if (existing.date !== date || existing.shift !== shift) {
-        alert("Date and shift cannot be changed while editing an open shift log.");
+        alert("Date and shift cannot be changed while editing a saved shift log.");
         return;
       }
     }
 
+    const existingIsOpen = Boolean(existing && isOpenShiftRow(existing));
     const startTime = startInput || existing?.startTime || nowTimeHHMM();
-    const finishTime = finishInput || (complete ? nowTimeHHMM() : startTime);
+    const finishTime = finishInput || (complete ? nowTimeHHMM() : (existing?.finishTime || startTime));
     const crewOnShift = crewRaw === ""
       ? Math.max(0, Math.floor(num(existing?.crewOnShift)))
       : Math.max(0, Math.floor(num(crewRaw)));
@@ -7228,8 +7225,13 @@ function bindHome() {
       alert("Shift start and finish must be in HH:MM (24h).");
       return;
     }
-    if (!complete && finishTime !== startTime) {
+    const savingOpenShift = !complete && (!existing || existingIsOpen);
+    if (savingOpenShift && finishTime !== startTime) {
       alert("Open shift logs keep finish equal to start. Use the Finalise pill on the log when the shift ends.");
+      return;
+    }
+    if (!complete && existing && !existingIsOpen && finishTime === startTime) {
+      alert("Finalised shift logs require a finish time different from start.");
       return;
     }
     if (complete && superShiftOpenBreakIdInput?.value) {
@@ -7330,6 +7332,7 @@ function bindHome() {
     if (!shiftLog && superShiftLogIdInput?.value) {
       shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
       if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
+      if (shiftLog && !isOpenShiftRow(shiftLog)) shiftLog = null;
     }
     if (!shiftLog) {
       shiftLog = latestBySubmittedAt(
@@ -7387,6 +7390,10 @@ function bindHome() {
         alert("Shift log could not be found.");
         return;
       }
+      if (!isOpenShiftRow(shiftLog)) {
+        alert("This shift is already finalised.");
+        return;
+      }
     }
 
     const date = shiftLog?.date || document.getElementById("superShiftDate").value || todayISO();
@@ -7404,6 +7411,7 @@ function bindHome() {
     if (!shiftLog && superShiftLogIdInput?.value) {
       shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
       if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
+      if (shiftLog && !isOpenShiftRow(shiftLog)) shiftLog = null;
     }
     if (!shiftLog) {
       shiftLog = latestBySubmittedAt(
@@ -7645,11 +7653,11 @@ function bindHome() {
     if (selectedRunLogId) {
       existing = (line.runRows || []).find((row) => row.id === selectedRunLogId) || null;
       if (!existing) {
-        alert("Selected production run could not be found. Re-open it from Pending Production Runs and try again.");
+        alert("Selected production run could not be found. Re-open it from Production Run Logs and try again.");
         return;
       }
       if (existing.date !== date) {
-        alert("Date cannot be changed while editing an open production run.");
+        alert("Date cannot be changed while editing a saved production run.");
         return;
       }
     }
@@ -7668,8 +7676,12 @@ function bindHome() {
       return;
     }
 
+    const existingIsOpen = Boolean(existing && isOpenRunRow(existing));
+    const editingFinalisedRun = Boolean(existing && !existingIsOpen);
     const productionStartTime = prodStartInput || existing?.productionStartTime || nowTimeHHMM();
-    const finishTime = complete ? (finishInput || nowTimeHHMM()) : finishInput;
+    const finishTime = complete
+      ? (finishInput || nowTimeHHMM())
+      : (finishInput || (editingFinalisedRun ? String(existing?.finishTime || "").trim() : ""));
     const unitsProduced = unitsRaw === ""
       ? Math.max(0, num(existing?.unitsProduced))
       : Math.max(0, num(unitsRaw));
@@ -7694,9 +7706,18 @@ function bindHome() {
         alert("Finish time must be different from start time.");
         return;
       }
-    } else if (finishTime !== "") {
+    } else if (!editingFinalisedRun && finishTime !== "") {
       alert("Leave finish empty while the run is in progress. Use Finalise when the run ends.");
       return;
+    } else if (editingFinalisedRun) {
+      if (!strictTimeValid(finishTime)) {
+        alert("Finalised runs require a valid finish time in HH:MM (24h).");
+        return;
+      }
+      if (finishTime === productionStartTime) {
+        alert("Finalised runs require finish time to differ from start time.");
+        return;
+      }
     }
     if (!supervisorCanAccessShift(session, lineId, backendShift)) {
       alert(`You are not assigned to the ${backendShift} shift.`);
@@ -8198,11 +8219,11 @@ function bindHome() {
     if (selectedDownLogId) {
       existing = (line.downtimeRows || []).find((row) => row.id === selectedDownLogId) || null;
       if (!existing) {
-        alert("Selected downtime log could not be found. Re-open it from Pending Downtime Logs and try again.");
+        alert("Selected downtime log could not be found. Re-open it from Downtime Logs and try again.");
         return;
       }
       if (existing.date !== date) {
-        alert("Date cannot be changed while editing an open downtime log.");
+        alert("Date cannot be changed while editing a saved downtime log.");
         return;
       }
     }
@@ -13037,20 +13058,22 @@ function renderHome() {
   if (activeLine) {
     const shiftKeyDate = shiftDateInput.value || appState.supervisorSelectedDate;
     const shiftKeyShift = shiftShiftInput?.value || appState.supervisorSelectedShift;
-    const shiftOpenRows = (activeLine.shiftRows || [])
+    const shiftEditableRows = (activeLine.shiftRows || [])
       .filter(
         (row) =>
           rowMatchesDateShift(row, shiftKeyDate, shiftKeyShift) &&
-          isShiftOpen(row) &&
           supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
       .sort((a, b) => {
+        const aOpen = isShiftOpen(a);
+        const bOpen = isShiftOpen(b);
+        if (aOpen !== bOpen) return aOpen ? -1 : 1;
         const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
         if (submittedCmp !== 0) return submittedCmp;
         return String(a.startTime || "").localeCompare(String(b.startTime || ""));
       });
-    const hasShiftRow = (rowId) => shiftOpenRows.some((row) => String(row.id || "") === String(rowId || ""));
+    const hasShiftRow = (rowId) => shiftEditableRows.some((row) => String(row.id || "") === String(rowId || ""));
     if (supervisorShiftTileEditId && !hasShiftRow(supervisorShiftTileEditId)) {
       supervisorShiftTileEditId = "";
     }
@@ -13067,21 +13090,27 @@ function renderHome() {
       supervisorShiftTileEditId = selectedShiftId;
     }
     const activeShiftId = selectedShiftId;
-    const activeShiftLog = shiftOpenRows.find((row) => String(row.id || "") === activeShiftId) || shiftOpenRows[0] || null;
-    const openBreak = pickLatest((activeLine.breakRows || []).filter((row) => row.shiftLogId === activeShiftLog?.id && isBreakOpen(row)));
+    const activeShiftLog = shiftEditableRows.find((row) => String(row.id || "") === activeShiftId) || shiftEditableRows[0] || null;
+    const activeShiftForBreakControls = (activeShiftLog && isShiftOpen(activeShiftLog))
+      ? activeShiftLog
+      : shiftEditableRows.find((row) => isShiftOpen(row)) || null;
+    const openBreak = pickLatest(
+      (activeLine.breakRows || []).filter((row) => row.shiftLogId === activeShiftForBreakControls?.id && isBreakOpen(row))
+    );
     if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = openBreak?.id || "";
-    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !activeShiftLog?.id || Boolean(openBreak?.id);
-    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !activeShiftLog?.id || !openBreak?.id;
+    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !activeShiftForBreakControls?.id || Boolean(openBreak?.id);
+    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !activeShiftForBreakControls?.id || !openBreak?.id;
     if (shiftOpenList) {
-      shiftOpenList.innerHTML = shiftOpenRows.length
+      shiftOpenList.innerHTML = shiftEditableRows.length
         ? `
           <div class="pending-log-list">
-            ${shiftOpenRows
+            ${shiftEditableRows
               .map((row) => {
                 const isSelected = Boolean(supervisorShiftTileEditId) && String(supervisorShiftTileEditId) === String(row.id || "");
                 const selectedClass = isSelected ? " active" : "";
+                const rowIsOpen = isShiftOpen(row);
                 const rowBreakRows = breakRowsForShift(activeLine, row.id);
-                const rowOpenBreak = pickLatest(rowBreakRows.filter((breakRow) => isBreakOpen(breakRow)));
+                const rowOpenBreak = rowIsOpen ? pickLatest(rowBreakRows.filter((breakRow) => isBreakOpen(breakRow))) : null;
                 const breakEditorRowsHtml = rowBreakRows
                   .map(
                     (breakRow, index) => `
@@ -13098,17 +13127,22 @@ function renderHome() {
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(row.shift || "Shift")} Shift</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")} | Crew ${formatNum(Math.max(0, num(row.crewOnShift)), 0)}${rowOpenBreak?.id ? ' <span class="pending-break-active">Break active</span>' : ""}
+                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")} | Crew ${formatNum(Math.max(0, num(row.crewOnShift)), 0)}${rowOpenBreak?.id ? ' <span class="pending-break-active">Break active</span>' : ""}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
                       </p>
                     </div>
                     <div class="pending-log-actions">
                       <button type="button" class="table-edit-pill ghost-btn" data-super-shift-edit="${row.id}">Edit</button>
-                      ${
-                        rowOpenBreak?.id
-                          ? `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-end="${row.id}" data-super-shift-break-id="${rowOpenBreak.id}">End Break</button>`
-                          : `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-start="${row.id}">Start Break</button>`
+                      ${rowIsOpen
+                        ? `
+                          ${
+                            rowOpenBreak?.id
+                              ? `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-end="${row.id}" data-super-shift-break-id="${rowOpenBreak.id}">End Break</button>`
+                              : `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-start="${row.id}">Start Break</button>`
+                          }
+                          <button type="button" class="table-edit-pill finalise-pill" data-super-shift-complete="${row.id}">Finalise</button>
+                        `
+                        : ""
                       }
-                      <button type="button" class="table-edit-pill finalise-pill" data-super-shift-complete="${row.id}">Finalise</button>
                     </div>
                     ${
                       isSelected
@@ -13133,11 +13167,11 @@ function renderHome() {
               .join("")}
           </div>
         `
-        : `<p class="muted pending-log-empty">No open shift logs for this date/shift.</p>`;
+        : `<p class="muted pending-log-empty">No shift logs for this date/shift.</p>`;
     }
 
     const runKeyDate = runDateInput.value || appState.supervisorSelectedDate;
-    const runOpenRows = (activeLine.runRows || [])
+    const runEditableRows = (activeLine.runRows || [])
       .filter(
         (row) =>
           row.date === runKeyDate &&
@@ -13146,37 +13180,40 @@ function renderHome() {
             startField: "productionStartTime",
             finishField: "finishTime"
           }) &&
-          isRunOpen(row) &&
           supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
       .sort((a, b) => {
+        const aOpen = isRunOpen(a);
+        const bOpen = isRunOpen(b);
+        if (aOpen !== bOpen) return aOpen ? -1 : 1;
         const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
         if (submittedCmp !== 0) return submittedCmp;
         return String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || ""));
       });
-    if (runLogIdInput && !runOpenRows.some((row) => row.id === runLogIdInput.value)) {
+    if (runLogIdInput && !runEditableRows.some((row) => row.id === runLogIdInput.value)) {
       runLogIdInput.value = "";
     }
     if (runOpenList) {
-      runOpenList.innerHTML = runOpenRows.length
+      runOpenList.innerHTML = runEditableRows.length
         ? `
           <div class="pending-log-list">
-            ${runOpenRows
+            ${runEditableRows
               .map((row) => {
                 const selectedClass = runLogIdInput?.value && runLogIdInput.value === row.id ? " active" : "";
+                const rowIsOpen = isRunOpen(row);
                 const shiftLabel = resolveTimedLogShiftLabel(row, activeLine, "productionStartTime", "finishTime");
                 return `
                   <article class="pending-log-item${selectedClass}">
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(row.product || "Run")}</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}
+                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
                       </p>
                     </div>
                     <div class="pending-log-actions">
                       <button type="button" class="table-edit-pill ghost-btn" data-super-run-edit="${row.id}">Edit</button>
-                      <button type="button" class="table-edit-pill finalise-pill" data-super-run-complete="${row.id}">Finalise</button>
+                      ${rowIsOpen ? `<button type="button" class="table-edit-pill finalise-pill" data-super-run-complete="${row.id}">Finalise</button>` : ""}
                     </div>
                   </article>
                 `;
@@ -13184,11 +13221,11 @@ function renderHome() {
               .join("")}
           </div>
         `
-        : `<p class="muted pending-log-empty">No open production runs for this date/shift.</p>`;
+        : `<p class="muted pending-log-empty">No production runs for this date/shift.</p>`;
     }
 
     const downKeyDate = downDateInput.value || appState.supervisorSelectedDate;
-    const downOpenRows = (activeLine.downtimeRows || [])
+    const downEditableRows = (activeLine.downtimeRows || [])
       .filter(
         (row) =>
           row.date === downKeyDate &&
@@ -13197,25 +13234,28 @@ function renderHome() {
             startField: "downtimeStart",
             finishField: "downtimeFinish"
           }) &&
-          isDownOpen(row) &&
           supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
       .sort((a, b) => {
+        const aOpen = isDownOpen(a);
+        const bOpen = isDownOpen(b);
+        if (aOpen !== bOpen) return aOpen ? -1 : 1;
         const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
         if (submittedCmp !== 0) return submittedCmp;
         return String(a.downtimeStart || "").localeCompare(String(b.downtimeStart || ""));
       });
-    if (downLogIdInput && !downOpenRows.some((row) => row.id === downLogIdInput.value)) {
+    if (downLogIdInput && !downEditableRows.some((row) => row.id === downLogIdInput.value)) {
       downLogIdInput.value = "";
     }
     if (downOpenList) {
-      downOpenList.innerHTML = downOpenRows.length
+      downOpenList.innerHTML = downEditableRows.length
         ? `
           <div class="pending-log-list">
-            ${downOpenRows
+            ${downEditableRows
               .map((row) => {
                 const selectedClass = downLogIdInput?.value && downLogIdInput.value === row.id ? " active" : "";
+                const rowIsOpen = isDownOpen(row);
                 const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
                 const rowCategory = row.reasonCategory || parsedReason.reasonCategory || "Downtime";
                 const rowDetail = row.reasonDetail || parsedReason.reasonDetail || "";
@@ -13228,12 +13268,12 @@ function renderHome() {
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(rowCategory)}${detailLabel ? ` > ${htmlEscape(detailLabel)}` : ""}</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.downtimeStart || "-")}
+                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.downtimeStart || "-")}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
                       </p>
                     </div>
                     <div class="pending-log-actions">
                       <button type="button" class="table-edit-pill ghost-btn" data-super-down-edit="${row.id}">Edit</button>
-                      <button type="button" class="table-edit-pill finalise-pill" data-super-down-complete="${row.id}">Finalise</button>
+                      ${rowIsOpen ? `<button type="button" class="table-edit-pill finalise-pill" data-super-down-complete="${row.id}">Finalise</button>` : ""}
                     </div>
                   </article>
                 `;
@@ -13241,7 +13281,7 @@ function renderHome() {
               .join("")}
           </div>
         `
-        : `<p class="muted pending-log-empty">No open downtime logs for this date/shift.</p>`;
+        : `<p class="muted pending-log-empty">No downtime logs for this date/shift.</p>`;
     }
   } else {
     supervisorShiftTileEditId = "";

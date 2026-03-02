@@ -1,6 +1,5 @@
 CREATE TABLE IF NOT EXISTS public."Bizerba_ID" (
   id BIGSERIAL PRIMARY KEY,
-  "ArticleName" TEXT NOT NULL,
   "ActualNetWeightValue" NUMERIC(14,3) NOT NULL,
   "DeviceName" TEXT NOT NULL,
   "Date" DATE NOT NULL,

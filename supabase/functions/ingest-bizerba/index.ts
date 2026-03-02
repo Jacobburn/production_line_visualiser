@@ -1,7 +1,6 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 type BizerbaPayload = {
-  ArticleName: unknown;
   ActualNetWeightValue: unknown;
   DeviceName: unknown;
   Date: unknown;
@@ -71,7 +70,6 @@ Deno.serve(async (req) => {
 
   try {
     const row = {
-      ArticleName: requiredString(payload.ArticleName, "ArticleName"),
       ActualNetWeightValue: requiredNumeric(
         payload.ActualNetWeightValue,
         "ActualNetWeightValue",
