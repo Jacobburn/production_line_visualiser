@@ -1435,6 +1435,13 @@ button {
   stroke-linejoin: round;
 }
 
+.line-product-rate-avg {
+  fill: none;
+  stroke-width: 1.9;
+  stroke-dasharray: 7 5;
+  opacity: 0.66;
+}
+
 .line-down-avg {
   fill: none;
   stroke: #a73838;

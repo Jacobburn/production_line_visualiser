@@ -11765,29 +11765,44 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     return;
   }
   const series = Array.isArray(productTrend?.series) ? productTrend.series : [];
-  if (!series.length) {
-    root.innerHTML = `<div class="empty-chart">No product run data available in this time window.</div>`;
-    return;
-  }
 
   const width = 1280;
   const height = 430;
-  const pad = { top: 34, right: 56, bottom: 78, left: 76 };
+  const pad = { top: 34, right: 104, bottom: 78, left: 76 };
   const chartW = width - pad.left - pad.right;
   const chartH = height - pad.top - pad.bottom;
+  const maxUnits = Math.max(1, ...points.map((point) => Math.max(0, num(point.units))));
   const maxRate = Math.max(1, num(productTrend?.maxRate));
   const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
   const x = (index) => pad.left + stepX * index;
+  const yUnits = (value) => pad.top + chartH - (Math.max(0, value) / maxUnits) * chartH;
   const yRate = (value) => pad.top + chartH - (Math.max(0, value) / maxRate) * chartH;
 
+  const barWidth = Math.max(14, Math.min(36, stepX * 0.58));
+  const bars = points
+    .map((point, index) => {
+      const y = yUnits(point.units);
+      const h = pad.top + chartH - y;
+      return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(1, h)}" rx="3" class="bar-units"><title>${point.label}: ${formatNum(
+        point.units,
+        0
+      )} units produced</title></rect>`;
+    })
+    .join("");
+
   const ticks = [0, 0.25, 0.5, 0.75, 1]
-    .map((fraction) => roundToDecimals(maxRate * fraction, maxRate < 10 ? 2 : 1))
-    .map((tick) => {
-      const y = yRate(tick);
-      return `<g><line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/><text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${formatNum(
-        tick,
-        maxRate < 10 ? 2 : 1
-      )}</text></g>`;
+    .map((fraction) => {
+      const y = pad.top + chartH - fraction * chartH;
+      const unitsTick = Math.round(maxUnits * fraction);
+      const rateTick = roundToDecimals(maxRate * fraction, maxRate < 10 ? 2 : 1);
+      return `<g>
+        <line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/>
+        <text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${formatNum(unitsTick, 0)}</text>
+        <text x="${pad.left + chartW + 12}" y="${y + 5}" text-anchor="start" class="axis">${formatNum(
+          rateTick,
+          maxRate < 10 ? 2 : 1
+        )}</text>
+      </g>`;
     })
     .join("");
 
@@ -11809,6 +11824,19 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     })
     .join("");
 
+  const productAverageLines = series
+    .map((item, seriesIndex) => {
+      const color = lineTrendSeriesColor(seriesIndex);
+      const values = item.values.filter((value) => Number.isFinite(value));
+      if (!values.length) return "";
+      const avg = values.reduce((sum, value) => sum + num(value), 0) / values.length;
+      const y = yRate(avg);
+      return `<line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="line-product-rate-avg" style="stroke:${color};">
+        <title>${htmlEscape(item.name)} average: ${formatNum(avg, 2)} trays/min</title>
+      </line>`;
+    })
+    .join("");
+
   const productDots = series
     .map((item, seriesIndex) => {
       const color = lineTrendSeriesColor(seriesIndex);
@@ -11823,21 +11851,24 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     })
     .join("");
 
-  const legend = series
-    .map((item, seriesIndex) => {
+  const legend = [
+    `<span class="line-trend-product-legend-item">
+      <span class="line-trend-product-legend-swatch" style="background:rgba(16, 24, 32, 0.3);"></span>
+      <span class="line-trend-product-legend-name">Total units</span>
+      <span class="line-trend-product-legend-value">${formatNum(points[points.length - 1]?.units || 0, 0)} units</span>
+    </span>`,
+    ...series.map((item, seriesIndex) => {
       const color = lineTrendSeriesColor(seriesIndex);
-      const latest = item.values
-        .slice()
-        .reverse()
-        .find((value) => Number.isFinite(value));
-      const latestLabel = Number.isFinite(latest) ? `${formatNum(latest, 2)} trays/min` : "No runs";
+      const values = item.values.filter((value) => Number.isFinite(value));
+      const average = values.length ? values.reduce((sum, value) => sum + num(value), 0) / values.length : null;
+      const averageLabel = Number.isFinite(average) ? `${formatNum(average, 2)} trays/min avg` : "No runs";
       return `<span class="line-trend-product-legend-item">
         <span class="line-trend-product-legend-swatch" style="background:${color};"></span>
         <span class="line-trend-product-legend-name">${htmlEscape(item.name)}</span>
-        <span class="line-trend-product-legend-value">${htmlEscape(latestLabel)}</span>
+        <span class="line-trend-product-legend-value">${htmlEscape(averageLabel)}</span>
       </span>`;
     })
-    .join("");
+  ].join("");
 
   const labelSkip = points.length > 14 ? Math.ceil(points.length / 10) : 1;
   const labels = points
@@ -11848,15 +11879,20 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     .join("");
 
   root.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Product tray per minute trend by period">
+    <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Total production and product tray per minute trend by period">
       ${ticks}
       <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
       <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
+      <line x1="${pad.left + chartW}" y1="${pad.top}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
+      ${bars}
+      ${productAverageLines}
       ${productLines}
       ${productDots}
       ${labels}
-      <text x="${pad.left}" y="${20}" class="legend rate">Tray/min by product (line)</text>
-      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Scale max ${formatNum(maxRate, 2)} trays/min</text>
+      <text x="${pad.left}" y="${20}" class="legend units">Total units (bars, left axis)</text>
+      <text x="${pad.left + 248}" y="${20}" class="legend rate">Tray/min by product (solid) + product avg (dashed)</text>
+      <text x="${pad.left + 4}" y="${pad.top + 12}" class="axis">Units max ${formatNum(maxUnits, 0)}</text>
+      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Tray/min max ${formatNum(maxRate, 2)}</text>
     </svg>
     <div class="line-trend-product-legend">${legend}</div>
   `;
