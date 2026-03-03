@@ -1593,8 +1593,6 @@ function computeLineMetrics(line, date, shift) {
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
-  let utilAccumulator = 0;
-  let utilCount = 0;
   let bottleneckStageName = "-";
   let bottleneckUtil = -1;
 
@@ -1606,8 +1604,6 @@ function computeLineMetrics(line, date, shift) {
     const stageRate = netRunRate * uptimeRatio;
     const totalMax = stageTotalMaxThroughputForLine(line, stage.id, shift);
     const utilisation = totalMax > 0 ? (stageRate / totalMax) * 100 : 0;
-    utilAccumulator += Math.max(0, utilisation);
-    utilCount += 1;
     if (utilisation > bottleneckUtil) {
       bottleneckUtil = utilisation;
       bottleneckStageName = stageDisplayName(stage, index);
@@ -1620,7 +1616,7 @@ function computeLineMetrics(line, date, shift) {
     shift,
     units,
     totalDowntime,
-    lineUtil: utilCount > 0 ? utilAccumulator / utilCount : 0,
+    lineUtil: Math.max(0, bottleneckUtil),
     netRunRate,
     bottleneckStageName,
     crewOnShift,
@@ -9450,6 +9446,19 @@ function bindTrendModal() {
   });
 }
 
+function bindLineTrendDetailModal() {
+  const overlay = document.getElementById("lineTrendDetailModal");
+  const closeBtn = document.getElementById("closeLineTrendDetailModal");
+  if (!overlay || !closeBtn) return;
+  closeBtn.addEventListener("click", closeLineTrendDetailModal);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeLineTrendDetailModal();
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") closeLineTrendDetailModal();
+  });
+}
+
 function moveShift(direction) {
   if (!state) return;
   const date = parseDateLocal(state.selectedDate || todayISO());
@@ -11685,6 +11694,8 @@ function aggregateLineTrendProductSeries(line, buckets, shift) {
   const runRows = Array.isArray(data.runRows) ? data.runRows : [];
   const bucketTotals = buckets.map(() => new Map());
   const totalUnitsByProduct = new Map();
+  const totalUnitsByBucket = buckets.map(() => 0);
+  const totalDetailsByBucket = buckets.map(() => []);
 
   buckets.forEach((bucket, bucketIndex) => {
     const productTotals = bucketTotals[bucketIndex];
@@ -11694,12 +11705,29 @@ function aggregateLineTrendProductSeries(line, buckets, shift) {
         if (weight <= 0) return;
         const rawProduct = String(row?.product || "").trim();
         const productName = catalogProductCanonicalName(rawProduct, { lineId: line?.id }) || rawProduct || "Unspecified";
-        const entry = productTotals.get(productName) || { units: 0, netMins: 0 };
+        const entry = productTotals.get(productName) || { units: 0, netMins: 0, details: [] };
         const weightedUnits = Math.max(0, num(row?.unitsProduced)) * weight;
         const weightedNetMins = Math.max(0, num(row?.netProductionTime)) * weight;
+        const detail = {
+          runId: String(row?.id || ""),
+          date: String(row?.date || ""),
+          shiftLabel: resolveTimedLogShiftLabel(row, line, "productionStartTime", "finishTime"),
+          product: productName,
+          productionStartTime: String(row?.productionStartTime || ""),
+          finishTime: String(row?.finishTime || ""),
+          unitsProduced: Math.max(0, num(row?.unitsProduced)),
+          netProductionTime: Math.max(0, num(row?.netProductionTime)),
+          shiftWeight: weight,
+          weightedUnits,
+          weightedNetMins,
+          weightedRate: weightedNetMins > 0 ? weightedUnits / weightedNetMins : 0
+        };
         entry.units += weightedUnits;
         entry.netMins += weightedNetMins;
+        entry.details.push(detail);
         productTotals.set(productName, entry);
+        totalUnitsByBucket[bucketIndex] += weightedUnits;
+        totalDetailsByBucket[bucketIndex].push(detail);
         if (!totalUnitsByProduct.has(productName)) totalUnitsByProduct.set(productName, 0);
         totalUnitsByProduct.set(productName, totalUnitsByProduct.get(productName) + weightedUnits);
       });
@@ -11716,10 +11744,15 @@ function aggregateLineTrendProductSeries(line, buckets, shift) {
 
   const series = productNames.map((name) => ({
     name,
+    units: bucketTotals.map((totals) => Math.max(0, num(totals.get(name)?.units))),
     values: bucketTotals.map((totals) => {
       const entry = totals.get(name);
       if (!entry || num(entry.netMins) <= 0) return null;
       return Math.max(0, num(entry.units) / num(entry.netMins));
+    }),
+    details: bucketTotals.map((totals) => {
+      const entry = totals.get(name);
+      return Array.isArray(entry?.details) ? entry.details : [];
     })
   }));
 
@@ -11729,13 +11762,120 @@ function aggregateLineTrendProductSeries(line, buckets, shift) {
   );
   return {
     series,
-    maxRate: Math.max(1, maxRate)
+    maxRate: Math.max(1, maxRate),
+    totalUnitsByBucket,
+    totalDetailsByBucket
   };
 }
 
 function lineTrendSeriesColor(index) {
   const palette = ["#1f4f8a", "#0f766e", "#a73838", "#8f4b08", "#6d28d9", "#0c4a6e", "#9f1239", "#166534", "#7c2d12", "#1e3a8a"];
   return palette[index % palette.length];
+}
+
+function lineTrendBucketDateRangeLabel(point) {
+  if (!point) return "";
+  const startIso = String(point.startIso || "").trim();
+  const endIso = String(point.endIso || "").trim();
+  if (!startIso) return "";
+  if (!endIso || endIso === startIso) {
+    return formatIsoDateLabel(startIso, { month: "short", day: "numeric", year: "numeric" });
+  }
+  return `${formatIsoDateLabel(startIso, { month: "short", day: "numeric" })} to ${formatIsoDateLabel(endIso, {
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  })}`;
+}
+
+function sortedLineTrendDetailRows(rows = []) {
+  return (Array.isArray(rows) ? rows : []).slice().sort((a, b) => {
+    const dateCmp = String(a?.date || "").localeCompare(String(b?.date || ""));
+    if (dateCmp !== 0) return dateCmp;
+    const startA = parseTimeToMinutes(a?.productionStartTime);
+    const startB = parseTimeToMinutes(b?.productionStartTime);
+    if (Number.isFinite(startA) && Number.isFinite(startB) && startA !== startB) return startA - startB;
+    return String(a?.product || "").localeCompare(String(b?.product || ""));
+  });
+}
+
+function lineTrendDetailRowsTable(rows = []) {
+  const sortedRows = sortedLineTrendDetailRows(rows);
+  if (!sortedRows.length) return `<p class="muted">No production runs contributed to this datapoint.</p>`;
+  return `
+    <div class="table-wrap">
+      <table class="line-trend-detail-table">
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Shift</th>
+            <th>Product</th>
+            <th>Start</th>
+            <th>Finish</th>
+            <th>Units</th>
+            <th>Net Min</th>
+            <th>Weight</th>
+            <th>Weighted Units</th>
+            <th>Weighted Net Min</th>
+            <th>Weighted Tray/Min</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${sortedRows
+            .map(
+              (row) => `
+              <tr>
+                <td>${htmlEscape(String(row.date || ""))}</td>
+                <td>${htmlEscape(String(row.shiftLabel || ""))}</td>
+                <td>${htmlEscape(String(row.product || ""))}</td>
+                <td>${htmlEscape(formatTime12h(row.productionStartTime))}</td>
+                <td>${htmlEscape(formatTime12h(row.finishTime))}</td>
+                <td>${formatNum(row.unitsProduced, 0)}</td>
+                <td>${formatNum(row.netProductionTime, 1)}</td>
+                <td>${formatNum(Math.max(0, num(row.shiftWeight)) * 100, 0)}%</td>
+                <td>${formatNum(row.weightedUnits, 1)}</td>
+                <td>${formatNum(row.weightedNetMins, 2)}</td>
+                <td>${formatNum(row.weightedRate, 2)}</td>
+              </tr>
+            `
+            )
+            .join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function closeLineTrendDetailModal() {
+  const overlay = document.getElementById("lineTrendDetailModal");
+  if (!overlay) return;
+  overlay.classList.remove("open");
+  overlay.setAttribute("aria-hidden", "true");
+}
+
+function openLineTrendDetailModal({ title = "", meta = "", detailRows = [], primaryLabel = "", primaryValue = "" } = {}) {
+  const overlay = document.getElementById("lineTrendDetailModal");
+  const titleNode = document.getElementById("lineTrendDetailTitle");
+  const metaNode = document.getElementById("lineTrendDetailMeta");
+  const summaryNode = document.getElementById("lineTrendDetailSummary");
+  const bodyNode = document.getElementById("lineTrendDetailBody");
+  if (!overlay || !titleNode || !metaNode || !summaryNode || !bodyNode) return;
+
+  const totalWeightedUnits = detailRows.reduce((sum, row) => sum + Math.max(0, num(row?.weightedUnits)), 0);
+  const totalWeightedNetMins = detailRows.reduce((sum, row) => sum + Math.max(0, num(row?.weightedNetMins)), 0);
+  const blendedRate = totalWeightedNetMins > 0 ? totalWeightedUnits / totalWeightedNetMins : 0;
+  titleNode.textContent = title;
+  metaNode.textContent = meta;
+  summaryNode.innerHTML = `
+    <span class="line-trend-detail-pill"><strong>${htmlEscape(primaryLabel)}</strong><span>${htmlEscape(primaryValue)}</span></span>
+    <span class="line-trend-detail-pill"><strong>Rows</strong><span>${formatNum(detailRows.length, 0)}</span></span>
+    <span class="line-trend-detail-pill"><strong>Weighted Units</strong><span>${formatNum(totalWeightedUnits, 1)}</span></span>
+    <span class="line-trend-detail-pill"><strong>Weighted Net Min</strong><span>${formatNum(totalWeightedNetMins, 2)}</span></span>
+    <span class="line-trend-detail-pill"><strong>Blended Tray/Min</strong><span>${formatNum(blendedRate, 2)}</span></span>
+  `;
+  bodyNode.innerHTML = lineTrendDetailRowsTable(detailRows);
+  overlay.classList.add("open");
+  overlay.setAttribute("aria-hidden", "false");
 }
 
 function lineTrendTopDowntimeReasons(line, buckets, shift, maxItems = 5) {
@@ -12113,9 +12253,6 @@ function renderVisualiser() {
   const totalDowntime = selectedDowntimeRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
-  let utilAccumulator = 0;
-  let utilCount = 0;
-
   const unitsText = formatNum(units, 0);
   const downtimeText = `${formatNum(totalDowntime, 1)} min`;
   const runRateText = `${formatNum(netRunRate, 2)} u/min`;
@@ -12153,8 +12290,6 @@ function renderVisualiser() {
     const stageRate = netRunRate * uptimeRatio;
     const totalMaxThroughput = stageTotalMaxThroughput(stage.id, state.selectedShift);
     const utilisation = totalMaxThroughput > 0 ? (stageRate / totalMaxThroughput) * 100 : 0;
-    utilAccumulator += Math.max(0, utilisation);
-    utilCount += 1;
     const stageCrew = stageCrewCountForVisual(state, stage, activeCrew, liveRunPattern);
     const compact = stage.w * stage.h < 140;
     const status = statusClass(utilisation);
@@ -12218,7 +12353,7 @@ function renderVisualiser() {
     bottleneckCard.classList.add("bottleneck");
   }
 
-  const lineUtil = utilCount > 0 ? utilAccumulator / utilCount : 0;
+  const lineUtil = Math.max(0, bottleneckUtilisation);
   const utilisationText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
   setText("kpiUtilisation", utilisationText);
   setText("dayKpiUtilisation", utilisationText);
@@ -12746,8 +12881,6 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
-  let utilAccumulator = 0;
-  let utilCount = 0;
   let bottleneckCard = null;
   let bottleneckUtil = -1;
   const activeCrew = crewMapForLineShift(line, selectedShift, stages);
@@ -12786,9 +12919,6 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
     const stageCrew = stageCrewCountForVisual(line, stage, activeCrew, liveRunPattern);
     const compact = stage.w * stage.h < 140;
     const status = statusClass(utilisation);
-    utilAccumulator += Math.max(0, utilisation);
-    utilCount += 1;
-
     const card = document.createElement("article");
     card.className = `stage-card group-${stage.group}${stage.kind ? ` kind-${stage.kind}` : ""} status-${status}`;
     const liveDown = liveDowntimeByStage[stage.id];
@@ -12827,7 +12957,7 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   if (bottleneckCard) {
     bottleneckCard.classList.add("bottleneck");
   }
-  const lineUtil = utilCount > 0 ? utilAccumulator / utilCount : 0;
+  const lineUtil = Math.max(0, bottleneckUtil);
   const svUtilText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
   setSvText("svKpiUtilisation", svUtilText);
   setSvText("svDayKpiUtilisation", svUtilText);
@@ -13909,6 +14039,7 @@ async function bootstrapApp() {
     bindStep("bindDataSubtabs", bindDataSubtabs);
     bindStep("bindVisualiserControls", bindVisualiserControls);
     bindStep("bindTrendModal", bindTrendModal);
+    bindStep("bindLineTrendDetailModal", bindLineTrendDetailModal);
     bindStep("bindStageSettingsModal", bindStageSettingsModal);
     bindStep("bindForms", bindForms);
     bindStep("bindDataControls", bindDataControls);
