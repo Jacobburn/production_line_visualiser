@@ -73,7 +73,7 @@ const DOWNTIME_REASON_PRESETS = {
   People: ["Understaffed", "Training", "Handover Delay", "Absence"],
   Materials: ["Film Shortage", "Label Shortage", "Tray Shortage", "Marinade Shortage", "Skewer shortage"],
   Other: ["Cleaning", "QA Hold", "Power", "Unplanned Stop"],
-  Break: ["Meal Break", "Tea Break", "Crew Changeover", "Other Break"]
+  Break: ["Standard Break", "Non-standard Break"]
 };
 const DEFAULT_SUPERVISORS = [
   { id: "sup-1", name: "Supervisor", username: "supervisor", password: "supervisor", mode: "all", shifts: ["Day", "Night"] },
@@ -5093,6 +5093,80 @@ function splitDowntimeRowsForBreakViews(sourceRows = []) {
     downtimeRows.push(row);
   });
   return { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime };
+}
+
+function breakMigrationReasonDetail(row) {
+  const reasonText = [
+    row?.notes,
+    row?.reason,
+    row?.reasonDetail,
+    row?.reasonNote
+  ]
+    .map((value) => String(value || "").trim().toLowerCase())
+    .filter(Boolean)
+    .join(" ");
+  return /non[\s-]?standard/.test(reasonText) ? "Non-standard Break" : "Standard Break";
+}
+
+function buildDowntimeBreakMigrationPayload(line, breakRow) {
+  const date = String(breakRow?.date || "").trim();
+  const breakStart = String(breakRow?.breakStart || "").trim();
+  if (!isOperationalDate(date) || !strictTimeValid(breakStart)) return null;
+  const breakFinishRaw = String(breakRow?.breakFinish || "").trim();
+  const downtimeFinish = strictTimeValid(breakFinishRaw) ? breakFinishRaw : breakStart;
+  const assignedShift = normalizeLogAssignableShift(breakRow?.assignedShift || breakRow?.shift);
+  const inferredShift = inferShiftForLog(line, date, breakStart, assignedShift || line?.selectedShift || "Day");
+  const shift = SHIFT_OPTIONS.includes(assignedShift) ? assignedShift : SHIFT_OPTIONS.includes(inferredShift) ? inferredShift : "Day";
+  const reasonCategory = "Break";
+  const reasonDetail = breakMigrationReasonDetail(breakRow);
+  const reasonNote = "";
+  const reason = buildDowntimeReasonText(line, reasonCategory, reasonDetail, reasonNote);
+  const notes = String(breakRow?.notes || "").trim();
+  return {
+    lineId: String(line?.id || "").trim(),
+    date,
+    shift,
+    downtimeStart: breakStart,
+    downtimeFinish,
+    equipment: "",
+    reason,
+    notes,
+    reasonCategory,
+    reasonDetail,
+    reasonNote
+  };
+}
+
+function downtimeBreakRowFromMigration(line, breakRow, payload, savedDowntime = null) {
+  const equipment = String(savedDowntime?.equipment || "").trim();
+  const reason = String(savedDowntime?.reason || payload?.reason || "").trim();
+  const parsedReason = parseDowntimeReasonParts(reason, equipment);
+  const reasonCategory = String(parsedReason.reasonCategory || payload?.reasonCategory || "Break").trim() || "Break";
+  const reasonDetail = String(parsedReason.reasonDetail || payload?.reasonDetail || "Standard Break").trim() || "Standard Break";
+  const reasonNote = String(parsedReason.reasonNote || payload?.reasonNote || "").trim();
+  return {
+    ...(breakRow || {}),
+    id: String(savedDowntime?.id || "").trim() || makeLocalLogId("down"),
+    lineId: String(line?.id || "").trim() || String(payload?.lineId || "").trim(),
+    date: String(savedDowntime?.date || payload?.date || "").trim(),
+    assignedShift: normalizeLogAssignableShift(savedDowntime?.shift || payload?.shift),
+    shift: "",
+    downtimeStart: String(savedDowntime?.downtimeStart || payload?.downtimeStart || "").trim(),
+    downtimeFinish: String(savedDowntime?.downtimeFinish || payload?.downtimeFinish || "").trim(),
+    downtimeMins: Math.max(
+      0,
+      num(savedDowntime?.downtimeMins) || diffMinutes(savedDowntime?.downtimeStart || payload?.downtimeStart, savedDowntime?.downtimeFinish || payload?.downtimeFinish)
+    ),
+    equipment,
+    reason,
+    reasonCategory,
+    reasonDetail,
+    reasonNote,
+    notes: String(savedDowntime?.notes ?? payload?.notes ?? "").trim(),
+    submittedBy: String(savedDowntime?.submittedBy || breakRow?.submittedBy || "manager").trim() || "manager",
+    submittedByUserId: String(savedDowntime?.submittedByUserId || breakRow?.submittedByUserId || "").trim(),
+    submittedAt: savedDowntime?.submittedAt || nowIso()
+  };
 }
 
 function computeRunRow(row, nonProductionIntervalsByDate) {
@@ -10798,6 +10872,148 @@ function bindDataControls() {
         renderAll();
       } catch (error) {
         alert(`Could not load permanent sample data.\n${error?.message || "Please try again."}`);
+      }
+    });
+  }
+
+  const portBreakLogsBtn = document.getElementById("portBreakLogsToDowntime");
+  if (portBreakLogsBtn) {
+    portBreakLogsBtn.addEventListener("click", async () => {
+      if (appState.appMode !== "manager") {
+        alert("Only managers can port shift break logs.");
+        return;
+      }
+      if (!state) return;
+      const sourceBreakRows = Array.isArray(state.breakRows) ? state.breakRows.slice() : [];
+      if (!sourceBreakRows.length) {
+        alert("No shift break logs found to port.");
+        return;
+      }
+
+      const migrationRows = sourceBreakRows
+        .map((breakRow) => ({ breakRow, payload: buildDowntimeBreakMigrationPayload(state, breakRow) }))
+        .filter((entry) => Boolean(entry.payload));
+      const skippedInvalid = Math.max(0, sourceBreakRows.length - migrationRows.length);
+
+      if (!migrationRows.length) {
+        alert("No valid shift break logs found to port.");
+        return;
+      }
+
+      const confirmed = window.confirm(
+        `Port ${migrationRows.length} shift break log${migrationRows.length === 1 ? "" : "s"} to downtime logs?\n\nThis will remove migrated shift break logs to avoid double-counting.`
+      );
+      if (!confirmed) return;
+
+      portBreakLogsBtn.disabled = true;
+      const createdDowntimeRows = [];
+      const migratedBreakIds = new Set();
+      const migratedBreakRefs = new Set();
+      let migrated = 0;
+      let failed = 0;
+      let deletedHostedBreaks = 0;
+      let rolledBackDowntimeCreates = 0;
+      let backendReady = false;
+
+      try {
+        try {
+          const session = await ensureManagerBackendSession();
+          const backendLineId = UUID_RE.test(String(state.id || "").trim()) ? String(state.id || "").trim() : await ensureBackendLineId(state.id, session);
+          backendReady = UUID_RE.test(String(backendLineId || "").trim());
+        } catch (_error) {
+          backendReady = false;
+        }
+
+        for (const entry of migrationRows) {
+          const breakRow = entry.breakRow;
+          const payload = entry.payload;
+          if (!payload) {
+            failed += 1;
+            continue;
+          }
+          try {
+            let savedDowntime = null;
+            if (backendReady) {
+              savedDowntime = await syncManagerDowntimeLog(payload);
+              const breakId = String(breakRow?.id || "").trim();
+              const shiftLogId = String(breakRow?.shiftLogId || "").trim();
+              const canDeleteHostedBreak = UUID_RE.test(breakId) && UUID_RE.test(shiftLogId);
+              if (canDeleteHostedBreak) {
+                try {
+                  await deleteManagerShiftBreak(shiftLogId, breakId);
+                  deletedHostedBreaks += 1;
+                } catch (deleteError) {
+                  const savedDowntimeId = String(savedDowntime?.id || "").trim();
+                  if (UUID_RE.test(savedDowntimeId)) {
+                    try {
+                      await deleteManagerDowntimeLog(savedDowntimeId);
+                      rolledBackDowntimeCreates += 1;
+                    } catch (_rollbackError) {
+                      // Best effort rollback; keep original error for row failure reporting.
+                    }
+                  }
+                  throw deleteError;
+                }
+              }
+            }
+
+            const nextDowntimeRow = downtimeBreakRowFromMigration(state, breakRow, payload, savedDowntime);
+            if (nextDowntimeRow) {
+              createdDowntimeRows.push(nextDowntimeRow);
+              migrated += 1;
+              migratedBreakRefs.add(breakRow);
+              const breakId = String(breakRow?.id || "").trim();
+              if (breakId) migratedBreakIds.add(breakId);
+            } else {
+              failed += 1;
+            }
+          } catch (error) {
+            console.warn("Could not port break log to downtime:", error);
+            failed += 1;
+          }
+        }
+
+        if (createdDowntimeRows.length) {
+          if (!Array.isArray(state.downtimeRows)) state.downtimeRows = [];
+          createdDowntimeRows.forEach((row) => {
+            const rowId = String(row?.id || "").trim();
+            if (rowId) {
+              const existingIndex = state.downtimeRows.findIndex((existing) => String(existing?.id || "").trim() === rowId);
+              if (existingIndex >= 0) {
+                state.downtimeRows[existingIndex] = { ...state.downtimeRows[existingIndex], ...row };
+                return;
+              }
+            }
+            state.downtimeRows.push(row);
+          });
+
+          state.breakRows = (state.breakRows || []).filter((breakRow) => {
+            const breakId = String(breakRow?.id || "").trim();
+            if (breakId && migratedBreakIds.has(breakId)) return false;
+            return !migratedBreakRefs.has(breakRow);
+          });
+
+          addAudit(
+            state,
+            "PORT_BREAKS_TO_DOWNTIME",
+            `Ported ${migrated} break log${migrated === 1 ? "" : "s"} to downtime Break logs${backendReady ? ` (${deletedHostedBreaks} hosted break row${deletedHostedBreaks === 1 ? "" : "s"} removed)` : ""}`
+          );
+          saveState();
+          if (backendReady) {
+            try {
+              await refreshHostedState();
+            } catch (refreshError) {
+              console.warn("Could not refresh hosted state after break port:", refreshError);
+            }
+          }
+          renderAll();
+        }
+
+        alert(
+          `Break port complete.\nMigrated: ${migrated}\nFailed: ${failed}\nSkipped invalid: ${skippedInvalid}\n${backendReady ? `Hosted break rows removed: ${deletedHostedBreaks}\n` : ""}${rolledBackDowntimeCreates > 0 ? `Rolled back downtime creates: ${rolledBackDowntimeCreates}\n` : ""}Remaining shift break logs: ${Math.max(0, (state.breakRows || []).length)}`
+        );
+      } finally {
+        portBreakLogsBtn.disabled = false;
       }
     });
   }
