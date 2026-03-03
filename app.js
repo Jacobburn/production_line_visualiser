@@ -11115,6 +11115,115 @@ function shortHourLabel(hour) {
   return `${display}${suffix}`;
 }
 
+function formatMinutesToClockLabel(totalMinutes) {
+  const minutesInDay = 24 * 60;
+  const safe = ((Math.floor(num(totalMinutes)) % minutesInDay) + minutesInDay) % minutesInDay;
+  const hour = Math.floor(safe / 60);
+  const minute = safe % 60;
+  return formatTime12h(`${String(hour).padStart(2, "0")}:${String(minute).padStart(2, "0")}`);
+}
+
+function dayVizBlockTypeLabel(type) {
+  const key = String(type || "").toLowerCase();
+  if (key === "shift") return "Shift";
+  if (key === "break") return "Break";
+  if (key === "run-main") return "Production";
+  if (key === "run-setup") return "Setup";
+  if (key === "downtime") return "Downtime";
+  return "Time block";
+}
+
+function dayVizBlockDetailsFromElement(blockEl) {
+  if (!(blockEl instanceof Element)) return null;
+  const detailId = String(blockEl.getAttribute("data-day-viz-block-id") || "");
+  if (!detailId) return null;
+  const canvas = blockEl.closest(".day-viz-canvas");
+  if (!canvas || typeof canvas !== "object") return null;
+  const detailsById = canvas.__dayVizBlockDetails;
+  if (!detailsById || typeof detailsById !== "object") return null;
+  return detailsById[detailId] || null;
+}
+
+function dayVizBlockDetailRows(detail = {}) {
+  const rows = [
+    { label: "Date", value: detail.date || "-" },
+    { label: "Shift Filter", value: detail.shiftLabel || "All shifts" },
+    { label: "Lane", value: detail.laneLabel || "-" },
+    { label: "Type", value: detail.typeLabel || "Time block" },
+    { label: "Time", value: detail.timeRange || "-" },
+    { label: "Duration", value: `${formatNum(Math.max(0, num(detail.durationMins)), 1)} min` }
+  ];
+  const subtitle = String(detail.subtitle || "").trim();
+  if (subtitle) rows.push({ label: "Logged Details", value: subtitle });
+  return rows
+    .map(
+      (row) => `
+        <div class="day-viz-block-detail-row">
+          <span>${htmlEscape(row.label)}</span>
+          <strong>${htmlEscape(row.value)}</strong>
+        </div>
+      `
+    )
+    .join("");
+}
+
+function openDayVizBlockModal(detail) {
+  const overlay = document.getElementById("dayVizBlockModal");
+  const titleNode = document.getElementById("dayVizBlockModalTitle");
+  const metaNode = document.getElementById("dayVizBlockModalMeta");
+  const bodyNode = document.getElementById("dayVizBlockModalBody");
+  if (!overlay || !titleNode || !metaNode || !bodyNode || !detail) return;
+  titleNode.textContent = detail.title || "Time Block";
+  metaNode.textContent = `${detail.typeLabel || "Time block"} | ${detail.laneLabel || "Schedule"}`;
+  bodyNode.innerHTML = dayVizBlockDetailRows(detail);
+  overlay.classList.add("open");
+  overlay.setAttribute("aria-hidden", "false");
+}
+
+function closeDayVizBlockModal() {
+  const overlay = document.getElementById("dayVizBlockModal");
+  if (!overlay) return;
+  overlay.classList.remove("open");
+  overlay.setAttribute("aria-hidden", "true");
+}
+
+function bindDayVizBlockModal() {
+  const overlay = document.getElementById("dayVizBlockModal");
+  const closeBtn = document.getElementById("closeDayVizBlockModal");
+  if (!overlay || !closeBtn) return;
+  const tryOpenFromElement = (blockEl) => {
+    const detail = dayVizBlockDetailsFromElement(blockEl);
+    if (!detail) return false;
+    openDayVizBlockModal(detail);
+    return true;
+  };
+
+  closeBtn.addEventListener("click", closeDayVizBlockModal);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeDayVizBlockModal();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const blockEl = event.target.closest(".day-viz-block[data-day-viz-block-id]");
+    if (!blockEl) return;
+    tryOpenFromElement(blockEl);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && overlay.classList.contains("open")) {
+      closeDayVizBlockModal();
+      return;
+    }
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (!(event.target instanceof Element)) return;
+    const blockEl = event.target.closest(".day-viz-block[data-day-viz-block-id]");
+    if (!blockEl) return;
+    event.preventDefault();
+    tryOpenFromElement(blockEl);
+  });
+}
+
 function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver) {
   const blocks = { shifts: [], breaks: [], runs: [], downtime: [], source: {} };
   const allShiftRowsForDate = data.shiftRows.filter((row) => row.date === selectedDate);
@@ -11299,6 +11408,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     (item) => Number.isFinite(item.start) && Number.isFinite(item.end)
   );
   if (!all.length) {
+    root.__dayVizBlockDetails = {};
     root.innerHTML = `<div class="day-viz-empty">No shift/run/downtime records for ${selectedDate}.</div>`;
     return;
   }
@@ -11448,6 +11558,8 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       return `<div class="day-viz-axis-tick ${major ? "major" : ""}" style="left:${left}%;">${major ? `<span>${shortHourLabel(hour)}</span>` : ""}</div>`;
     })
     .join("");
+  const blockDetailsById = {};
+  let blockDetailCounter = 0;
 
   const renderLane = (label, totalLabel, items) => {
     const laneLines = hourMarks
@@ -11467,8 +11579,24 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         const clampedWidth = Math.max(0.65, Math.min(100 - clampedLeft, width));
         if (clampedWidth <= 0) return "";
         const tooltip = `${item.title}${item.sub ? ` | ${item.sub}` : ""}`;
+        blockDetailCounter += 1;
+        const detailId = `${rootId}-${blockDetailCounter}`;
+        const durationMins = Math.max(0, num(item.end) - num(item.start));
+        const timeRange = `${formatMinutesToClockLabel(item.start)} - ${formatMinutesToClockLabel(item.end)}`;
+        const typeLabel = dayVizBlockTypeLabel(item.type);
+        blockDetailsById[detailId] = {
+          title: String(item.title || ""),
+          subtitle: String(item.sub || ""),
+          date: selectedDate,
+          shiftLabel: selectedShiftLabel,
+          laneLabel: label,
+          typeLabel,
+          timeRange,
+          durationMins
+        };
+        const ariaLabel = `${label}: ${item.title}. ${timeRange}. ${formatNum(durationMins, 1)} minutes.`;
         return `
-          <article class="day-viz-block ${item.type}" style="left:${clampedLeft}%;width:${clampedWidth}%;" title="${htmlEscape(tooltip)}">
+          <article class="day-viz-block ${item.type}" style="left:${clampedLeft}%;width:${clampedWidth}%;" title="${htmlEscape(tooltip)}" data-day-viz-block-id="${htmlEscape(detailId)}" role="button" tabindex="0" aria-label="${htmlEscape(ariaLabel)}">
             <span class="day-viz-title">${htmlEscape(item.title)}</span>
             <span class="day-viz-sub">${htmlEscape(item.sub)}</span>
           </article>
@@ -11566,6 +11694,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       </div>
     </section>
   `;
+  root.__dayVizBlockDetails = blockDetailsById;
 }
 
 function renderDayVisualiser() {
@@ -11900,15 +12029,16 @@ function lineTrendTopDowntimeReasons(line, buckets, shift, maxItems = 5) {
     .slice(0, maxItems);
 }
 
-function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate: 1 }) {
+function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate: 1, totalUnitsByBucket: [], totalDetailsByBucket: [] }) {
   const root = document.getElementById("lineTrendUnitsChart");
   if (!root) return;
   if (!points.length) {
     root.innerHTML = `<div class="empty-chart">No trend data available.</div>`;
     return;
   }
-  const series = Array.isArray(productTrend?.series) ? productTrend.series : [];
 
+  const series = Array.isArray(productTrend?.series) ? productTrend.series : [];
+  const totalDetailsByBucket = Array.isArray(productTrend?.totalDetailsByBucket) ? productTrend.totalDetailsByBucket : [];
   const width = 1280;
   const height = 430;
   const pad = { top: 34, right: 104, bottom: 78, left: 76 };
@@ -11916,9 +12046,13 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
   const chartH = height - pad.top - pad.bottom;
   const focusKey = String(state?.lineTrendLegendFocusKey || "").trim();
   const focusedProductName = focusKey.startsWith("product:") ? focusKey.slice("product:".length) : "";
-  const showUnits = !focusKey || focusKey === "__units__";
-  const visibleSeries = !focusKey ? series : showUnits ? [] : series.filter((item) => item.name === focusedProductName);
-  const maxUnits = Math.max(1, ...points.map((point) => Math.max(0, num(point.units))));
+  const focusedSeries = focusedProductName ? series.find((item) => item.name === focusedProductName) || null : null;
+  const visibleSeries = !focusKey ? series : focusKey === "__units__" ? [] : focusedSeries ? [focusedSeries] : [];
+
+  const barValues = focusedSeries
+    ? (Array.isArray(focusedSeries.units) ? focusedSeries.units : []).map((value) => Math.max(0, num(value)))
+    : points.map((point) => Math.max(0, num(point.units)));
+  const maxUnits = Math.max(1, ...barValues.map((value) => Math.max(0, num(value))));
   const maxRateFromVisible = visibleSeries.reduce(
     (max, item) => Math.max(max, ...item.values.map((value) => (Number.isFinite(value) ? value : 0))),
     0
@@ -11928,29 +12062,32 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
   const x = (index) => pad.left + stepX * index;
   const yUnits = (value) => pad.top + chartH - (Math.max(0, value) / maxUnits) * chartH;
   const yRate = (value) => pad.top + chartH - (Math.max(0, value) / maxRate) * chartH;
+  const barKey = focusedSeries ? `product:${focusedSeries.name}` : "__units__";
+  const barLegendLabel = focusedSeries ? `${focusedSeries.name} units (bars, left axis)` : "Total units (bars, left axis)";
 
   const barWidth = Math.max(14, Math.min(36, stepX * 0.58));
-  const bars = showUnits
-    ? points
+  const bars = points
     .map((point, index) => {
-      const y = yUnits(point.units);
+      const unitsValue = Math.max(0, num(barValues[index]));
+      const y = yUnits(unitsValue);
       const h = pad.top + chartH - y;
-      return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(1, h)}" rx="3" class="bar-units"><title>${point.label}: ${formatNum(
-        point.units,
-        0
-      )} units produced</title></rect>`;
+      const title = focusedSeries
+        ? `${focusedSeries.name} ${point.label}: ${formatNum(unitsValue, 1)} units`
+        : `${point.label}: ${formatNum(unitsValue, 0)} units produced`;
+      return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(
+        1,
+        h
+      )}" rx="3" class="bar-units line-trend-clickable" data-line-trend-bar-index="${index}" data-line-trend-bar-key="${encodeURIComponent(
+        barKey
+      )}"><title>${htmlEscape(title)}</title></rect>`;
     })
-    .join("")
-    : "";
+    .join("");
 
   const ticks = [0, 0.25, 0.5, 0.75, 1]
     .map((fraction) => {
       const y = pad.top + chartH - fraction * chartH;
       const unitsTick = Math.round(maxUnits * fraction);
       const rateTick = roundToDecimals(maxRate * fraction, maxRate < 10 ? 2 : 1);
-      const leftTick = showUnits
-        ? `<text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${formatNum(unitsTick, 0)}</text>`
-        : "";
       const rightTick = visibleSeries.length
         ? `<text x="${pad.left + chartW + 12}" y="${y + 5}" text-anchor="start" class="axis">${formatNum(
           rateTick,
@@ -11959,14 +12096,14 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
         : "";
       return `<g>
         <line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/>
-        ${leftTick}
+        <text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${formatNum(unitsTick, 0)}</text>
         ${rightTick}
       </g>`;
     })
     .join("");
 
   const productLines = visibleSeries
-    .map((item, seriesIndex) => {
+    .map((item) => {
       const productIndex = series.findIndex((entry) => entry.name === item.name);
       const color = lineTrendSeriesColor(Math.max(0, productIndex));
       let drawing = false;
@@ -11985,7 +12122,7 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     .join("");
 
   const productAverageLines = visibleSeries
-    .map((item, seriesIndex) => {
+    .map((item) => {
       const productIndex = series.findIndex((entry) => entry.name === item.name);
       const color = lineTrendSeriesColor(Math.max(0, productIndex));
       const values = item.values.filter((value) => Number.isFinite(value));
@@ -11999,13 +12136,15 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     .join("");
 
   const productDots = visibleSeries
-    .map((item, seriesIndex) => {
+    .map((item) => {
       const productIndex = series.findIndex((entry) => entry.name === item.name);
       const color = lineTrendSeriesColor(Math.max(0, productIndex));
       return item.values
         .map((value, pointIndex) => {
           if (!Number.isFinite(value)) return "";
-          return `<circle cx="${x(pointIndex)}" cy="${yRate(value)}" r="4" class="dot-product-rate" style="fill:${color};">
+          return `<circle cx="${x(pointIndex)}" cy="${yRate(value)}" r="4" class="dot-product-rate line-trend-clickable" style="fill:${color};" data-line-trend-point-index="${pointIndex}" data-line-trend-point-product="${encodeURIComponent(
+            item.name
+          )}">
             <title>${htmlEscape(item.name)} | ${points[pointIndex]?.label || ""}: ${formatNum(value, 2)} trays/min</title>
           </circle>`;
         })
@@ -12048,15 +12187,15 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Total production and product tray per minute trend by period">
       ${ticks}
       <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
-      ${showUnits ? `<line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />` : ""}
+      <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
       ${visibleSeries.length ? `<line x1="${pad.left + chartW}" y1="${pad.top}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />` : ""}
       ${bars}
       ${productAverageLines}
       ${productLines}
       ${productDots}
       ${labels}
-      ${showUnits ? `<text x="${pad.left}" y="${20}" class="legend units">Total units (bars, left axis)</text>` : ""}
-      ${visibleSeries.length ? `<text x="${pad.left + 248}" y="${20}" class="legend rate">Tray/min by product (solid) + product avg (dashed)</text>` : ""}
+      <text x="${pad.left}" y="${20}" class="legend units">${htmlEscape(barLegendLabel)}</text>
+      ${visibleSeries.length ? `<text x="${pad.left + 292}" y="${20}" class="legend rate">Tray/min by product (solid) + product avg (dashed)</text>` : ""}
     </svg>
     <div class="line-trend-product-legend">${legend}</div>
   `;
@@ -12069,6 +12208,53 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
       state.lineTrendLegendFocusKey = current === key ? "" : key;
       renderLineTrends();
       saveState();
+    });
+  });
+
+  root.querySelectorAll("[data-line-trend-bar-index]").forEach((bar) => {
+    bar.addEventListener("click", () => {
+      const bucketIndex = Math.max(0, Math.floor(num(bar.getAttribute("data-line-trend-bar-index"))));
+      const point = points[bucketIndex];
+      if (!point) return;
+      const encodedKey = String(bar.getAttribute("data-line-trend-bar-key") || "");
+      const key = decodeURIComponent(encodedKey);
+      const isProduct = key.startsWith("product:");
+      const productName = isProduct ? key.slice("product:".length) : "";
+      const selectedSeries = isProduct ? series.find((item) => item.name === productName) || null : null;
+      const detailRows = isProduct
+        ? (selectedSeries?.details?.[bucketIndex] || [])
+        : (Array.isArray(totalDetailsByBucket[bucketIndex]) ? totalDetailsByBucket[bucketIndex] : []);
+      const unitsValue = isProduct ? Math.max(0, num(selectedSeries?.units?.[bucketIndex])) : Math.max(0, num(barValues[bucketIndex]));
+      const bucketRange = lineTrendBucketDateRangeLabel(point);
+      openLineTrendDetailModal({
+        title: isProduct ? `${productName} Units Breakdown` : "Total Units Breakdown",
+        meta: `${point.label}${bucketRange ? ` | ${bucketRange}` : ""} | ${state.selectedShift} shift`,
+        detailRows,
+        primaryLabel: "Bar Value",
+        primaryValue: `${formatNum(unitsValue, isProduct ? 1 : 0)} units`
+      });
+    });
+  });
+
+  root.querySelectorAll("[data-line-trend-point-index][data-line-trend-point-product]").forEach((dot) => {
+    dot.addEventListener("click", () => {
+      const bucketIndex = Math.max(0, Math.floor(num(dot.getAttribute("data-line-trend-point-index"))));
+      const point = points[bucketIndex];
+      if (!point) return;
+      const encodedProduct = String(dot.getAttribute("data-line-trend-point-product") || "");
+      const productName = decodeURIComponent(encodedProduct);
+      const selectedSeries = series.find((item) => item.name === productName) || null;
+      if (!selectedSeries) return;
+      const pointValue = Number.isFinite(selectedSeries.values?.[bucketIndex]) ? selectedSeries.values[bucketIndex] : 0;
+      const detailRows = selectedSeries.details?.[bucketIndex] || [];
+      const bucketRange = lineTrendBucketDateRangeLabel(point);
+      openLineTrendDetailModal({
+        title: `${productName} Tray/Min Breakdown`,
+        meta: `${point.label}${bucketRange ? ` | ${bucketRange}` : ""} | ${state.selectedShift} shift`,
+        detailRows,
+        primaryLabel: "Point Value",
+        primaryValue: `${formatNum(pointValue, 2)} trays/min`
+      });
     });
   });
 }
@@ -14035,6 +14221,7 @@ async function bootstrapApp() {
   try {
     bindStep("bindTabs", bindTabs);
     bindStep("bindRunCrewingPatternModal", bindRunCrewingPatternModal);
+    bindStep("bindDayVizBlockModal", bindDayVizBlockModal);
     bindStep("bindHome", bindHome);
     bindStep("bindDataSubtabs", bindDataSubtabs);
     bindStep("bindVisualiserControls", bindVisualiserControls);
