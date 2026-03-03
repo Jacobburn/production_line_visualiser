@@ -335,11 +335,15 @@ function applyRouteSnapshot(route) {
   const supervisorSelectedLineId = String(route.supervisorSelectedLineId || "");
   if (supervisorSelectedLineId) appState.supervisorSelectedLineId = supervisorSelectedLineId;
   const supervisorSelectedDate = String(route.supervisorSelectedDate || "");
-  if (/^\d{4}-\d{2}-\d{2}$/.test(supervisorSelectedDate)) appState.supervisorSelectedDate = supervisorSelectedDate;
+  if (isIsoDateValue(supervisorSelectedDate)) {
+    appState.supervisorSelectedDate = normalizeWeekdayIsoDate(supervisorSelectedDate, { direction: -1 });
+  }
   const supervisorSelectedShift = String(route.supervisorSelectedShift || "");
   if (SHIFT_OPTIONS.includes(supervisorSelectedShift)) appState.supervisorSelectedShift = supervisorSelectedShift;
   const dashboardDate = String(route.dashboardDate || "");
-  if (/^\d{4}-\d{2}-\d{2}$/.test(dashboardDate)) appState.dashboardDate = dashboardDate;
+  if (isIsoDateValue(dashboardDate)) {
+    appState.dashboardDate = normalizeWeekdayIsoDate(dashboardDate, { direction: -1 });
+  }
   const dashboardShift = String(route.dashboardShift || "");
   if (SHIFT_OPTIONS.includes(dashboardShift)) appState.dashboardShift = dashboardShift;
   const managerLineTab = parseManagerLineTabId(route.managerLineTab);
@@ -365,6 +369,8 @@ function currentRouteSnapshot() {
   const pendingTabId = parseManagerDataTabId(pendingManagerDataTabRestore.tabId);
   const pendingLineId = String(pendingManagerDataTabRestore.lineId || "");
   const activeLineId = String(activeLine?.id || appState.activeLineId || "");
+  const safeSupervisorDate = normalizeWeekdayIsoDate(appState.supervisorSelectedDate || todayISO(), { direction: -1 });
+  const safeDashboardDate = normalizeWeekdayIsoDate(appState.dashboardDate || todayISO(), { direction: -1 });
   const managerDataTab =
     pendingTabId && (!pendingLineId || pendingLineId === activeLineId)
       ? pendingTabId
@@ -378,9 +384,9 @@ function currentRouteSnapshot() {
     supervisorMainTab: appState.supervisorMainTab || "supervisorDay",
     supervisorTab: appState.supervisorTab || "superShift",
     supervisorSelectedLineId: String(appState.supervisorSelectedLineId || ""),
-    supervisorSelectedDate: appState.supervisorSelectedDate || todayISO(),
+    supervisorSelectedDate: safeSupervisorDate,
     supervisorSelectedShift: appState.supervisorSelectedShift || "Full Day",
-    dashboardDate: appState.dashboardDate || todayISO(),
+    dashboardDate: safeDashboardDate,
     dashboardShift: appState.dashboardShift || "Day"
   };
 }
@@ -1545,13 +1551,17 @@ function refreshRunCrewingPatternSummaries() {
 }
 
 function derivedDataForLine(line) {
-  const downtimeRows = (line?.downtimeRows || [])
+  const operationalDowntimeRows = (line?.downtimeRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
+  const operationalShiftRows = (line?.shiftRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
+  const operationalBreakRows = (line?.breakRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
+  const operationalRunRows = (line?.runRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
+  const downtimeRows = operationalDowntimeRows
     .map(computeDowntimeRow)
     .map((row) => decorateTimedLogShift(row, line, "downtimeStart", "downtimeFinish"));
-  const shiftRows = (line?.shiftRows || []).map(computeShiftRow);
-  const breakRows = (line?.breakRows || []).map(computeBreakRow);
+  const shiftRows = operationalShiftRows.map(computeShiftRow);
+  const breakRows = operationalBreakRows.map(computeBreakRow);
   const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
-  const runRows = (line?.runRows || [])
+  const runRows = operationalRunRows
     .map((row) => decorateTimedLogShift(row, line, "productionStartTime", "finishTime"))
     .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
   return { shiftRows, breakRows, runRows, downtimeRows };
@@ -2058,18 +2068,19 @@ function ensureProductCatalogActionColumn(table) {
 }
 
 function loadState() {
+  const baselineDate = normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
   return {
     activeView: "home",
     appMode: "manager",
     managerHomeTab: "dashboard",
-    dashboardDate: todayISO(),
+    dashboardDate: baselineDate,
     dashboardShift: "Day",
     managerLineTab: "visualiser",
     supervisorMobileMode: APP_VARIANT === "supervisor",
     supervisorMainTab: "supervisorDay",
     supervisorTab: "superShift",
     supervisorSelectedLineId: "",
-    supervisorSelectedDate: todayISO(),
+    supervisorSelectedDate: baselineDate,
     supervisorSelectedShift: "Full Day",
     supervisorSession: null,
     supervisors: [],
@@ -2254,6 +2265,7 @@ function saveState(options = {}) {
 }
 
 function makeDefaultLine(id, name, { seedSample = false } = {}) {
+  const baselineDate = normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
   const stages = clone(STAGES);
   const line = {
     id,
@@ -2261,7 +2273,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     groupId: "",
     displayOrder: 0,
     secretKey: generateSecretKey(),
-    selectedDate: todayISO(),
+    selectedDate: baselineDate,
     selectedShift: "Day",
     crewSettingsShift: "Day",
     visualEditMode: false,
@@ -2296,6 +2308,7 @@ function normalizeLine(id, line) {
     ...line,
     id,
     name: line?.name || base.name,
+    selectedDate: normalizeWeekdayIsoDate(line?.selectedDate || base.selectedDate, { direction: -1 }),
     groupId: String(line?.groupId || "").trim(),
     displayOrder: Number.isFinite(displayOrderRaw) ? Math.max(0, Math.floor(displayOrderRaw)) : base.displayOrder,
     secretKey: line?.secretKey || base.secretKey,
@@ -2428,6 +2441,48 @@ function parseDateLocal(isoDate) {
   return new Date(y, m - 1, d);
 }
 
+function isIsoDateValue(value) {
+  return /^\d{4}-\d{2}-\d{2}$/.test(String(value || ""));
+}
+
+function isWeekendDate(date) {
+  if (!(date instanceof Date)) return false;
+  const day = date.getDay();
+  return day === 0 || day === 6;
+}
+
+function isWeekendIsoDate(isoDate) {
+  if (!isIsoDateValue(isoDate)) return false;
+  return isWeekendDate(parseDateLocal(isoDate));
+}
+
+function normalizeWeekdayIsoDate(isoDate, { direction = 1, fallbackIso = "" } = {}) {
+  const step = direction < 0 ? -1 : 1;
+  const fallbackDate = isIsoDateValue(fallbackIso) ? fallbackIso : todayISO();
+  const source = isIsoDateValue(isoDate) ? String(isoDate) : fallbackDate;
+  const date = parseDateLocal(source);
+  while (isWeekendDate(date)) {
+    date.setDate(date.getDate() + step);
+  }
+  return formatDateLocal(date);
+}
+
+function shiftWeekdayIsoDate(isoDate, direction = 1, stepCount = 1) {
+  const step = direction < 0 ? -1 : 1;
+  const count = Math.max(1, Math.floor(num(stepCount)) || 1);
+  const date = parseDateLocal(normalizeWeekdayIsoDate(isoDate, { direction: step }));
+  let remaining = count;
+  while (remaining > 0) {
+    date.setDate(date.getDate() + step);
+    if (!isWeekendDate(date)) remaining -= 1;
+  }
+  return formatDateLocal(date);
+}
+
+function isOperationalDate(isoDate) {
+  return isIsoDateValue(isoDate) && !isWeekendIsoDate(isoDate);
+}
+
 function todayISO() {
   return formatDateLocal(new Date());
 }
@@ -2436,7 +2491,7 @@ function shiftPresenceByDate(line) {
   const presenceByDate = {};
   (line?.shiftRows || []).forEach((row) => {
     const isoDate = String(row?.date || "");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(isoDate)) return;
+    if (!isOperationalDate(isoDate)) return;
     const shiftValue = String(row?.shift || "");
     if (!presenceByDate[isoDate]) presenceByDate[isoDate] = { day: false, night: false };
     if (shiftValue === "Day") presenceByDate[isoDate].day = true;
@@ -2459,7 +2514,7 @@ function lineShiftTrackerWeeksForWidth(widthPx) {
 
 function lineShiftTrackerCells(line, { anchorIsoDate = todayISO(), weeks = LINE_SHIFT_TRACKER_DEFAULT_WEEKS } = {}) {
   const safeWeeks = Math.max(LINE_SHIFT_TRACKER_MIN_WEEKS, Math.min(LINE_SHIFT_TRACKER_MAX_WEEKS, Math.floor(num(weeks)) || LINE_SHIFT_TRACKER_DEFAULT_WEEKS));
-  const anchorDate = parseDateLocal(anchorIsoDate || todayISO());
+  const anchorDate = parseDateLocal(normalizeWeekdayIsoDate(anchorIsoDate || todayISO(), { direction: -1 }));
   const anchor = new Date(anchorDate.getFullYear(), anchorDate.getMonth(), anchorDate.getDate());
   const currentWeekStart = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - anchor.getDay());
   const start = new Date(currentWeekStart.getFullYear(), currentWeekStart.getMonth(), currentWeekStart.getDate() - (safeWeeks - 1) * 7);
@@ -2468,6 +2523,10 @@ function lineShiftTrackerCells(line, { anchorIsoDate = todayISO(), weeks = LINE_
   for (let index = 0; index < safeWeeks * 7; index += 1) {
     const date = new Date(start.getFullYear(), start.getMonth(), start.getDate() + index);
     if (date > anchor) {
+      cells.push({ isPad: true });
+      continue;
+    }
+    if (isWeekendDate(date)) {
       cells.push({ isPad: true });
       continue;
     }
@@ -2560,9 +2619,11 @@ function lineDowntimeReasonCategory(row) {
 }
 
 function lineTileLiveSnapshot(line, now = new Date()) {
-  const hasOpenShift = (line?.shiftRows || []).some((row) => isPendingShiftLogRow(row));
-  const hasOpenRun = (line?.runRows || []).some((row) => isPendingRunLogRow(row));
-  const openDowntimeRows = (line?.downtimeRows || []).filter((row) => isPendingDowntimeLogRow(row));
+  const hasOpenShift = (line?.shiftRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingShiftLogRow(row));
+  const hasOpenRun = (line?.runRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingRunLogRow(row));
+  const openDowntimeRows = (line?.downtimeRows || []).filter(
+    (row) => isOperationalDate(String(row?.date || "")) && isPendingDowntimeLogRow(row)
+  );
   const hasOpenDowntime = openDowntimeRows.length > 0;
   const longestOpenDowntime = openDowntimeRows.reduce(
     (best, row) => {
@@ -2592,14 +2653,14 @@ function lineTileLiveSnapshot(line, now = new Date()) {
 
 function lineHasMovingFlow(line) {
   if (!line) return false;
-  const hasOpenRun = (line?.runRows || []).some((row) => isPendingRunLogRow(row));
+  const hasOpenRun = (line?.runRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingRunLogRow(row));
   if (!hasOpenRun) return false;
-  const hasOpenDowntime = (line?.downtimeRows || []).some((row) => isPendingDowntimeLogRow(row));
+  const hasOpenDowntime = (line?.downtimeRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingDowntimeLogRow(row));
   return !hasOpenDowntime;
 }
 
 function latestOpenRunLogRow(line) {
-  const openRunRows = (line?.runRows || []).filter((row) => isPendingRunLogRow(row));
+  const openRunRows = (line?.runRows || []).filter((row) => isOperationalDate(String(row?.date || "")) && isPendingRunLogRow(row));
   if (!openRunRows.length) return null;
   return openRunRows
     .slice()
@@ -3371,7 +3432,7 @@ function resolveTimedLogShiftLabel(row, line, startField, finishField) {
 }
 
 function rowMatchesDateShift(row, date, shift, { line = null, startField = "", finishField = "" } = {}) {
-  if (!row || row.date !== date) return false;
+  if (!row || row.date !== date || !isOperationalDate(date)) return false;
   if (isFullDayShift(shift)) return true;
   const requestedShift = shift === "Night" ? "Night" : "Day";
   const explicitAssignedShift = normalizeLogAssignableShift(row?.assignedShift || row?.shift);
@@ -3499,6 +3560,7 @@ function inferShiftForLog(line, date, timeValue, fallbackShift = "Day") {
 }
 
 function selectedShiftRowsByDate(rows, date, shift, { line = null } = {}) {
+  if (!isOperationalDate(date)) return [];
   return (rows || []).filter((row) => {
     if (row && Object.prototype.hasOwnProperty.call(row, "productionStartTime") && Object.prototype.hasOwnProperty.call(row, "finishTime")) {
       return rowMatchesDateShift(row, date, shift, { line, startField: "productionStartTime", finishField: "finishTime" });
@@ -3511,7 +3573,7 @@ function selectedShiftRowsByDate(rows, date, shift, { line = null } = {}) {
 }
 
 function rowIsValidDateShift(date, shift) {
-  return /^\d{4}-\d{2}-\d{2}$/.test(String(date || "")) && SHIFT_OPTIONS.includes(String(shift || ""));
+  return isOperationalDate(date) && SHIFT_OPTIONS.includes(String(shift || ""));
 }
 
 function normalizeLogAssignableShift(value) {
@@ -4897,7 +4959,7 @@ function sampleDataSet(lineModel = state) {
 function loadSampleDataIntoLine(line) {
   if (!line) return false;
   const sample = sampleDataSet(line);
-  line.selectedDate = sample.selectedDate;
+  line.selectedDate = normalizeWeekdayIsoDate(sample.selectedDate, { direction: -1 });
   line.selectedShift = sample.selectedShift;
   line.trendGranularity = sample.trendGranularity;
   line.trendMonth = sample.trendMonth;
@@ -4989,13 +5051,17 @@ function computeRunRow(row, nonProductionIntervalsByDate) {
 }
 
 function derivedData() {
-  const downtimeRows = state.downtimeRows
+  const operationalDowntimeRows = state.downtimeRows.filter((row) => isOperationalDate(String(row?.date || "")));
+  const operationalShiftRows = state.shiftRows.filter((row) => isOperationalDate(String(row?.date || "")));
+  const operationalBreakRows = (state.breakRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
+  const operationalRunRows = state.runRows.filter((row) => isOperationalDate(String(row?.date || "")));
+  const downtimeRows = operationalDowntimeRows
     .map(computeDowntimeRow)
     .map((row) => decorateTimedLogShift(row, state, "downtimeStart", "downtimeFinish"));
-  const shiftRows = state.shiftRows.map(computeShiftRow);
-  const breakRows = (state.breakRows || []).map(computeBreakRow);
+  const shiftRows = operationalShiftRows.map(computeShiftRow);
+  const breakRows = operationalBreakRows.map(computeBreakRow);
   const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
-  const runRows = state.runRows
+  const runRows = operationalRunRows
     .map((row) => decorateTimedLogShift(row, state, "productionStartTime", "finishTime"))
     .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
   return { shiftRows, breakRows, runRows, downtimeRows };
@@ -6004,7 +6070,8 @@ function bindHome() {
   window.addEventListener("resize", scheduleLineShiftTrackerResizeRender);
 
   dashboardDate.addEventListener("change", () => {
-    appState.dashboardDate = dashboardDate.value || todayISO();
+    appState.dashboardDate = normalizeWeekdayIsoDate(dashboardDate.value || appState.dashboardDate || todayISO(), { direction: -1 });
+    dashboardDate.value = appState.dashboardDate;
     saveState();
     renderHome();
   });
@@ -6198,6 +6265,14 @@ function bindHome() {
       updateSupervisorProgressButtonLabels();
     });
   });
+  ["superShiftDate", "superRunDate", "superDownDate"].forEach((id) => {
+    const dateInput = document.getElementById(id);
+    if (!dateInput) return;
+    dateInput.addEventListener("change", () => {
+      if (!dateInput.value) return;
+      dateInput.value = normalizeWeekdayIsoDate(dateInput.value, { direction: -1 });
+    });
+  });
 
   document.querySelectorAll("[data-supervisor-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -6233,7 +6308,13 @@ function bindHome() {
 
   svDateInputs.forEach((svDateInput) => {
     svDateInput.addEventListener("change", () => {
-      appState.supervisorSelectedDate = svDateInput.value || todayISO();
+      appState.supervisorSelectedDate = normalizeWeekdayIsoDate(
+        svDateInput.value || appState.supervisorSelectedDate || todayISO(),
+        { direction: -1 }
+      );
+      svDateInputs.forEach((input) => {
+        input.value = appState.supervisorSelectedDate;
+      });
       saveState();
       renderHome();
     });
@@ -6259,9 +6340,7 @@ function bindHome() {
 
   svPrevBtns.forEach((svPrevBtn) => {
     svPrevBtn.addEventListener("click", () => {
-      const dt = parseDateLocal(appState.supervisorSelectedDate || todayISO());
-      dt.setDate(dt.getDate() - 1);
-      appState.supervisorSelectedDate = formatDateLocal(dt);
+      appState.supervisorSelectedDate = shiftWeekdayIsoDate(appState.supervisorSelectedDate || todayISO(), -1);
       saveState();
       renderHome();
     });
@@ -6269,9 +6348,7 @@ function bindHome() {
 
   svNextBtns.forEach((svNextBtn) => {
     svNextBtn.addEventListener("click", () => {
-      const dt = parseDateLocal(appState.supervisorSelectedDate || todayISO());
-      dt.setDate(dt.getDate() + 1);
-      appState.supervisorSelectedDate = formatDateLocal(dt);
+      appState.supervisorSelectedDate = shiftWeekdayIsoDate(appState.supervisorSelectedDate || todayISO(), 1);
       saveState();
       renderHome();
     });
@@ -7189,7 +7266,7 @@ function bindHome() {
       return;
     }
 
-    const date = document.getElementById("superShiftDate").value || todayISO();
+    const date = document.getElementById("superShiftDate").value || appState.supervisorSelectedDate || normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
     const shift = document.getElementById("superShiftShift").value || "Day";
     const startInput = document.getElementById("superShiftStart").value || "";
     const finishInput = document.getElementById("superShiftFinish").value || "";
@@ -7197,7 +7274,7 @@ function bindHome() {
     const notesInput = String(document.getElementById("superShiftNotes")?.value || "").trim();
 
     if (!rowIsValidDateShift(date, shift)) {
-      alert("Date/shift are invalid.");
+      alert("Date/shift are invalid. Weekend dates are excluded.");
       return;
     }
     if (!supervisorCanAccessShift(session, lineId, shift)) {
@@ -7647,15 +7724,15 @@ function bindHome() {
       return;
     }
 
-    const date = document.getElementById("superRunDate").value || todayISO();
+    const date = document.getElementById("superRunDate").value || appState.supervisorSelectedDate || normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
     const productInput = String(document.getElementById("superRunProduct").value || "").trim();
     const prodStartInput = String(document.getElementById("superRunProdStart").value || "").trim();
     const finishInput = String(document.getElementById("superRunFinish").value || "").trim();
     const unitsRaw = document.getElementById("superRunUnits").value;
     const notesInput = String(document.getElementById("superRunNotes")?.value || "").trim();
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
-      alert("Date is invalid.");
+    if (!isOperationalDate(date)) {
+      alert("Date is invalid. Weekend dates are excluded.");
       return;
     }
 
@@ -8212,7 +8289,7 @@ function bindHome() {
       return;
     }
 
-    const date = document.getElementById("superDownDate").value || todayISO();
+    const date = document.getElementById("superDownDate").value || appState.supervisorSelectedDate || normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
     const startInput = document.getElementById("superDownStart").value || "";
     const finishInput = document.getElementById("superDownFinish").value || "";
     const reasonCategoryInput = document.getElementById("superDownReasonCategory").value || "";
@@ -8220,8 +8297,8 @@ function bindHome() {
     const reasonNoteInput = String(document.getElementById("superDownReasonNote").value || "").trim();
     const notesInput = String(document.getElementById("superDownNotes")?.value || "").trim();
 
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
-      alert("Date is invalid.");
+    if (!isOperationalDate(date)) {
+      alert("Date is invalid. Weekend dates are excluded.");
       return;
     }
 
@@ -8946,8 +9023,10 @@ function bindVisualiserControls() {
     angle: 0
   });
 
+  const normalizedSelectedDate = normalizeWeekdayIsoDate(state?.selectedDate || todayISO(), { direction: -1 });
+  if (state) state.selectedDate = normalizedSelectedDate;
   dateInputs.forEach((dateInput) => {
-    dateInput.value = state?.selectedDate || todayISO();
+    dateInput.value = normalizedSelectedDate;
   });
   setShiftToggleUI();
   setLayoutEditButtonUI();
@@ -8955,7 +9034,7 @@ function bindVisualiserControls() {
   dateInputs.forEach((dateInput) => {
     dateInput.addEventListener("change", () => {
       if (!state) return;
-      state.selectedDate = dateInput.value || todayISO();
+      state.selectedDate = normalizeWeekdayIsoDate(dateInput.value || state.selectedDate || todayISO(), { direction: -1 });
       dateInputs.forEach((input) => {
         input.value = state.selectedDate;
       });
@@ -9467,14 +9546,7 @@ function bindLineTrendDetailModal() {
 
 function moveShift(direction) {
   if (!state) return;
-  const date = parseDateLocal(state.selectedDate || todayISO());
-
-  if (direction < 0) {
-    date.setDate(date.getDate() - 1);
-  } else {
-    date.setDate(date.getDate() + 1);
-  }
-  state.selectedDate = formatDateLocal(date);
+  state.selectedDate = shiftWeekdayIsoDate(state.selectedDate || todayISO(), direction < 0 ? -1 : 1);
 
   document.querySelectorAll("[data-manager-date]").forEach((input) => {
     input.value = state.selectedDate;
@@ -9485,7 +9557,7 @@ function moveShift(direction) {
 
 function moveLineTrendPeriod(direction) {
   if (!state) return;
-  const date = parseDateLocal(state.selectedDate || todayISO());
+  const date = parseDateLocal(normalizeWeekdayIsoDate(state.selectedDate || todayISO(), { direction: direction < 0 ? -1 : 1 }));
   const range = LINE_TREND_RANGES.includes(String(state.lineTrendRange || "").toLowerCase()) ? String(state.lineTrendRange).toLowerCase() : "day";
   if (range === "quarter") {
     date.setMonth(date.getMonth() + direction * 3);
@@ -9494,9 +9566,15 @@ function moveLineTrendPeriod(direction) {
   } else if (range === "week") {
     date.setDate(date.getDate() + direction * 7);
   } else {
-    date.setDate(date.getDate() + direction);
+    state.selectedDate = shiftWeekdayIsoDate(formatDateLocal(date), direction < 0 ? -1 : 1);
+    document.querySelectorAll("[data-manager-date]").forEach((input) => {
+      input.value = state.selectedDate;
+    });
+    saveState();
+    renderAll();
+    return;
   }
-  state.selectedDate = formatDateLocal(date);
+  state.selectedDate = normalizeWeekdayIsoDate(formatDateLocal(date), { direction: direction < 0 ? -1 : 1 });
   document.querySelectorAll("[data-manager-date]").forEach((input) => {
     input.value = state.selectedDate;
   });
@@ -9539,6 +9617,18 @@ function bindForms() {
   const runCrewingPatternBtn = document.getElementById("runCrewingPatternBtn");
   const runCrewingPatternSummary = document.getElementById("runCrewingPatternSummary");
   const downtimeForm = document.getElementById("downtimeForm");
+  const managerLogDateInputs = [
+    shiftForm?.querySelector('[name="date"]'),
+    runForm?.querySelector('[name="date"]'),
+    downtimeForm?.querySelector('[name="date"]')
+  ].filter(Boolean);
+
+  managerLogDateInputs.forEach((input) => {
+    input.addEventListener("change", () => {
+      if (!input.value) return;
+      input.value = normalizeWeekdayIsoDate(input.value, { direction: -1 });
+    });
+  });
 
   if (runCrewingPatternBtn && runCrewingPatternInput) {
     runCrewingPatternBtn.addEventListener("click", () => {
@@ -9570,7 +9660,7 @@ function bindForms() {
     data.crewOnShift = Math.max(0, Math.floor(num(data.crewOnShift)));
     data.notes = String(data.notes || "").trim();
     if (!rowIsValidDateShift(data.date, data.shift)) {
-      alert("Date and shift are required.");
+      alert("Date and shift are required. Weekend dates are excluded.");
       return;
     }
     if (!strictTimeValid(data.startTime) || !strictTimeValid(data.finishTime)) {
@@ -9613,8 +9703,8 @@ function bindForms() {
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
     data.notes = String(data.notes || "").trim();
     data.product = catalogProductCanonicalName(String(data.product || "").trim());
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data.date || ""))) {
-      alert("Date is required.");
+    if (!isOperationalDate(data.date)) {
+      alert("Date is required. Weekend dates are excluded.");
       return;
     }
     if (!data.product) {
@@ -9680,8 +9770,8 @@ function bindForms() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(data.date || ""))) {
-      alert("Date is required.");
+    if (!isOperationalDate(data.date)) {
+      alert("Date is required. Weekend dates are excluded.");
       return;
     }
     if (!strictTimeValid(data.downtimeStart) || !strictTimeValid(data.downtimeFinish)) {
@@ -9912,7 +10002,7 @@ function bindForms() {
       const finishTime = inlineValue(rowNode, "finishTime");
       const notes = inlineValue(rowNode, "notes");
       if (!rowIsValidDateShift(date, shift)) {
-        alert("Date/shift are invalid.");
+        alert("Date/shift are invalid. Weekend dates are excluded.");
         return;
       }
       if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
@@ -9965,8 +10055,8 @@ function bindForms() {
       const finishTime = inlineValue(rowNode, "finishTime");
       const unitsProduced = Math.max(0, num(inlineValue(rowNode, "unitsProduced")));
       const notes = inlineValue(rowNode, "notes");
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
-        alert("Date is invalid.");
+      if (!isOperationalDate(date)) {
+        alert("Date is invalid. Weekend dates are excluded.");
         return;
       }
       if (!product) {
@@ -10058,8 +10148,8 @@ function bindForms() {
       const reasonNote = inlineValue(rowNode, "reasonNote");
       const notes = inlineValue(rowNode, "notes");
       let equipment = inlineValue(rowNode, "equipment");
-      if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ""))) {
-        alert("Date is invalid.");
+      if (!isOperationalDate(date)) {
+        alert("Date is invalid. Weekend dates are excluded.");
         return;
       }
       if (!assignedShift) {
@@ -11729,7 +11819,7 @@ function datesBetweenInclusive(startDate, endDate) {
   const cursor = new Date(startDate.getFullYear(), startDate.getMonth(), startDate.getDate());
   const end = new Date(endDate.getFullYear(), endDate.getMonth(), endDate.getDate());
   while (cursor <= end) {
-    dates.push(formatDateLocal(cursor));
+    if (!isWeekendDate(cursor)) dates.push(formatDateLocal(cursor));
     cursor.setDate(cursor.getDate() + 1);
   }
   return dates;
@@ -11737,7 +11827,7 @@ function datesBetweenInclusive(startDate, endDate) {
 
 function buildLineTrendBuckets(anchorIsoDate, range = "day") {
   const safeRange = LINE_TREND_RANGES.includes(String(range || "").toLowerCase()) ? String(range).toLowerCase() : "day";
-  const anchor = parseDateLocal(anchorIsoDate || todayISO());
+  const anchor = parseDateLocal(normalizeWeekdayIsoDate(anchorIsoDate || todayISO(), { direction: -1 }));
   const buckets = [];
   const pushBucket = (start, end, label) => {
     const startIso = formatDateLocal(start);
@@ -11752,10 +11842,17 @@ function buildLineTrendBuckets(anchorIsoDate, range = "day") {
   };
 
   if (safeRange === "day") {
-    for (let offset = 13; offset >= 0; offset -= 1) {
-      const current = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - offset);
-      pushBucket(current, current, formatIsoDateLabel(formatDateLocal(current), { month: "short", day: "numeric" }));
+    const weekdays = [];
+    const cursor = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate());
+    while (weekdays.length < 14) {
+      if (!isWeekendDate(cursor)) {
+        weekdays.push(new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate()));
+      }
+      cursor.setDate(cursor.getDate() - 1);
     }
+    weekdays.reverse().forEach((current) => {
+      pushBucket(current, current, formatIsoDateLabel(formatDateLocal(current), { month: "short", day: "numeric" }));
+    });
     return buckets;
   }
 
@@ -13324,13 +13421,14 @@ function renderHome() {
   const statSupervisors = document.getElementById("statSupervisors");
   const statShiftRecords = document.getElementById("statShiftRecords");
   const statRunRecords = document.getElementById("statRunRecords");
-  dashboardDateInput.value = appState.dashboardDate || todayISO();
+  appState.dashboardDate = normalizeWeekdayIsoDate(appState.dashboardDate || todayISO(), { direction: -1 });
+  dashboardDateInput.value = appState.dashboardDate;
   dashboardShiftButtons.forEach((btn) => {
     const active = btn.dataset.dashShift === (appState.dashboardShift || "Day");
     btn.classList.toggle("active", active);
     btn.setAttribute("aria-pressed", String(active));
   });
-  const dashboardRows = lineList.map((line) => computeLineMetrics(line, appState.dashboardDate || todayISO(), appState.dashboardShift || "Day"));
+  const dashboardRows = lineList.map((line) => computeLineMetrics(line, appState.dashboardDate, appState.dashboardShift || "Day"));
   renderTable("dashboardTable", DASHBOARD_COLUMNS, dashboardRows.map((row) => ({
     lineName: row.lineName,
     date: row.date,
@@ -13377,8 +13475,18 @@ function renderHome() {
   applyLineTileLiveFeedback();
   if (statTotalLines) statTotalLines.textContent = formatNum(lineList.length, 0);
   if (statSupervisors) statSupervisors.textContent = formatNum((appState.supervisors || []).length, 0);
-  if (statShiftRecords) statShiftRecords.textContent = formatNum(lineList.reduce((sum, line) => sum + (line.shiftRows?.length || 0), 0), 0);
-  if (statRunRecords) statRunRecords.textContent = formatNum(lineList.reduce((sum, line) => sum + (line.runRows?.length || 0), 0), 0);
+  if (statShiftRecords) {
+    statShiftRecords.textContent = formatNum(
+      lineList.reduce((sum, line) => sum + (line.shiftRows || []).filter((row) => isOperationalDate(String(row?.date || ""))).length, 0),
+      0
+    );
+  }
+  if (statRunRecords) {
+    statRunRecords.textContent = formatNum(
+      lineList.reduce((sum, line) => sum + (line.runRows || []).filter((row) => isOperationalDate(String(row?.date || ""))).length, 0),
+      0
+    );
+  }
 
   if (!isSupervisor) {
     if (homeSidebar) homeSidebar.classList.remove("open");
@@ -13650,7 +13758,7 @@ function renderHome() {
   }
   const entryAllowedShifts = expandedSupervisorShiftAccess(assignedLineShiftMap[appState.supervisorSelectedLineId]);
   const visualAllowedShifts = SHIFT_OPTIONS.slice();
-  if (!appState.supervisorSelectedDate) appState.supervisorSelectedDate = todayISO();
+  appState.supervisorSelectedDate = normalizeWeekdayIsoDate(appState.supervisorSelectedDate || todayISO(), { direction: -1 });
   if (!visualAllowedShifts.includes(appState.supervisorSelectedShift)) {
     appState.supervisorSelectedShift = visualAllowedShifts.includes("Full Day") ? "Full Day" : visualAllowedShifts[0] || "Day";
   }
@@ -13732,9 +13840,9 @@ function renderHome() {
   renderSupervisorVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate, appState.supervisorSelectedShift);
   renderSupervisorDayVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate);
 
-  if (!shiftDateInput.value) shiftDateInput.value = todayISO();
-  if (!runDateInput.value) runDateInput.value = todayISO();
-  if (!downDateInput.value) downDateInput.value = todayISO();
+  if (!shiftDateInput.value) shiftDateInput.value = appState.supervisorSelectedDate;
+  if (!runDateInput.value) runDateInput.value = appState.supervisorSelectedDate;
+  if (!downDateInput.value) downDateInput.value = appState.supervisorSelectedDate;
 
   const pickLatest = (rows = []) =>
     rows.reduce((latest, row) => {
@@ -14023,7 +14131,7 @@ function renderHome() {
       if (!line) return [];
       if (activeTab === "superRun") {
         return (line.runRows || [])
-          .filter((row) => row.submittedAt && supervisorOwnsPendingLogRow(row, session))
+          .filter((row) => row.submittedAt && isOperationalDate(String(row?.date || "")) && supervisorOwnsPendingLogRow(row, session))
           .map((row) => ({
             lineName: line.name,
             date: row.date,
@@ -14036,7 +14144,7 @@ function renderHome() {
       }
       if (activeTab === "superDown") {
         return (line.downtimeRows || [])
-          .filter((row) => row.submittedAt && supervisorOwnsPendingLogRow(row, session))
+          .filter((row) => row.submittedAt && isOperationalDate(String(row?.date || "")) && supervisorOwnsPendingLogRow(row, session))
           .map((row) => ({
             lineName: line.name,
             date: row.date,
@@ -14048,7 +14156,7 @@ function renderHome() {
           }));
       }
       return (line.shiftRows || [])
-        .filter((row) => row.submittedAt && supervisorOwnsPendingLogRow(row, session))
+        .filter((row) => row.submittedAt && isOperationalDate(String(row?.date || "")) && supervisorOwnsPendingLogRow(row, session))
         .map((row) => ({
           lineName: line.name,
           date: row.date,
@@ -14113,6 +14221,13 @@ function renderHome() {
 
 function renderAll() {
   enforceAppVariantState();
+  const baselineDate = normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
+  appState.dashboardDate = normalizeWeekdayIsoDate(appState.dashboardDate || baselineDate, { direction: -1 });
+  appState.supervisorSelectedDate = normalizeWeekdayIsoDate(appState.supervisorSelectedDate || baselineDate, { direction: -1 });
+  Object.values(appState.lines || {}).forEach((line) => {
+    if (!line) return;
+    line.selectedDate = normalizeWeekdayIsoDate(line.selectedDate || baselineDate, { direction: -1 });
+  });
   const managerSessionActive = Boolean(managerBackendSession.backendToken);
   if (appState.activeView === "line" && (appState.appMode !== "manager" || !managerSessionActive)) {
     appState.activeView = "home";
