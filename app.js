@@ -72,7 +72,8 @@ const DOWNTIME_REASON_PRESETS = {
   "Donor Meat": ["Stock Out", "Late Delivery", "Quality Hold", "Temperature Hold"],
   People: ["Understaffed", "Training", "Handover Delay", "Absence"],
   Materials: ["Film Shortage", "Label Shortage", "Tray Shortage", "Marinade Shortage", "Skewer shortage"],
-  Other: ["Cleaning", "QA Hold", "Power", "Unplanned Stop"]
+  Other: ["Cleaning", "QA Hold", "Power", "Unplanned Stop"],
+  Break: ["Meal Break", "Tea Break", "Crew Changeover", "Other Break"]
 };
 const DEFAULT_SUPERVISORS = [
   { id: "sup-1", name: "Supervisor", username: "supervisor", password: "supervisor", mode: "all", shifts: ["Day", "Night"] },
@@ -1351,6 +1352,34 @@ function stageTotalMaxThroughputForLine(line, stageId, shift) {
   return stageMaxThroughputForLine(line, stageId) * stageCrewForShiftForLine(line, stageId, shift);
 }
 
+function resolveLineBottleneckStage(line, stages, shift, capacityForStage) {
+  const stageList = Array.isArray(stages) ? stages : [];
+  const candidates = stageList
+    .map((stage, index) => ({
+      stage,
+      index,
+      capacity: Math.max(0, num(typeof capacityForStage === "function" ? capacityForStage(stage.id, shift) : 0))
+    }))
+    .filter((entry) => entry.capacity > 0 && isCrewedStage(entry.stage));
+
+  if (!candidates.length) return null;
+
+  const explicitId = String(line?.bottleneckStageId || "").trim();
+  if (explicitId) {
+    const explicit = candidates.find((entry) => entry.stage.id === explicitId);
+    if (explicit) return explicit;
+  }
+
+  const proseal = candidates.find((entry) => {
+    const name = String(entry.stage?.name || "").toLowerCase();
+    const matches = Array.isArray(entry.stage?.match) ? entry.stage.match.map((token) => String(token || "").toLowerCase()) : [];
+    return entry.stage.id === "s10" || name.includes("proseal") || matches.includes("proseal");
+  });
+  if (proseal) return proseal;
+
+  return candidates.reduce((best, entry) => (entry.capacity < best.capacity ? entry : best), candidates[0]);
+}
+
 function isCrewedStage(stage) {
   if (!stage) return false;
   const kind = String(stage.kind || "").toLowerCase();
@@ -1555,16 +1584,17 @@ function derivedDataForLine(line) {
   const operationalShiftRows = (line?.shiftRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
   const operationalBreakRows = (line?.breakRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
   const operationalRunRows = (line?.runRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
-  const downtimeRows = operationalDowntimeRows
+  const computedDowntimeRows = operationalDowntimeRows
     .map(computeDowntimeRow)
     .map((row) => decorateTimedLogShift(row, line, "downtimeStart", "downtimeFinish"));
+  const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows);
   const shiftRows = operationalShiftRows.map(computeShiftRow);
-  const breakRows = operationalBreakRows.map(computeBreakRow);
+  const breakRows = [...operationalBreakRows.map(computeBreakRow), ...breakRowsFromDowntime.map(computeBreakRow)];
   const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
   const runRows = operationalRunRows
     .map((row) => decorateTimedLogShift(row, line, "productionStartTime", "finishTime"))
     .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
-  return { shiftRows, breakRows, runRows, downtimeRows };
+  return { shiftRows, breakRows, runRows, downtimeRows, downtimeRowsLogged };
 }
 
 function computeLineMetrics(line, date, shift) {
@@ -1603,27 +1633,23 @@ function computeLineMetrics(line, date, shift) {
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
+  const bottleneck = resolveLineBottleneckStage(line, stages, shift, (stageId, selectedShift) =>
+    stageTotalMaxThroughputForLine(line, stageId, selectedShift)
+  );
   let bottleneckStageName = "-";
-  let bottleneckUtil = -1;
-  let bottleneckUtilGross = -1;
-
-  stages.forEach((stage, index) => {
+  let bottleneckUtil = 0;
+  let bottleneckUtilGross = 0;
+  if (bottleneck) {
     const stageDowntime = selectedDownRows
-      .filter((row) => matchesStage(stage, row.equipment))
+      .filter((row) => matchesStage(bottleneck.stage, row.equipment))
       .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
-    const totalMax = stageTotalMaxThroughputForLine(line, stage.id, shift);
-    const utilisation = totalMax > 0 ? (stageRate / totalMax) * 100 : 0;
-    const grossUtilisation = totalMax > 0 ? (netRunRate / totalMax) * 100 : 0;
-    if (utilisation > bottleneckUtil) {
-      bottleneckUtil = utilisation;
-      bottleneckStageName = stageDisplayName(stage, index);
-    }
-    if (grossUtilisation > bottleneckUtilGross) {
-      bottleneckUtilGross = grossUtilisation;
-    }
-  });
+    const totalMax = Math.max(0, num(bottleneck.capacity));
+    bottleneckUtil = totalMax > 0 ? (stageRate / totalMax) * 100 : 0;
+    bottleneckUtilGross = totalMax > 0 ? (netRunRate / totalMax) * 100 : 0;
+    bottleneckStageName = stageDisplayName(bottleneck.stage, bottleneck.index);
+  }
 
   return {
     lineName: line?.name || "Line",
@@ -2612,17 +2638,14 @@ function minutesSinceRowStart(row, timeField, now = new Date()) {
 }
 
 function lineDowntimeReasonCategory(row) {
-  const explicitCategory = String(row?.reasonCategory || "").trim();
-  if (explicitCategory) return explicitCategory;
-  const parsed = parseDowntimeReasonParts(row?.reason, row?.equipment);
-  return String(parsed?.reasonCategory || "").trim();
+  return downtimeReasonCategoryFromRow(row);
 }
 
 function lineTileLiveSnapshot(line, now = new Date()) {
   const hasOpenShift = (line?.shiftRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingShiftLogRow(row));
   const hasOpenRun = (line?.runRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingRunLogRow(row));
   const openDowntimeRows = (line?.downtimeRows || []).filter(
-    (row) => isOperationalDate(String(row?.date || "")) && isPendingDowntimeLogRow(row)
+    (row) => isOperationalDate(String(row?.date || "")) && isPendingDowntimeLogRow(row) && !isDowntimeBreakRow(row)
   );
   const hasOpenDowntime = openDowntimeRows.length > 0;
   const longestOpenDowntime = openDowntimeRows.reduce(
@@ -2655,7 +2678,9 @@ function lineHasMovingFlow(line) {
   if (!line) return false;
   const hasOpenRun = (line?.runRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingRunLogRow(row));
   if (!hasOpenRun) return false;
-  const hasOpenDowntime = (line?.downtimeRows || []).some((row) => isOperationalDate(String(row?.date || "")) && isPendingDowntimeLogRow(row));
+  const hasOpenDowntime = (line?.downtimeRows || []).some(
+    (row) => isOperationalDate(String(row?.date || "")) && isPendingDowntimeLogRow(row) && !isDowntimeBreakRow(row)
+  );
   return !hasOpenDowntime;
 }
 
@@ -3015,7 +3040,7 @@ function liveEquipmentDowntimeByStage(line, stages = [], now = new Date()) {
     if (!isPendingDowntimeLogRow(row)) return false;
     const equipment = String(row?.equipment || "").trim();
     if (!equipment) return false;
-    const reasonCategory = String(row?.reasonCategory || "").trim();
+    const reasonCategory = downtimeReasonCategoryFromRow(row);
     if (reasonCategory && reasonCategory !== "Equipment") return false;
     return true;
   });
@@ -4716,6 +4741,21 @@ function parseDowntimeReasonParts(reasonText, equipment = "") {
   };
 }
 
+function downtimeReasonCategoryFromRow(row) {
+  const explicitCategory = String(row?.reasonCategory || "").trim();
+  if (explicitCategory) return explicitCategory;
+  const parsed = parseDowntimeReasonParts(row?.reason, row?.equipment);
+  return String(parsed?.reasonCategory || "").trim();
+}
+
+function isBreakReasonCategory(category) {
+  return String(category || "").trim().toLowerCase() === "break";
+}
+
+function isDowntimeBreakRow(row) {
+  return isBreakReasonCategory(downtimeReasonCategoryFromRow(row));
+}
+
 function shiftKey(date, shift) {
   return `${date}__${shift}`;
 }
@@ -5018,6 +5058,43 @@ function computeBreakRow(row) {
   return { ...row, breakMins: calc > 0 ? calc : fallback };
 }
 
+function deriveBreakRowFromDowntimeRow(row) {
+  const rowId = String(row?.id || "").trim();
+  const breakStart = String(row?.downtimeStart || "").trim();
+  const breakFinishRaw = String(row?.downtimeFinish || "").trim();
+  const isOpenDowntime = strictTimeValid(breakStart) && strictTimeValid(breakFinishRaw) && breakStart === breakFinishRaw;
+  const breakFinish = isOpenDowntime ? "" : breakFinishRaw;
+  const assignedShift = normalizeLogAssignableShift(row?.assignedShift || row?.shift);
+  const fallbackId = `${String(row?.date || "").trim()}-${breakStart || "start"}-${breakFinishRaw || "finish"}`;
+  return {
+    ...row,
+    id: `down-break-${rowId || fallbackId}`,
+    shift: assignedShift || String(row?.shift || ""),
+    assignedShift: assignedShift || String(row?.assignedShift || ""),
+    breakStart,
+    breakFinish,
+    breakMins: Math.max(0, num(row?.downtimeMins)),
+    isDerivedDowntimeBreak: true,
+    sourceDowntimeId: rowId
+  };
+}
+
+function splitDowntimeRowsForBreakViews(sourceRows = []) {
+  const downtimeRowsLogged = [];
+  const downtimeRows = [];
+  const breakRowsFromDowntime = [];
+  (sourceRows || []).forEach((row) => {
+    if (!row) return;
+    downtimeRowsLogged.push(row);
+    if (isDowntimeBreakRow(row)) {
+      breakRowsFromDowntime.push(deriveBreakRowFromDowntimeRow(row));
+      return;
+    }
+    downtimeRows.push(row);
+  });
+  return { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime };
+}
+
 function computeRunRow(row, nonProductionIntervalsByDate) {
   const grossFallback = num(row.grossProductionTime);
   const grossCalc = diffMinutes(row.productionStartTime, row.finishTime);
@@ -5055,16 +5132,17 @@ function derivedData() {
   const operationalShiftRows = state.shiftRows.filter((row) => isOperationalDate(String(row?.date || "")));
   const operationalBreakRows = (state.breakRows || []).filter((row) => isOperationalDate(String(row?.date || "")));
   const operationalRunRows = state.runRows.filter((row) => isOperationalDate(String(row?.date || "")));
-  const downtimeRows = operationalDowntimeRows
+  const computedDowntimeRows = operationalDowntimeRows
     .map(computeDowntimeRow)
     .map((row) => decorateTimedLogShift(row, state, "downtimeStart", "downtimeFinish"));
+  const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows);
   const shiftRows = operationalShiftRows.map(computeShiftRow);
-  const breakRows = operationalBreakRows.map(computeBreakRow);
+  const breakRows = [...operationalBreakRows.map(computeBreakRow), ...breakRowsFromDowntime.map(computeBreakRow)];
   const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
   const runRows = operationalRunRows
     .map((row) => decorateTimedLogShift(row, state, "productionStartTime", "finishTime"))
     .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
-  return { shiftRows, breakRows, runRows, downtimeRows };
+  return { shiftRows, breakRows, runRows, downtimeRows, downtimeRowsLogged };
 }
 
 function clearLineTrackingData(line) {
@@ -12574,9 +12652,12 @@ function renderVisualiser() {
   map.classList.toggle("flow-static", !isFlowMoving);
   const activeCrew = crewMapForLineShift(state, state.selectedShift, stages);
   const liveRunPattern = liveRunCrewingPatternForLine(state);
+  const selectedBottleneck = resolveLineBottleneckStage(state, stages, selectedShift, (stageId, selectedShiftValue) =>
+    stageTotalMaxThroughput(stageId, selectedShiftValue)
+  );
   let bottleneckCard = null;
-  let bottleneckUtilisation = -1;
-  let bottleneckGrossUtilisation = -1;
+  let bottleneckUtilisation = 0;
+  let bottleneckGrossUtilisation = 0;
   const guides = lineFlowGuidesForMap(stages, state.flowGuides);
   appendFlowGuidesToMap(map, guides, { editable: Boolean(state.visualEditMode) });
 
@@ -12607,12 +12688,11 @@ function renderVisualiser() {
     card.style.height = `${stage.h}%`;
     card.classList.toggle("compact", compact);
     card.classList.toggle("selected", stage.id === state.selectedStageId);
-    if (utilisation > bottleneckUtilisation) {
-      bottleneckUtilisation = utilisation;
+    const isSelectedBottleneck = Boolean(selectedBottleneck) && selectedBottleneck.stage.id === stage.id;
+    if (isSelectedBottleneck) {
+      bottleneckUtilisation = Math.max(0, utilisation);
+      bottleneckGrossUtilisation = Math.max(0, grossUtilisation);
       bottleneckCard = card;
-    }
-    if (grossUtilisation > bottleneckGrossUtilisation) {
-      bottleneckGrossUtilisation = grossUtilisation;
     }
     if (!state.visualEditMode) {
       card.addEventListener("click", () => {
@@ -12926,15 +13006,16 @@ function renderTrackingTables() {
   const derivedBreakContext = { breakRows: data.breakRows };
   const displayShiftRows = sortNewestFirst(data.shiftRows, "startTime").map((row) => {
     const rowBreakRows = breakRowsForShift(derivedBreakContext, row);
+    const editableBreakRows = rowBreakRows.filter((breakRow) => !breakRow?.isDerivedDowntimeBreak);
     const breakCount = Math.max(0, Math.floor(num(rowBreakRows.length)));
     const breakTimeMins = rowBreakRows.reduce((sum, breakRow) => sum + Math.max(0, num(breakRow.breakMins)), 0);
     const editing = isInlineEditing("shift", String(row.id || ""));
-    const hasOpenBreak = rowBreakRows.some((breakRow) => isPendingBreakLogRow(breakRow));
+    const hasOpenBreak = editableBreakRows.some((breakRow) => isPendingBreakLogRow(breakRow));
     const shiftPending = isPendingShiftLogRow(row);
     const pending = shiftPending || hasOpenBreak;
     const htmlFields = ["action"];
     if (editing) htmlFields.push("date", "shift", "crewOnShift", "startTime", "finishTime", "notes");
-    const breakEditorRowsHtml = rowBreakRows
+    const breakEditorRowsHtml = editableBreakRows
       .map(
         (breakRow, index) => `
           <div class="pending-break-editor-row" data-manager-break-editor-row data-break-id="${htmlEscape(breakRow.id || "")}" data-break-index="${index}">
@@ -13070,7 +13151,8 @@ function renderTrackingTables() {
     Action: "action"
   });
 
-  const displayDowntimeRows = sortNewestFirst(data.downtimeRows, "downtimeStart").map((row) => {
+  const downtimeRowsForTable = Array.isArray(data.downtimeRowsLogged) ? data.downtimeRowsLogged : data.downtimeRows;
+  const displayDowntimeRows = sortNewestFirst(downtimeRowsForTable, "downtimeStart").map((row) => {
     const editing = isInlineEditing("downtime", String(row.id || ""));
     const pending = isPendingDowntimeLogRow(row);
     const htmlFields = ["action"];
@@ -13188,9 +13270,12 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
+  const selectedBottleneck = resolveLineBottleneckStage(line, stages, selectedShift, (stageId, selectedShiftValue) =>
+    stageTotalMaxThroughputForLine(line, stageId, selectedShiftValue)
+  );
   let bottleneckCard = null;
-  let bottleneckUtil = -1;
-  let bottleneckUtilGross = -1;
+  let bottleneckUtil = 0;
+  let bottleneckUtilGross = 0;
   const activeCrew = crewMapForLineShift(line, selectedShift, stages);
   const liveRunPattern = liveRunCrewingPatternForLine(line);
 
@@ -13256,12 +13341,11 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
       );
     }
 
-    if (utilisation > bottleneckUtil) {
-      bottleneckUtil = utilisation;
+    const isSelectedBottleneck = Boolean(selectedBottleneck) && selectedBottleneck.stage.id === stage.id;
+    if (isSelectedBottleneck) {
+      bottleneckUtil = Math.max(0, utilisation);
+      bottleneckUtilGross = Math.max(0, grossUtilisation);
       bottleneckCard = card;
-    }
-    if (grossUtilisation > bottleneckUtilGross) {
-      bottleneckUtilGross = grossUtilisation;
     }
     map.append(card);
   });
