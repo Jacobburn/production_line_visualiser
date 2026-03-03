@@ -10678,44 +10678,233 @@ function bindDataControls() {
     try {
       const text = await file.text();
       const parsed = JSON.parse(text);
-      state.selectedDate = parsed.selectedDate || state.selectedDate;
-      state.selectedShift = parsed.selectedShift || state.selectedShift;
-      state.selectedStageId = parsed.selectedStageId || state.selectedStageId;
-      state.activeDataTab = parsed.activeDataTab || state.activeDataTab;
-      state.trendGranularity = parsed.trendGranularity || state.trendGranularity;
-      state.trendMonth = parsed.trendMonth || state.trendMonth;
-      state.lineTrendRange = LINE_TREND_RANGES.includes(String(parsed.lineTrendRange || "").toLowerCase())
-        ? String(parsed.lineTrendRange).toLowerCase()
-        : state.lineTrendRange;
-      state.crewsByShift = normalizeCrewByShift(parsed);
-      state.stageSettings = normalizeStageSettings(parsed);
       const importedShiftRows = Array.isArray(parsed.shiftRows) ? parsed.shiftRows : [];
       const importedBreakRows = Array.isArray(parsed.breakRows) ? parsed.breakRows : [];
       const importedRunRows = Array.isArray(parsed.runRows)
         ? parsed.runRows.map((row) => ({
             ...row,
             runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
-            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
-            shift: ""
+            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift)
           }))
         : [];
       const importedDowntimeRows = Array.isArray(parsed.downtimeRows)
         ? parsed.downtimeRows.map((row) => ({
             ...row,
-            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
-            shift: ""
+            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift)
           }))
         : [];
-      state.shiftRows = [...(Array.isArray(state.shiftRows) ? state.shiftRows : []), ...importedShiftRows];
-      state.breakRows = [...(Array.isArray(state.breakRows) ? state.breakRows : []), ...importedBreakRows];
-      state.runRows = [...(Array.isArray(state.runRows) ? state.runRows : []), ...importedRunRows];
-      state.downtimeRows = [...(Array.isArray(state.downtimeRows) ? state.downtimeRows : []), ...importedDowntimeRows];
-      ensureManagerLogRowIds(state);
-      addAudit(state, "IMPORT_JSON", "Line JSON imported");
+
+      if (!importedShiftRows.length && !importedBreakRows.length && !importedRunRows.length && !importedDowntimeRows.length) {
+        alert("No importable rows found in this JSON file.");
+        return;
+      }
+
+      const trimLogNotes = (value) => String(value || "").trim().slice(0, BACKEND_LOG_NOTES_MAX_LENGTH);
+      const clipDowntimeReason = (value) => String(value || "").trim().slice(0, BACKEND_DOWNTIME_REASON_MAX_LENGTH);
+      const isIsoDate = (value) => /^\d{4}-\d{2}-\d{2}$/.test(String(value || "").trim());
+
+      await ensureManagerBackendSession();
+      const backendLineId = await ensureBackendLineId(state.id, managerBackendSession);
+      if (!backendLineId) throw new Error("Line is not synced to server.");
+
+      const createdShiftIdBySourceId = new Map();
+      const createdShiftIdsByKey = new Map();
+      const breakShiftIndexByKey = new Map();
+      const counts = { shift: 0, break: 0, run: 0, downtime: 0 };
+      const skipped = { shift: 0, break: 0, run: 0, downtime: 0 };
+
+      for (const row of importedShiftRows) {
+        try {
+          const date = String(row?.date || "").trim();
+          const shift = String(row?.shift || "").trim();
+          const startTime = String(row?.startTime || "").trim();
+          const finishTime = String(row?.finishTime || "").trim();
+          if (!isIsoDate(date) || !SHIFT_OPTIONS.includes(shift) || !strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
+            skipped.shift += 1;
+            continue;
+          }
+          const crewOnShift = Math.max(0, Math.floor(num(row?.crewOnShift)));
+          const payload = {
+            lineId: state.id,
+            date,
+            shift,
+            crewOnShift,
+            startTime,
+            finishTime,
+            notes: trimLogNotes(row?.notes)
+          };
+          const saved = await syncManagerShiftLog(payload);
+          const savedId = String(saved?.id || "").trim();
+          if (!savedId || !UUID_RE.test(savedId)) {
+            skipped.shift += 1;
+            continue;
+          }
+          const sourceId = String(row?.id || "").trim();
+          if (sourceId) createdShiftIdBySourceId.set(sourceId, savedId);
+          const key = shiftKey(date, shift);
+          if (!createdShiftIdsByKey.has(key)) createdShiftIdsByKey.set(key, []);
+          createdShiftIdsByKey.get(key).push(savedId);
+          counts.shift += 1;
+        } catch (error) {
+          console.warn("Skipping imported shift row due to error:", error);
+          skipped.shift += 1;
+        }
+      }
+
+      for (const row of importedBreakRows) {
+        try {
+          const breakStart = String(row?.breakStart || "").trim();
+          if (!strictTimeValid(breakStart)) {
+            skipped.break += 1;
+            continue;
+          }
+
+          let targetShiftId = "";
+          const sourceShiftLogId = String(row?.shiftLogId || "").trim();
+          if (sourceShiftLogId && createdShiftIdBySourceId.has(sourceShiftLogId)) {
+            targetShiftId = createdShiftIdBySourceId.get(sourceShiftLogId) || "";
+          } else if (UUID_RE.test(sourceShiftLogId)) {
+            targetShiftId = sourceShiftLogId;
+          } else {
+            const date = String(row?.date || "").trim();
+            const shift = String(row?.shift || "").trim();
+            const key = shiftKey(date, shift);
+            const candidates = createdShiftIdsByKey.get(key) || [];
+            const nextIndex = Math.max(0, Math.floor(num(breakShiftIndexByKey.get(key))));
+            if (candidates[nextIndex]) {
+              targetShiftId = candidates[nextIndex];
+              breakShiftIndexByKey.set(key, nextIndex + 1);
+            } else if (candidates.length) {
+              targetShiftId = candidates[candidates.length - 1];
+            }
+          }
+
+          if (!targetShiftId) {
+            skipped.break += 1;
+            continue;
+          }
+
+          const breakFinish = strictTimeValid(String(row?.breakFinish || "").trim())
+            ? String(row.breakFinish).trim()
+            : null;
+          await startManagerShiftBreak(targetShiftId, breakStart, breakFinish);
+          counts.break += 1;
+        } catch (error) {
+          console.warn("Skipping imported break row due to error:", error);
+          skipped.break += 1;
+        }
+      }
+
+      for (const row of importedRunRows) {
+        try {
+          const date = String(row?.date || "").trim();
+          const product = String(row?.product || "").trim();
+          const productionStartTime = String(row?.productionStartTime || "").trim();
+          if (!isIsoDate(date) || !product || !strictTimeValid(productionStartTime)) {
+            skipped.run += 1;
+            continue;
+          }
+          const explicitShift = String(row?.assignedShift || row?.shift || "").trim();
+          const inferredShift = SHIFT_OPTIONS.includes(explicitShift)
+            ? explicitShift
+            : inferShiftForLog(
+              state,
+              date,
+              productionStartTime,
+              normalizeLogAssignableShift(explicitShift) || state.selectedShift || "Day"
+            );
+          if (!SHIFT_OPTIONS.includes(inferredShift)) {
+            skipped.run += 1;
+            continue;
+          }
+          const finishTime = strictTimeValid(String(row?.finishTime || "").trim()) ? String(row.finishTime).trim() : "";
+          const setUpStartTime = strictTimeValid(String(row?.setUpStartTime || "").trim()) ? String(row.setUpStartTime).trim() : "";
+          const runCrewingPattern = normalizeRunCrewingPattern(row?.runCrewingPattern, state, inferredShift, { fallbackToIdeal: false });
+          const payload = {
+            lineId: state.id,
+            date,
+            shift: inferredShift,
+            product,
+            setUpStartTime,
+            productionStartTime,
+            finishTime,
+            unitsProduced: Math.max(0, num(row?.unitsProduced)),
+            notes: trimLogNotes(row?.notes),
+            runCrewingPattern
+          };
+          await syncManagerRunLog(payload);
+          counts.run += 1;
+        } catch (error) {
+          console.warn("Skipping imported run row due to error:", error);
+          skipped.run += 1;
+        }
+      }
+
+      for (const row of importedDowntimeRows) {
+        try {
+          const date = String(row?.date || "").trim();
+          const downtimeStart = String(row?.downtimeStart || "").trim();
+          const downtimeFinish = String(row?.downtimeFinish || "").trim();
+          if (!isIsoDate(date) || !strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
+            skipped.downtime += 1;
+            continue;
+          }
+          const explicitShift = String(row?.assignedShift || row?.shift || "").trim();
+          const inferredShift = SHIFT_OPTIONS.includes(explicitShift)
+            ? explicitShift
+            : inferShiftForLog(
+              state,
+              date,
+              downtimeStart,
+              normalizeLogAssignableShift(explicitShift) || state.selectedShift || "Day"
+            );
+          if (!SHIFT_OPTIONS.includes(inferredShift)) {
+            skipped.downtime += 1;
+            continue;
+          }
+          const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
+          const reasonCategory = String(row?.reasonCategory || parsedReason.reasonCategory || "").trim();
+          const reasonDetail = String(row?.reasonDetail || parsedReason.reasonDetail || "").trim();
+          const reasonNote = String((row?.reasonNote ?? parsedReason.reasonNote) || "").trim();
+          const reasonText = clipDowntimeReason(
+            String(row?.reason || "").trim() || buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote) || "Imported downtime"
+          );
+          if (!reasonText) {
+            skipped.downtime += 1;
+            continue;
+          }
+          const equipment = String(row?.equipment || "").trim() || (reasonCategory === "Equipment" ? reasonDetail : "");
+          const payload = {
+            lineId: state.id,
+            date,
+            shift: inferredShift,
+            downtimeStart,
+            downtimeFinish,
+            equipment,
+            reason: reasonText,
+            notes: trimLogNotes(row?.notes)
+          };
+          await syncManagerDowntimeLog(payload);
+          counts.downtime += 1;
+        } catch (error) {
+          console.warn("Skipping imported downtime row due to error:", error);
+          skipped.downtime += 1;
+        }
+      }
+
+      await refreshHostedState();
+      addAudit(
+        state,
+        "IMPORT_JSON",
+        `Line JSON imported to DB (${counts.shift} shifts, ${counts.break} breaks, ${counts.run} runs, ${counts.downtime} downtime; skipped ${skipped.shift + skipped.break + skipped.run + skipped.downtime})`
+      );
       saveState();
       renderAll();
-    } catch {
-      alert("Invalid JSON file.");
+      alert(
+        `Import complete.\nSaved to DB: ${counts.shift} shifts, ${counts.break} breaks, ${counts.run} runs, ${counts.downtime} downtime.\nSkipped: ${skipped.shift + skipped.break + skipped.run + skipped.downtime}.`
+      );
+    } catch (error) {
+      alert(`Could not import JSON.\n${error?.message || "Invalid JSON file."}`);
     }
 
     event.target.value = "";
