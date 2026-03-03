@@ -1428,6 +1428,13 @@ button {
   stroke-dasharray: 6 4;
 }
 
+.line-product-rate {
+  fill: none;
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
 .line-down-avg {
   fill: none;
   stroke: #a73838;
@@ -1474,6 +1481,11 @@ button {
 
 .dot-util {
   fill: var(--accent);
+}
+
+.dot-product-rate {
+  stroke: #ffffff;
+  stroke-width: 1.25;
 }
 
 .dot-rate {
@@ -1613,8 +1625,44 @@ button {
 
 .line-trend-svg .line-rate,
 .line-trend-svg .line-util,
+.line-trend-svg .line-product-rate,
 .line-trend-svg .line-down-avg {
   stroke-width: 2.7;
+}
+
+.line-trend-product-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.58rem;
+}
+
+.line-trend-product-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.32rem;
+  padding: 0.22rem 0.44rem;
+  border: 1px solid #d8e2ec;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #33475d;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.line-trend-product-legend-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  flex: 0 0 10px;
+}
+
+.line-trend-product-legend-name {
+  color: #243444;
+}
+
+.line-trend-product-legend-value {
+  color: #5f7288;
 }
 
 .line-trend-reasons {

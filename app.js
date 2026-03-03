@@ -11677,6 +11677,64 @@ function aggregateLineTrendPoints(line, buckets, shift) {
   });
 }
 
+function aggregateLineTrendProductSeries(line, buckets, shift) {
+  const data = derivedDataForLine(line || {});
+  const runRows = Array.isArray(data.runRows) ? data.runRows : [];
+  const bucketTotals = buckets.map(() => new Map());
+  const totalUnitsByProduct = new Map();
+
+  buckets.forEach((bucket, bucketIndex) => {
+    const productTotals = bucketTotals[bucketIndex];
+    bucket.dates.forEach((date) => {
+      selectedShiftRowsByDate(runRows, date, shift, { line }).forEach((row) => {
+        const weight = Math.max(0, timedLogShiftWeight(row, shift));
+        if (weight <= 0) return;
+        const rawProduct = String(row?.product || "").trim();
+        const productName = catalogProductCanonicalName(rawProduct, { lineId: line?.id }) || rawProduct || "Unspecified";
+        const entry = productTotals.get(productName) || { units: 0, netMins: 0 };
+        const weightedUnits = Math.max(0, num(row?.unitsProduced)) * weight;
+        const weightedNetMins = Math.max(0, num(row?.netProductionTime)) * weight;
+        entry.units += weightedUnits;
+        entry.netMins += weightedNetMins;
+        productTotals.set(productName, entry);
+        if (!totalUnitsByProduct.has(productName)) totalUnitsByProduct.set(productName, 0);
+        totalUnitsByProduct.set(productName, totalUnitsByProduct.get(productName) + weightedUnits);
+      });
+    });
+  });
+
+  const productNames = Array.from(totalUnitsByProduct.entries())
+    .sort((a, b) => {
+      const unitsDiff = num(b[1]) - num(a[1]);
+      if (Math.abs(unitsDiff) > 0.0001) return unitsDiff;
+      return a[0].localeCompare(b[0]);
+    })
+    .map(([name]) => name);
+
+  const series = productNames.map((name) => ({
+    name,
+    values: bucketTotals.map((totals) => {
+      const entry = totals.get(name);
+      if (!entry || num(entry.netMins) <= 0) return null;
+      return Math.max(0, num(entry.units) / num(entry.netMins));
+    })
+  }));
+
+  const maxRate = series.reduce(
+    (max, item) => Math.max(max, ...item.values.map((value) => (Number.isFinite(value) ? value : 0))),
+    0
+  );
+  return {
+    series,
+    maxRate: Math.max(1, maxRate)
+  };
+}
+
+function lineTrendSeriesColor(index) {
+  const palette = ["#1f4f8a", "#0f766e", "#a73838", "#8f4b08", "#6d28d9", "#0c4a6e", "#9f1239", "#166534", "#7c2d12", "#1e3a8a"];
+  return palette[index % palette.length];
+}
+
 function lineTrendTopDowntimeReasons(line, buckets, shift, maxItems = 5) {
   const dateSet = new Set(buckets.flatMap((bucket) => bucket.dates));
   const totals = new Map();
@@ -11699,49 +11757,85 @@ function lineTrendTopDowntimeReasons(line, buckets, shift, maxItems = 5) {
     .slice(0, maxItems);
 }
 
-function renderLineTrendUnitsChart(points) {
+function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate: 1 }) {
   const root = document.getElementById("lineTrendUnitsChart");
   if (!root) return;
   if (!points.length) {
     root.innerHTML = `<div class="empty-chart">No trend data available.</div>`;
     return;
   }
+  const series = Array.isArray(productTrend?.series) ? productTrend.series : [];
+  if (!series.length) {
+    root.innerHTML = `<div class="empty-chart">No product run data available in this time window.</div>`;
+    return;
+  }
 
   const width = 1280;
   const height = 430;
-  const pad = { top: 34, right: 110, bottom: 78, left: 76 };
+  const pad = { top: 34, right: 56, bottom: 78, left: 76 };
   const chartW = width - pad.left - pad.right;
   const chartH = height - pad.top - pad.bottom;
-  const maxUnits = Math.max(1, ...points.map((point) => point.units));
-  const avgUnits = Math.round(points.reduce((sum, point) => sum + point.units, 0) / points.length);
+  const maxRate = Math.max(1, num(productTrend?.maxRate));
   const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
   const x = (index) => pad.left + stepX * index;
-  const yUnits = (value) => pad.top + chartH - (Math.max(0, value) / maxUnits) * chartH;
+  const yRate = (value) => pad.top + chartH - (Math.max(0, value) / maxRate) * chartH;
 
-  const barWidth = Math.max(14, Math.min(36, stepX * 0.58));
-  const bars = points
-    .map((point, index) => {
-      const y = yUnits(point.units);
-      const h = pad.top + chartH - y;
-      return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(1, h)}" rx="3" class="bar-units"><title>${point.label}: ${formatNum(point.units, 0)} units</title></rect>`;
+  const ticks = [0, 0.25, 0.5, 0.75, 1]
+    .map((fraction) => roundToDecimals(maxRate * fraction, maxRate < 10 ? 2 : 1))
+    .map((tick) => {
+      const y = yRate(tick);
+      return `<g><line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/><text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${formatNum(
+        tick,
+        maxRate < 10 ? 2 : 1
+      )}</text></g>`;
     })
     .join("");
 
-  const averageY = yUnits(avgUnits);
-  const avgUnitsLabel = `Avg ${formatNum(avgUnits, 0)} units`;
-  const avgUnitsCalloutWidth = Math.max(128, avgUnitsLabel.length * 8 + 22);
-  const avgUnitsCalloutHeight = 28;
-  const avgUnitsCalloutX = pad.left + chartW - avgUnitsCalloutWidth - 10;
-  const avgUnitsCalloutY = Math.max(
-    pad.top + 6,
-    Math.min(averageY - avgUnitsCalloutHeight / 2, pad.top + chartH - avgUnitsCalloutHeight - 6)
-  );
+  const productLines = series
+    .map((item, seriesIndex) => {
+      const color = lineTrendSeriesColor(seriesIndex);
+      let drawing = false;
+      let path = "";
+      item.values.forEach((value, pointIndex) => {
+        if (!Number.isFinite(value)) {
+          drawing = false;
+          return;
+        }
+        path += `${drawing ? " L" : " M"}${x(pointIndex)},${yRate(value)}`;
+        drawing = true;
+      });
+      if (!path.trim()) return "";
+      return `<path d="${path.trim()}" class="line-product-rate" style="stroke:${color};"><title>${htmlEscape(item.name)}</title></path>`;
+    })
+    .join("");
 
-  const ticks = [0, 0.25, 0.5, 0.75, 1]
-    .map((fraction) => Math.round(maxUnits * fraction))
-    .map((tick) => {
-      const y = yUnits(tick);
-      return `<g><line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/><text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${tick}</text></g>`;
+  const productDots = series
+    .map((item, seriesIndex) => {
+      const color = lineTrendSeriesColor(seriesIndex);
+      return item.values
+        .map((value, pointIndex) => {
+          if (!Number.isFinite(value)) return "";
+          return `<circle cx="${x(pointIndex)}" cy="${yRate(value)}" r="4" class="dot-product-rate" style="fill:${color};">
+            <title>${htmlEscape(item.name)} | ${points[pointIndex]?.label || ""}: ${formatNum(value, 2)} trays/min</title>
+          </circle>`;
+        })
+        .join("");
+    })
+    .join("");
+
+  const legend = series
+    .map((item, seriesIndex) => {
+      const color = lineTrendSeriesColor(seriesIndex);
+      const latest = item.values
+        .slice()
+        .reverse()
+        .find((value) => Number.isFinite(value));
+      const latestLabel = Number.isFinite(latest) ? `${formatNum(latest, 2)} trays/min` : "No runs";
+      return `<span class="line-trend-product-legend-item">
+        <span class="line-trend-product-legend-swatch" style="background:${color};"></span>
+        <span class="line-trend-product-legend-name">${htmlEscape(item.name)}</span>
+        <span class="line-trend-product-legend-value">${htmlEscape(latestLabel)}</span>
+      </span>`;
     })
     .join("");
 
@@ -11754,26 +11848,17 @@ function renderLineTrendUnitsChart(points) {
     .join("");
 
   root.innerHTML = `
-    <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Line units trend with average line">
+    <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Product tray per minute trend by period">
       ${ticks}
       <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
       <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
-      ${bars}
-      <line x1="${pad.left}" y1="${averageY}" x2="${pad.left + chartW}" y2="${averageY}" class="line-rate"><title>Average units: ${formatNum(
-        avgUnits,
-        0
-      )}</title></line>
-      <g transform="translate(${avgUnitsCalloutX},${avgUnitsCalloutY})">
-        <rect width="${avgUnitsCalloutWidth}" height="${avgUnitsCalloutHeight}" rx="${avgUnitsCalloutHeight / 2}" class="trend-avg-callout-bg units" />
-        <text x="${avgUnitsCalloutWidth / 2}" y="${avgUnitsCalloutHeight / 2}" text-anchor="middle" dominant-baseline="middle" class="trend-avg-callout-text units">${htmlEscape(
-          avgUnitsLabel
-        )}</text>
-      </g>
+      ${productLines}
+      ${productDots}
       ${labels}
-      <text x="${pad.left}" y="${20}" class="legend units">Units (bars)</text>
-      <text x="${pad.left + 152}" y="${20}" class="legend rate">Average units (line)</text>
-      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Average ${formatNum(avgUnits, 0)} units</text>
+      <text x="${pad.left}" y="${20}" class="legend rate">Tray/min by product (line)</text>
+      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Scale max ${formatNum(maxRate, 2)} trays/min</text>
     </svg>
+    <div class="line-trend-product-legend">${legend}</div>
   `;
 }
 
@@ -11905,6 +11990,7 @@ function renderLineTrends() {
 
   const buckets = buildLineTrendBuckets(state.selectedDate || todayISO(), range);
   const points = aggregateLineTrendPoints(state, buckets, state.selectedShift || "Day");
+  const productTrend = aggregateLineTrendProductSeries(state, buckets, state.selectedShift || "Day");
   const current = points[points.length - 1] || { units: 0, downtime: 0, lineUtil: 0, netRunRate: 0 };
   const startIso = points[0]?.startIso || state.selectedDate || todayISO();
   const endIso = points[points.length - 1]?.endIso || state.selectedDate || todayISO();
@@ -11918,7 +12004,7 @@ function renderLineTrends() {
   setText("lineTrendKpiUtilisation", `${formatNum(current.lineUtil, 1)}%`);
   setText("lineTrendKpiRunRate", `${formatNum(current.netRunRate, 2)} u/min`);
 
-  renderLineTrendUnitsChart(points);
+  renderLineTrendUnitsChart(points, productTrend);
   renderLineTrendUtilDownChart(points);
   renderLineTrendReasons(lineTrendTopDowntimeReasons(state, buckets, state.selectedShift || "Day"));
 }
