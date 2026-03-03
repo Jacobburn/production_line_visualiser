@@ -1595,6 +1595,7 @@ function computeLineMetrics(line, date, shift) {
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   let bottleneckStageName = "-";
   let bottleneckUtil = -1;
+  let bottleneckUtilGross = -1;
 
   stages.forEach((stage, index) => {
     const stageDowntime = selectedDownRows
@@ -1604,9 +1605,13 @@ function computeLineMetrics(line, date, shift) {
     const stageRate = netRunRate * uptimeRatio;
     const totalMax = stageTotalMaxThroughputForLine(line, stage.id, shift);
     const utilisation = totalMax > 0 ? (stageRate / totalMax) * 100 : 0;
+    const grossUtilisation = totalMax > 0 ? (netRunRate / totalMax) * 100 : 0;
     if (utilisation > bottleneckUtil) {
       bottleneckUtil = utilisation;
       bottleneckStageName = stageDisplayName(stage, index);
+    }
+    if (grossUtilisation > bottleneckUtilGross) {
+      bottleneckUtilGross = grossUtilisation;
     }
   });
 
@@ -1617,6 +1622,7 @@ function computeLineMetrics(line, date, shift) {
     units,
     totalDowntime,
     lineUtil: Math.max(0, bottleneckUtil),
+    lineUtilGross: Math.max(0, bottleneckUtilGross),
     netRunRate,
     bottleneckStageName,
     crewOnShift,
@@ -11789,6 +11795,8 @@ function aggregateLineTrendPoints(line, buckets, shift) {
     let downtime = 0;
     let utilSum = 0;
     let utilCount = 0;
+    let utilGrossSum = 0;
+    let utilGrossCount = 0;
     let runRateSum = 0;
     let runRateCount = 0;
 
@@ -11800,6 +11808,11 @@ function aggregateLineTrendPoints(line, buckets, shift) {
       if (Number.isFinite(util)) {
         utilSum += util;
         utilCount += 1;
+      }
+      const utilGross = Math.max(0, num(daily.lineUtilGross));
+      if (Number.isFinite(utilGross)) {
+        utilGrossSum += utilGross;
+        utilGrossCount += 1;
       }
       const runRate = Math.max(0, num(daily.netRunRate));
       if (runRate > 0) {
@@ -11813,6 +11826,7 @@ function aggregateLineTrendPoints(line, buckets, shift) {
       units,
       downtime,
       lineUtil: utilCount > 0 ? utilSum / utilCount : 0,
+      lineUtilGross: utilGrossCount > 0 ? utilGrossSum / utilGrossCount : 0,
       netRunRate: runRateCount > 0 ? runRateSum / runRateCount : 0
     };
   });
@@ -12392,7 +12406,7 @@ function renderLineTrends() {
   if (!validLegendKeys.has(String(state.lineTrendLegendFocusKey || ""))) {
     state.lineTrendLegendFocusKey = "";
   }
-  const current = points[points.length - 1] || { units: 0, downtime: 0, lineUtil: 0, netRunRate: 0 };
+  const current = points[points.length - 1] || { units: 0, downtime: 0, lineUtil: 0, lineUtilGross: 0, netRunRate: 0 };
   const startIso = points[0]?.startIso || state.selectedDate || todayISO();
   const endIso = points[points.length - 1]?.endIso || state.selectedDate || todayISO();
   const rangeLabel = range === "day" ? "Daily" : range === "week" ? "Weekly" : range === "month" ? "Monthly" : "Quarterly";
@@ -12403,6 +12417,7 @@ function renderLineTrends() {
   setText("lineTrendKpiUnits", formatNum(current.units, 0));
   setText("lineTrendKpiDowntime", `${formatNum(current.downtime, 1)} min`);
   setText("lineTrendKpiUtilisation", `${formatNum(current.lineUtil, 1)}%`);
+  setText("lineTrendKpiUtilisationGross", `${formatNum(current.lineUtilGross, 1)}%`);
   setText("lineTrendKpiRunRate", `${formatNum(current.netRunRate, 2)} u/min`);
 
   renderLineTrendUnitsChart(points, productTrend);
@@ -12464,6 +12479,7 @@ function renderVisualiser() {
   const liveRunPattern = liveRunCrewingPatternForLine(state);
   let bottleneckCard = null;
   let bottleneckUtilisation = -1;
+  let bottleneckGrossUtilisation = -1;
   const guides = lineFlowGuidesForMap(stages, state.flowGuides);
   appendFlowGuidesToMap(map, guides, { editable: Boolean(state.visualEditMode) });
 
@@ -12476,6 +12492,7 @@ function renderVisualiser() {
     const stageRate = netRunRate * uptimeRatio;
     const totalMaxThroughput = stageTotalMaxThroughput(stage.id, state.selectedShift);
     const utilisation = totalMaxThroughput > 0 ? (stageRate / totalMaxThroughput) * 100 : 0;
+    const grossUtilisation = totalMaxThroughput > 0 ? (netRunRate / totalMaxThroughput) * 100 : 0;
     const stageCrew = stageCrewCountForVisual(state, stage, activeCrew, liveRunPattern);
     const compact = stage.w * stage.h < 140;
     const status = statusClass(utilisation);
@@ -12496,6 +12513,9 @@ function renderVisualiser() {
     if (utilisation > bottleneckUtilisation) {
       bottleneckUtilisation = utilisation;
       bottleneckCard = card;
+    }
+    if (grossUtilisation > bottleneckGrossUtilisation) {
+      bottleneckGrossUtilisation = grossUtilisation;
     }
     if (!state.visualEditMode) {
       card.addEventListener("click", () => {
@@ -12540,9 +12560,13 @@ function renderVisualiser() {
   }
 
   const lineUtil = Math.max(0, bottleneckUtilisation);
+  const lineUtilGross = Math.max(0, bottleneckGrossUtilisation);
   const utilisationText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
+  const utilisationGrossText = `${formatNum(Math.max(lineUtilGross, 0), 1)}%`;
   setText("kpiUtilisation", utilisationText);
   setText("dayKpiUtilisation", utilisationText);
+  setText("kpiUtilisationGross", utilisationGrossText);
+  setText("dayKpiUtilisationGross", utilisationGrossText);
 }
 
 function stageDailyMetrics(stage, date, shift, data) {
@@ -13069,6 +13093,7 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   let bottleneckCard = null;
   let bottleneckUtil = -1;
+  let bottleneckUtilGross = -1;
   const activeCrew = crewMapForLineShift(line, selectedShift, stages);
   const liveRunPattern = liveRunCrewingPatternForLine(line);
 
@@ -13102,6 +13127,7 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
     const stageRate = netRunRate * uptimeRatio;
     const totalMax = stageTotalMaxThroughputForLine(line, stage.id, selectedShift);
     const utilisation = totalMax > 0 ? (stageRate / totalMax) * 100 : 0;
+    const grossUtilisation = totalMax > 0 ? (netRunRate / totalMax) * 100 : 0;
     const stageCrew = stageCrewCountForVisual(line, stage, activeCrew, liveRunPattern);
     const compact = stage.w * stage.h < 140;
     const status = statusClass(utilisation);
@@ -13137,6 +13163,9 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
       bottleneckUtil = utilisation;
       bottleneckCard = card;
     }
+    if (grossUtilisation > bottleneckUtilGross) {
+      bottleneckUtilGross = grossUtilisation;
+    }
     map.append(card);
   });
 
@@ -13144,9 +13173,13 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
     bottleneckCard.classList.add("bottleneck");
   }
   const lineUtil = Math.max(0, bottleneckUtil);
+  const lineUtilGross = Math.max(0, bottleneckUtilGross);
   const svUtilText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
+  const svUtilGrossText = `${formatNum(Math.max(lineUtilGross, 0), 1)}%`;
   setSvText("svKpiUtilisation", svUtilText);
   setSvText("svDayKpiUtilisation", svUtilText);
+  setSvText("svKpiUtilisationGross", svUtilGrossText);
+  setSvText("svDayKpiUtilisationGross", svUtilGrossText);
 }
 
 function renderHome() {
