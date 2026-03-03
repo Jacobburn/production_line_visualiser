@@ -1645,6 +1645,8 @@ button {
 }
 
 .line-trend-product-legend-item {
+  appearance: none;
+  -webkit-appearance: none;
   display: inline-flex;
   align-items: center;
   gap: 0.32rem;
@@ -1655,6 +1657,28 @@ button {
   color: #33475d;
   font-size: 0.75rem;
   font-weight: 600;
+  cursor: pointer;
+  transition: border-color 140ms ease, background-color 140ms ease, opacity 140ms ease, box-shadow 140ms ease;
+  font: inherit;
+}
+
+.line-trend-product-legend-item:hover {
+  border-color: #9eb3c8;
+}
+
+.line-trend-product-legend-item:focus-visible {
+  outline: 2px solid rgba(31, 79, 138, 0.45);
+  outline-offset: 1px;
+}
+
+.line-trend-product-legend-item.is-active {
+  border-color: #3a5f85;
+  background: #f0f6fc;
+  box-shadow: 0 0 0 1px rgba(58, 95, 133, 0.12);
+}
+
+.line-trend-product-legend-item.is-dimmed {
+  opacity: 0.42;
 }
 
 .line-trend-product-legend-swatch {

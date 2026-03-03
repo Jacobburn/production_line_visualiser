@@ -2269,6 +2269,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     trendGranularity: "daily",
     trendMonth: todayISO().slice(0, 7),
     lineTrendRange: "day",
+    lineTrendLegendFocusKey: "",
     crewsByShift: defaultCrewByShift(stages),
     stageSettings: defaultStageSettings(stages),
     stages,
@@ -2301,6 +2302,7 @@ function normalizeLine(id, line) {
       : fallbackShiftValue(line?.selectedShift || base.selectedShift),
     visualEditMode: Boolean(line?.visualEditMode),
     flowGuides: normalizeFlowGuides(line?.flowGuides),
+    lineTrendLegendFocusKey: String(line?.lineTrendLegendFocusKey || "").trim(),
     crewsByShift: normalizeCrewByShift(line || {}, stages),
     stageSettings: normalizeStageSettings(line || {}, stages),
     stages,
@@ -9002,6 +9004,7 @@ function bindVisualiserControls() {
       const range = String(btn.dataset.lineTrendRange || "").toLowerCase();
       if (!LINE_TREND_RANGES.includes(range) || range === state.lineTrendRange) return;
       state.lineTrendRange = range;
+      state.lineTrendLegendFocusKey = "";
       saveState();
       renderLineTrends();
     });
@@ -11771,15 +11774,24 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
   const pad = { top: 34, right: 104, bottom: 78, left: 76 };
   const chartW = width - pad.left - pad.right;
   const chartH = height - pad.top - pad.bottom;
+  const focusKey = String(state?.lineTrendLegendFocusKey || "").trim();
+  const focusedProductName = focusKey.startsWith("product:") ? focusKey.slice("product:".length) : "";
+  const showUnits = !focusKey || focusKey === "__units__";
+  const visibleSeries = !focusKey ? series : showUnits ? [] : series.filter((item) => item.name === focusedProductName);
   const maxUnits = Math.max(1, ...points.map((point) => Math.max(0, num(point.units))));
-  const maxRate = Math.max(1, num(productTrend?.maxRate));
+  const maxRateFromVisible = visibleSeries.reduce(
+    (max, item) => Math.max(max, ...item.values.map((value) => (Number.isFinite(value) ? value : 0))),
+    0
+  );
+  const maxRate = Math.max(1, maxRateFromVisible || num(productTrend?.maxRate));
   const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
   const x = (index) => pad.left + stepX * index;
   const yUnits = (value) => pad.top + chartH - (Math.max(0, value) / maxUnits) * chartH;
   const yRate = (value) => pad.top + chartH - (Math.max(0, value) / maxRate) * chartH;
 
   const barWidth = Math.max(14, Math.min(36, stepX * 0.58));
-  const bars = points
+  const bars = showUnits
+    ? points
     .map((point, index) => {
       const y = yUnits(point.units);
       const h = pad.top + chartH - y;
@@ -11788,27 +11800,35 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
         0
       )} units produced</title></rect>`;
     })
-    .join("");
+    .join("")
+    : "";
 
   const ticks = [0, 0.25, 0.5, 0.75, 1]
     .map((fraction) => {
       const y = pad.top + chartH - fraction * chartH;
       const unitsTick = Math.round(maxUnits * fraction);
       const rateTick = roundToDecimals(maxRate * fraction, maxRate < 10 ? 2 : 1);
-      return `<g>
-        <line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/>
-        <text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${formatNum(unitsTick, 0)}</text>
-        <text x="${pad.left + chartW + 12}" y="${y + 5}" text-anchor="start" class="axis">${formatNum(
+      const leftTick = showUnits
+        ? `<text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${formatNum(unitsTick, 0)}</text>`
+        : "";
+      const rightTick = visibleSeries.length
+        ? `<text x="${pad.left + chartW + 12}" y="${y + 5}" text-anchor="start" class="axis">${formatNum(
           rateTick,
           maxRate < 10 ? 2 : 1
-        )}</text>
+        )}</text>`
+        : "";
+      return `<g>
+        <line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/>
+        ${leftTick}
+        ${rightTick}
       </g>`;
     })
     .join("");
 
-  const productLines = series
+  const productLines = visibleSeries
     .map((item, seriesIndex) => {
-      const color = lineTrendSeriesColor(seriesIndex);
+      const productIndex = series.findIndex((entry) => entry.name === item.name);
+      const color = lineTrendSeriesColor(Math.max(0, productIndex));
       let drawing = false;
       let path = "";
       item.values.forEach((value, pointIndex) => {
@@ -11824,9 +11844,10 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     })
     .join("");
 
-  const productAverageLines = series
+  const productAverageLines = visibleSeries
     .map((item, seriesIndex) => {
-      const color = lineTrendSeriesColor(seriesIndex);
+      const productIndex = series.findIndex((entry) => entry.name === item.name);
+      const color = lineTrendSeriesColor(Math.max(0, productIndex));
       const values = item.values.filter((value) => Number.isFinite(value));
       if (!values.length) return "";
       const avg = values.reduce((sum, value) => sum + num(value), 0) / values.length;
@@ -11837,9 +11858,10 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     })
     .join("");
 
-  const productDots = series
+  const productDots = visibleSeries
     .map((item, seriesIndex) => {
-      const color = lineTrendSeriesColor(seriesIndex);
+      const productIndex = series.findIndex((entry) => entry.name === item.name);
+      const color = lineTrendSeriesColor(Math.max(0, productIndex));
       return item.values
         .map((value, pointIndex) => {
           if (!Number.isFinite(value)) return "";
@@ -11851,22 +11873,26 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     })
     .join("");
 
+  const legendItem = (key, color, name, valueText) => {
+    const active = focusKey === key;
+    const dimmed = Boolean(focusKey) && !active;
+    return `<button type="button" class="line-trend-product-legend-item${active ? " is-active" : ""}${dimmed ? " is-dimmed" : ""}" data-line-trend-legend-key="${encodeURIComponent(
+      key
+    )}" aria-pressed="${String(active)}">
+      <span class="line-trend-product-legend-swatch" style="background:${color};"></span>
+      <span class="line-trend-product-legend-name">${htmlEscape(name)}</span>
+      <span class="line-trend-product-legend-value">${htmlEscape(valueText)}</span>
+    </button>`;
+  };
+
   const legend = [
-    `<span class="line-trend-product-legend-item">
-      <span class="line-trend-product-legend-swatch" style="background:rgba(16, 24, 32, 0.3);"></span>
-      <span class="line-trend-product-legend-name">Total units</span>
-      <span class="line-trend-product-legend-value">${formatNum(points[points.length - 1]?.units || 0, 0)} units</span>
-    </span>`,
+    legendItem("__units__", "rgba(16, 24, 32, 0.3)", "Total units", `${formatNum(points[points.length - 1]?.units || 0, 0)} units`),
     ...series.map((item, seriesIndex) => {
       const color = lineTrendSeriesColor(seriesIndex);
       const values = item.values.filter((value) => Number.isFinite(value));
       const average = values.length ? values.reduce((sum, value) => sum + num(value), 0) / values.length : null;
       const averageLabel = Number.isFinite(average) ? `${formatNum(average, 2)} trays/min avg` : "No runs";
-      return `<span class="line-trend-product-legend-item">
-        <span class="line-trend-product-legend-swatch" style="background:${color};"></span>
-        <span class="line-trend-product-legend-name">${htmlEscape(item.name)}</span>
-        <span class="line-trend-product-legend-value">${htmlEscape(averageLabel)}</span>
-      </span>`;
+      return legendItem(`product:${item.name}`, color, item.name, averageLabel);
     })
   ].join("");
 
@@ -11882,20 +11908,29 @@ function renderLineTrendUnitsChart(points, productTrend = { series: [], maxRate:
     <svg viewBox="0 0 ${width} ${height}" class="trend-svg line-trend-svg" role="img" aria-label="Total production and product tray per minute trend by period">
       ${ticks}
       <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
-      <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
-      <line x1="${pad.left + chartW}" y1="${pad.top}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
+      ${showUnits ? `<line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />` : ""}
+      ${visibleSeries.length ? `<line x1="${pad.left + chartW}" y1="${pad.top}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />` : ""}
       ${bars}
       ${productAverageLines}
       ${productLines}
       ${productDots}
       ${labels}
-      <text x="${pad.left}" y="${20}" class="legend units">Total units (bars, left axis)</text>
-      <text x="${pad.left + 248}" y="${20}" class="legend rate">Tray/min by product (solid) + product avg (dashed)</text>
-      <text x="${pad.left + 4}" y="${pad.top + 12}" class="axis">Units max ${formatNum(maxUnits, 0)}</text>
-      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Tray/min max ${formatNum(maxRate, 2)}</text>
+      ${showUnits ? `<text x="${pad.left}" y="${20}" class="legend units">Total units (bars, left axis)</text>` : ""}
+      ${visibleSeries.length ? `<text x="${pad.left + 248}" y="${20}" class="legend rate">Tray/min by product (solid) + product avg (dashed)</text>` : ""}
     </svg>
     <div class="line-trend-product-legend">${legend}</div>
   `;
+
+  root.querySelectorAll("[data-line-trend-legend-key]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const encoded = String(btn.getAttribute("data-line-trend-legend-key") || "");
+      const key = decodeURIComponent(encoded);
+      const current = String(state?.lineTrendLegendFocusKey || "").trim();
+      state.lineTrendLegendFocusKey = current === key ? "" : key;
+      renderLineTrends();
+      saveState();
+    });
+  });
 }
 
 function renderLineTrendUtilDownChart(points) {
@@ -12027,6 +12062,10 @@ function renderLineTrends() {
   const buckets = buildLineTrendBuckets(state.selectedDate || todayISO(), range);
   const points = aggregateLineTrendPoints(state, buckets, state.selectedShift || "Day");
   const productTrend = aggregateLineTrendProductSeries(state, buckets, state.selectedShift || "Day");
+  const validLegendKeys = new Set(["__units__", ...(productTrend.series || []).map((item) => `product:${String(item?.name || "")}`)]);
+  if (!validLegendKeys.has(String(state.lineTrendLegendFocusKey || ""))) {
+    state.lineTrendLegendFocusKey = "";
+  }
   const current = points[points.length - 1] || { units: 0, downtime: 0, lineUtil: 0, netRunRate: 0 };
   const startIso = points[0]?.startIso || state.selectedDate || todayISO();
   const endIso = points[points.length - 1]?.endIso || state.selectedDate || todayISO();
