@@ -1,6 +1,7 @@
 import { createClient } from "npm:@supabase/supabase-js@2";
 
 type BizerbaPayload = {
+  id?: unknown;
   ActualNetWeightValue: unknown;
   DeviceName: unknown;
   Date: unknown;
@@ -40,6 +41,17 @@ function requiredTimestamp(value: unknown, field: string): string {
   return parsed.toISOString();
 }
 
+function optionalBigintId(value: unknown, field: string): string | undefined {
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  const raw = typeof value === "string" ? value.trim() : String(value).trim();
+  if (!raw || !/^\d+$/.test(raw)) {
+    throw new Error(`Invalid format for ${field}; expected a positive integer`);
+  }
+  return raw;
+}
+
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const deviceKey = Deno.env.get("BIZERBA_DEVICE_KEY") ?? "";
@@ -69,7 +81,9 @@ Deno.serve(async (req) => {
   }
 
   try {
+    const providedId = optionalBigintId(payload.id, "id");
     const row = {
+      ...(providedId ? { id: providedId } : {}),
       ActualNetWeightValue: requiredNumeric(
         payload.ActualNetWeightValue,
         "ActualNetWeightValue",

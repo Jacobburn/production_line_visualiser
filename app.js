@@ -1657,8 +1657,8 @@ function computeLineMetrics(line, date, shift) {
     shift,
     units,
     totalDowntime,
-    lineUtil: Math.max(0, bottleneckUtil),
-    lineUtilGross: Math.max(0, bottleneckUtilGross),
+    lineUtil: Math.max(0, bottleneckUtilGross),
+    lineUtilGross: Math.max(0, bottleneckUtil),
     netRunRate,
     bottleneckStageName,
     crewOnShift,
@@ -3127,10 +3127,6 @@ function isPendingShiftLogRow(row) {
   return strictTimeValid(row?.startTime) && strictTimeValid(row?.finishTime) && row.startTime === row.finishTime;
 }
 
-function isPendingBreakLogRow(row) {
-  return strictTimeValid(row?.breakStart) && !strictTimeValid(row?.breakFinish);
-}
-
 function isPendingDowntimeLogRow(row) {
   return strictTimeValid(row?.downtimeStart) && strictTimeValid(row?.downtimeFinish) && row.downtimeStart === row.downtimeFinish;
 }
@@ -4215,16 +4211,6 @@ async function startManagerShiftBreak(shiftLogId, breakStart, breakFinish = null
   return response?.breakLog || null;
 }
 
-async function patchManagerShiftBreak(shiftLogId, breakId, payload) {
-  const session = await ensureManagerBackendSession();
-  const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
-    method: "PATCH",
-    token: session.backendToken,
-    body: payload
-  });
-  return response?.breakLog || null;
-}
-
 async function deleteManagerShiftBreak(shiftLogId, breakId) {
   const session = await ensureManagerBackendSession();
   await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
@@ -4402,28 +4388,6 @@ async function patchSupervisorShiftLog(session, logId, payload) {
     body: payload
   });
   return response?.shiftLog || null;
-}
-
-async function startSupervisorShiftBreak(session, shiftLogId, breakStart) {
-  const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks`, {
-    method: "POST",
-    token: session.backendToken,
-    body: { breakStart }
-  });
-  return response?.breakLog || null;
-}
-
-async function patchSupervisorShiftBreak(session, shiftLogId, breakId, payload) {
-  const response = await apiRequest(`/api/logs/shifts/${shiftLogId}/breaks/${breakId}`, {
-    method: "PATCH",
-    token: session.backendToken,
-    body: payload
-  });
-  return response?.breakLog || null;
-}
-
-async function endSupervisorShiftBreak(session, shiftLogId, breakId, breakFinish) {
-  return patchSupervisorShiftBreak(session, shiftLogId, breakId, { breakFinish });
 }
 
 async function syncSupervisorRunLog(session, payload) {
@@ -5291,16 +5255,12 @@ function bindHome() {
   const supervisorActionTitleInput = document.getElementById("supervisorActionTitle");
   const supervisorActionDescriptionInput = document.getElementById("supervisorActionDescription");
   const superShiftLogIdInput = document.getElementById("superShiftLogId");
-  const superShiftOpenBreakIdInput = document.getElementById("superShiftOpenBreakId");
-  const superShiftBreakTimeInput = document.getElementById("superShiftBreakTime");
   const superRunLogIdInput = document.getElementById("superRunLogId");
   const superRunCrewingPatternInput = document.getElementById("superRunCrewingPattern");
   const superRunCrewingPatternBtn = document.getElementById("superRunCrewingPatternBtn");
   const superRunCrewingPatternSummary = document.getElementById("superRunCrewingPatternSummary");
   const superDownLogIdInput = document.getElementById("superDownLogId");
   const superShiftSaveProgressBtn = document.getElementById("superShiftSaveProgress");
-  const superShiftBreakStartBtn = document.getElementById("superShiftBreakStart");
-  const superShiftBreakEndBtn = document.getElementById("superShiftBreakEnd");
   const superShiftOpenList = document.getElementById("superShiftOpenList");
   const superRunSaveProgressBtn = document.getElementById("superRunSaveProgress");
   const superRunOpenList = document.getElementById("superRunOpenList");
@@ -6388,7 +6348,6 @@ function bindHome() {
         return;
       }
       if (superShiftLogIdInput) superShiftLogIdInput.value = "";
-      if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
       supervisorShiftTileEditId = "";
       updateSupervisorProgressButtonLabels();
     });
@@ -7435,11 +7394,6 @@ function bindHome() {
     }
 
     const selectedShiftId = selectedSupervisorShiftLogId({ line });
-    const selectedShiftTileNode = selectedShiftId && superShiftOpenList
-      ? superShiftOpenList
-          .querySelector(`[data-super-shift-edit="${selectedShiftId}"]`)
-          ?.closest(".pending-log-item") || null
-      : null;
     let existing = null;
     if (selectedShiftId) {
       existing = (line.shiftRows || []).find((row) => row.id === selectedShiftId) || null;
@@ -7474,19 +7428,6 @@ function bindHome() {
       alert("Finalised shift logs require a finish time different from start.");
       return;
     }
-    if (complete && superShiftOpenBreakIdInput?.value) {
-      alert("End the current break before completing the shift.");
-      return;
-    }
-
-    if (existing?.id && selectedShiftTileNode) {
-      const breakEditsSaved = await saveSupervisorShiftBreakEdits(existing.id, selectedShiftTileNode, {
-        suppressNoChangesAlert: true,
-        skipPersist: true
-      });
-      if (breakEditsSaved === false) return;
-    }
-
     const payload = { lineId, date, shift, crewOnShift, startTime, finishTime, notes };
     try {
       const saved = existing?.id
@@ -7503,11 +7444,9 @@ function bindHome() {
       upsertRowById(line.shiftRows, savedRow);
       if (complete) {
         superShiftLogIdInput.value = "";
-        if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
         supervisorShiftTileEditId = "";
       } else {
         if (superShiftLogIdInput) superShiftLogIdInput.value = "";
-        if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
         supervisorShiftTileEditId = "";
       }
       addAudit(
@@ -7525,347 +7464,12 @@ function bindHome() {
       if (!complete) {
         supervisorShiftForm.reset();
         if (superShiftLogIdInput) superShiftLogIdInput.value = "";
-        if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = "";
-        if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
         supervisorShiftTileEditId = "";
       }
     } catch (error) {
       alert(`Could not save shift log.\n${error?.message || "Please try again."}`);
     }
   };
-
-  const submitSupervisorBreakStart = async ({ shiftId = "", breakStartOverride = "" } = {}) => {
-    const session = appState.supervisorSession;
-    if (!session) return;
-    const lineId = selectedSupervisorLineId();
-    const line = appState.lines[lineId];
-    if (!session.assignedLineIds.includes(lineId) || !line) {
-      alert("You are not assigned to that line.");
-      return;
-    }
-
-    let shiftLog = null;
-    if (shiftId) {
-      shiftLog = (line.shiftRows || []).find((row) => row.id === shiftId) || null;
-      if (!shiftLog?.id) {
-        alert("Shift log could not be found.");
-        return;
-      }
-      if (!isOpenShiftRow(shiftLog)) {
-        alert("This shift is already finalised.");
-        return;
-      }
-    }
-
-    const date = shiftLog?.date || document.getElementById("superShiftDate").value || todayISO();
-    const shift = shiftLog?.shift || document.getElementById("superShiftShift").value || "Day";
-    const breakStart = String(breakStartOverride || superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
-    if (!strictTimeValid(breakStart)) {
-      alert("Break start time must be HH:MM.");
-      return;
-    }
-    if (!supervisorCanAccessShift(session, lineId, shift)) {
-      alert(`You are not assigned to the ${shift} shift.`);
-      return;
-    }
-
-    if (!shiftLog && superShiftLogIdInput?.value) {
-      shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
-      if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
-      if (shiftLog && !isOpenShiftRow(shiftLog)) shiftLog = null;
-    }
-    if (!shiftLog) {
-      shiftLog = latestBySubmittedAt(
-        (line.shiftRows || []).filter(
-          (row) => row.date === date && row.shift === shift && isOpenShiftRow(row) && supervisorOwnsPendingLogRow(row, session)
-        )
-      );
-    }
-    if (!shiftLog?.id) {
-      alert("Start the shift first, then you can log breaks.");
-      return;
-    }
-    const openBreak = latestBySubmittedAt((line.breakRows || []).filter((row) => row.shiftLogId === shiftLog.id && isOpenBreakRow(row)));
-    if (openBreak?.id) {
-      alert("There is already an open break. End it before starting a new break.");
-      return;
-    }
-    try {
-      const savedBreak = await startSupervisorShiftBreak(session, shiftLog.id, breakStart);
-      const savedRow = {
-        date,
-        shift,
-        shiftLogId: shiftLog.id,
-        breakStart,
-        breakFinish: "",
-        id: savedBreak?.id || "",
-        submittedBy: supervisorActorName(session),
-        submittedAt: savedBreak?.submittedAt || nowIso()
-      };
-      upsertRowById(line.breakRows, savedRow);
-      if (superShiftOpenBreakIdInput && superShiftLogIdInput?.value === shiftLog.id) superShiftOpenBreakIdInput.value = savedRow.id || "";
-      if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
-      addAudit(line, "SUPERVISOR_BREAK_START", `${supervisorActorName(session)} started break (${shift} ${date})`);
-      saveState();
-      renderAll();
-    } catch (error) {
-      alert(`Could not start break.\n${error?.message || "Please try again."}`);
-    }
-  };
-
-  const submitSupervisorBreakEnd = async ({ shiftId = "", breakId = "", breakFinishOverride = "" } = {}) => {
-    const session = appState.supervisorSession;
-    if (!session) return;
-    const lineId = selectedSupervisorLineId();
-    const line = appState.lines[lineId];
-    if (!session.assignedLineIds.includes(lineId) || !line) {
-      alert("You are not assigned to that line.");
-      return;
-    }
-
-    let shiftLog = null;
-    if (shiftId) {
-      shiftLog = (line.shiftRows || []).find((row) => row.id === shiftId) || null;
-      if (!shiftLog?.id) {
-        alert("Shift log could not be found.");
-        return;
-      }
-      if (!isOpenShiftRow(shiftLog)) {
-        alert("This shift is already finalised.");
-        return;
-      }
-    }
-
-    const date = shiftLog?.date || document.getElementById("superShiftDate").value || todayISO();
-    const shift = shiftLog?.shift || document.getElementById("superShiftShift").value || "Day";
-    const breakFinish = String(breakFinishOverride || superShiftBreakTimeInput?.value || "").trim() || nowTimeHHMM();
-    if (!strictTimeValid(breakFinish)) {
-      alert("Break finish time must be HH:MM.");
-      return;
-    }
-    if (!supervisorCanAccessShift(session, lineId, shift)) {
-      alert(`You are not assigned to the ${shift} shift.`);
-      return;
-    }
-
-    if (!shiftLog && superShiftLogIdInput?.value) {
-      shiftLog = (line.shiftRows || []).find((row) => row.id === superShiftLogIdInput.value) || null;
-      if (shiftLog && (shiftLog.date !== date || shiftLog.shift !== shift)) shiftLog = null;
-      if (shiftLog && !isOpenShiftRow(shiftLog)) shiftLog = null;
-    }
-    if (!shiftLog) {
-      shiftLog = latestBySubmittedAt(
-        (line.shiftRows || []).filter(
-          (row) => row.date === date && row.shift === shift && isOpenShiftRow(row) && supervisorOwnsPendingLogRow(row, session)
-        )
-      );
-    }
-    if (!shiftLog?.id) {
-      alert("No open shift found for this date/shift.");
-      return;
-    }
-    let openBreak = null;
-    if (breakId) {
-      openBreak = (line.breakRows || []).find((row) => row.id === breakId && row.shiftLogId === shiftLog.id) || null;
-    }
-    if (!openBreak && superShiftOpenBreakIdInput?.value) {
-      openBreak = (line.breakRows || []).find((row) => row.id === superShiftOpenBreakIdInput.value) || null;
-      if (openBreak && openBreak.shiftLogId !== shiftLog.id) openBreak = null;
-    }
-    if (!openBreak) {
-      openBreak = latestBySubmittedAt((line.breakRows || []).filter((row) => row.shiftLogId === shiftLog.id && isOpenBreakRow(row)));
-    }
-    if (!openBreak?.id) {
-      alert("No open break found for this shift.");
-      return;
-    }
-    try {
-      const savedBreak = await endSupervisorShiftBreak(session, shiftLog.id, openBreak.id, breakFinish);
-      const savedRow = {
-        ...openBreak,
-        breakFinish,
-        submittedBy: supervisorActorName(session),
-        submittedAt: savedBreak?.submittedAt || nowIso()
-      };
-      upsertRowById(line.breakRows, savedRow);
-      if (superShiftOpenBreakIdInput && superShiftLogIdInput?.value === shiftLog.id) superShiftOpenBreakIdInput.value = "";
-      if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
-      addAudit(line, "SUPERVISOR_BREAK_END", `${supervisorActorName(session)} ended break (${shift} ${date})`);
-      saveState();
-      renderAll();
-    } catch (error) {
-      alert(`Could not end break.\n${error?.message || "Please try again."}`);
-    }
-  };
-
-  const saveSupervisorShiftBreakEdits = async (
-    shiftId,
-    tileNode,
-    { suppressNoChangesAlert = false, skipPersist = false } = {}
-  ) => {
-    const session = appState.supervisorSession;
-    if (!session) return false;
-    const lineId = selectedSupervisorLineId();
-    const line = appState.lines[lineId];
-    if (!session.assignedLineIds.includes(lineId) || !line) {
-      alert("You are not assigned to that line.");
-      return false;
-    }
-    const shiftLog = (line.shiftRows || []).find((row) => row.id === shiftId) || null;
-    if (!shiftLog?.id) {
-      alert("Shift log could not be found.");
-      return false;
-    }
-    const editorRows = Array.from(tileNode?.querySelectorAll("[data-break-editor-row]") || []);
-    if (!editorRows.length) return true;
-
-    try {
-      let changed = false;
-      const warnings = new Set();
-      for (const editorRow of editorRows) {
-        const breakId = String(editorRow.getAttribute("data-break-id") || "");
-        const breakIndex = Number(editorRow.getAttribute("data-break-index"));
-        const startValue = String(editorRow.querySelector('[data-break-field="start"]')?.value || "").trim();
-        const finishValue = String(editorRow.querySelector('[data-break-field="finish"]')?.value || "").trim();
-        if (startValue && !strictTimeValid(startValue)) {
-          alert("Break start time must be HH:MM.");
-          return false;
-        }
-        if (finishValue && !strictTimeValid(finishValue)) {
-          alert("Break finish time must be HH:MM.");
-          return false;
-        }
-
-        const shiftBreakRows = breakRowsForShift(line, shiftId);
-        let existingBreak = null;
-        if (breakId) {
-          existingBreak = shiftBreakRows.find((row) => String(row.id || "") === breakId) || null;
-        }
-        if (!existingBreak && Number.isInteger(breakIndex) && breakIndex >= 0) {
-          existingBreak = shiftBreakRows[breakIndex] || null;
-        }
-
-        if (existingBreak) {
-          const originalStart = String(existingBreak.breakStart || "").trim();
-          const originalFinish = String(existingBreak.breakFinish || "").trim();
-          const nextStart = startValue || originalStart;
-          const nextFinish = finishValue;
-          if (!nextStart || !strictTimeValid(nextStart)) {
-            alert("Each existing break must have a valid start time.");
-            return false;
-          }
-          const isBackendBreak = UUID_RE.test(String(existingBreak.id || ""));
-          if (isBackendBreak) {
-            const breakPatch = {};
-            if (nextStart !== originalStart) breakPatch.breakStart = nextStart;
-            if (nextFinish !== originalFinish) {
-              if (!nextFinish && originalFinish) {
-                warnings.add("Break finish cannot be cleared once set.");
-              } else if (nextFinish) {
-                breakPatch.breakFinish = nextFinish;
-              }
-            }
-            if (Object.keys(breakPatch).length) {
-              const savedBreak = await patchSupervisorShiftBreak(session, shiftLog.id, existingBreak.id, breakPatch);
-              const savedStart = savedBreak?.breakStart || breakPatch.breakStart || originalStart;
-              const savedFinish = savedBreak?.breakFinish !== undefined
-                ? String(savedBreak.breakFinish || "")
-                : breakPatch.breakFinish !== undefined
-                  ? breakPatch.breakFinish
-                  : originalFinish;
-              Object.assign(existingBreak, {
-                breakStart: savedStart,
-                breakFinish: savedFinish,
-                submittedBy: supervisorActorName(session),
-                submittedAt: savedBreak?.submittedAt || nowIso()
-              });
-              changed = true;
-            }
-          } else {
-            if (nextStart !== originalStart || nextFinish !== originalFinish) {
-              Object.assign(existingBreak, {
-                breakStart: nextStart,
-                breakFinish: nextFinish,
-                submittedBy: supervisorActorName(session),
-                submittedAt: nowIso()
-              });
-              changed = true;
-            }
-          }
-          continue;
-        }
-
-        if (!startValue && !finishValue) continue;
-        if (!startValue) {
-          alert("New break rows need a start time.");
-          return false;
-        }
-
-        if (UUID_RE.test(String(shiftLog.id || ""))) {
-          const savedStart = await startSupervisorShiftBreak(session, shiftLog.id, startValue);
-          const newBreakRow = {
-            id: savedStart?.id || "",
-            lineId: lineId || "",
-            date: shiftLog.date || todayISO(),
-            shift: shiftLog.shift || "Day",
-            shiftLogId: shiftLog.id,
-            breakStart: startValue,
-            breakFinish: "",
-            submittedBy: supervisorActorName(session),
-            submittedAt: savedStart?.submittedAt || nowIso()
-          };
-          upsertRowById(line.breakRows, newBreakRow);
-          changed = true;
-          if (finishValue) {
-            if (!newBreakRow.id || !UUID_RE.test(String(newBreakRow.id))) {
-              warnings.add("New break was created but finish could not be set immediately.");
-            } else {
-              const savedFinish = await endSupervisorShiftBreak(session, shiftLog.id, newBreakRow.id, finishValue);
-              Object.assign(newBreakRow, {
-                breakFinish: finishValue,
-                submittedBy: supervisorActorName(session),
-                submittedAt: savedFinish?.submittedAt || nowIso()
-              });
-              upsertRowById(line.breakRows, newBreakRow);
-            }
-          }
-        } else {
-          upsertRowById(line.breakRows, {
-            id: makeLocalLogId("break"),
-            lineId: lineId || "",
-            date: shiftLog.date || todayISO(),
-            shift: shiftLog.shift || "Day",
-            shiftLogId: shiftLog.id,
-            breakStart: startValue,
-            breakFinish: finishValue || "",
-            submittedBy: supervisorActorName(session),
-            submittedAt: nowIso()
-          });
-          changed = true;
-        }
-      }
-
-      if (warnings.size) alert(Array.from(warnings).join("\n"));
-      if (!changed) {
-        if (!warnings.size && !suppressNoChangesAlert) alert("No break changes to save.");
-        return true;
-      }
-      addAudit(
-        line,
-        "SUPERVISOR_BREAK_EDIT",
-        `${supervisorActorName(session)} updated break logs (${shiftLog.shift || "Shift"} ${shiftLog.date || todayISO()})`
-      );
-      if (!skipPersist) {
-        saveState();
-        renderAll();
-      }
-      return true;
-    } catch (error) {
-      alert(`Could not save break edits.\n${error?.message || "Please try again."}`);
-      return false;
-    }
-  };
-
   const submitSupervisorRun = async ({ complete = false } = {}) => {
     const session = appState.supervisorSession;
     if (!session) return;
@@ -8071,7 +7675,6 @@ function bindHome() {
       return;
     }
 
-    const openBreak = latestBySubmittedAt((line.breakRows || []).filter((breakRow) => breakRow.shiftLogId === row.id && isOpenBreakRow(breakRow)));
     suppressSupervisorSelectionReset = true;
     document.getElementById("superShiftDate").value = row.date || todayISO();
     document.getElementById("superShiftShift").value = row.shift || "Day";
@@ -8079,12 +7682,8 @@ function bindHome() {
     document.getElementById("superShiftStart").value = row.startTime || "";
     document.getElementById("superShiftFinish").value = isOpenShiftRow(row) ? "" : row.finishTime || "";
     document.getElementById("superShiftNotes").value = String(row.notes || "");
-    if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
     superShiftLogIdInput.value = row.id || "";
     supervisorShiftTileEditId = row.id || "";
-    if (superShiftOpenBreakIdInput) superShiftOpenBreakIdInput.value = openBreak?.id || "";
-    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !row.id || Boolean(openBreak?.id);
-    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !row.id || !openBreak?.id;
     suppressSupervisorSelectionReset = false;
     // Refresh the supervisor data entry UI so the selected pending shift shows Save immediately.
     renderHome();
@@ -8178,21 +7777,6 @@ function bindHome() {
       alert("Shift start time is invalid. Edit the shift and set a valid start time first.");
       return;
     }
-    const shiftTileNode = superShiftOpenList
-      ?.querySelector(`[data-super-shift-edit="${shiftId}"]`)
-      ?.closest(".pending-log-item") || null;
-    if (shiftTileNode) {
-      const breakEditsSaved = await saveSupervisorShiftBreakEdits(shiftId, shiftTileNode, {
-        suppressNoChangesAlert: true,
-        skipPersist: true
-      });
-      if (breakEditsSaved === false) return;
-    }
-    const openBreak = latestBySubmittedAt((line.breakRows || []).filter((breakRow) => breakRow.shiftLogId === row.id && isOpenBreakRow(breakRow)));
-    if (openBreak?.id) {
-      alert("End the current break before finalising the shift.");
-      return;
-    }
     const nowCandidate = nowTimeHHMM();
     const startMins = parseTimeToMinutes(startTime);
     const nowMins = parseTimeToMinutes(nowCandidate);
@@ -8235,11 +7819,6 @@ function bindHome() {
       };
       upsertRowById(line.shiftRows, savedRow);
       if (superShiftLogIdInput.value === row.id) superShiftLogIdInput.value = "";
-      if (superShiftOpenBreakIdInput?.value) {
-        const activeBreak = (line.breakRows || []).find((breakRow) => breakRow.id === superShiftOpenBreakIdInput.value);
-        if (activeBreak?.shiftLogId === row.id) superShiftOpenBreakIdInput.value = "";
-      }
-      if (superShiftBreakTimeInput) superShiftBreakTimeInput.value = "";
       supervisorShiftTileEditId = "";
       addAudit(
         line,
@@ -8572,25 +8151,6 @@ function bindHome() {
           renderHome();
           updateSupervisorProgressButtonLabels();
           loadSupervisorShiftForEdit(shiftId);
-        }
-        return;
-      }
-      const breakStartBtn = event.target.closest("[data-super-shift-break-start]");
-      if (breakStartBtn) {
-        const shiftId = breakStartBtn.getAttribute("data-super-shift-break-start");
-        if (shiftId) {
-          updateSupervisorProgressButtonLabels();
-          submitSupervisorBreakStart({ shiftId });
-        }
-        return;
-      }
-      const breakEndBtn = event.target.closest("[data-super-shift-break-end]");
-      if (breakEndBtn) {
-        const shiftId = breakEndBtn.getAttribute("data-super-shift-break-end");
-        const breakId = breakEndBtn.getAttribute("data-super-shift-break-id") || "";
-        if (shiftId) {
-          updateSupervisorProgressButtonLabels();
-          submitSupervisorBreakEnd({ shiftId, breakId });
         }
         return;
       }
@@ -9976,162 +9536,6 @@ function bindForms() {
   });
 
   const inlineValue = (rowNode, field) => String(rowNode?.querySelector(`[data-inline-field="${field}"]`)?.value || "").trim();
-  const upsertManagerRowById = (rows, nextRow) => {
-    if (!Array.isArray(rows) || !nextRow) return;
-    if (nextRow.id) {
-      const index = rows.findIndex((row) => String(row?.id || "") === String(nextRow.id));
-      if (index >= 0) {
-        rows[index] = { ...rows[index], ...nextRow };
-        return;
-      }
-    }
-    rows.push(nextRow);
-  };
-
-  const saveManagerShiftBreakEdits = async (
-    shiftLog,
-    rowNode,
-    { suppressNoChangesAlert = false } = {}
-  ) => {
-    if (!shiftLog?.id || !rowNode) return true;
-    if (!Array.isArray(state.breakRows)) state.breakRows = [];
-    const editorRows = Array.from(rowNode.querySelectorAll("[data-manager-break-editor-row]"));
-    if (!editorRows.length) return true;
-    try {
-      let changed = false;
-      const warnings = new Set();
-      for (const editorRow of editorRows) {
-        const breakId = String(editorRow.getAttribute("data-break-id") || "");
-        const breakIndex = Number(editorRow.getAttribute("data-break-index"));
-        const startValue = String(editorRow.querySelector('[data-break-field="start"]')?.value || "").trim();
-        const finishValue = String(editorRow.querySelector('[data-break-field="finish"]')?.value || "").trim();
-        if (startValue && !strictTimeValid(startValue)) {
-          alert("Break start time must be HH:MM.");
-          return false;
-        }
-        if (finishValue && !strictTimeValid(finishValue)) {
-          alert("Break finish time must be HH:MM.");
-          return false;
-        }
-        const shiftBreakRows = breakRowsForShift(state, shiftLog);
-        let existingBreak = null;
-        if (breakId) {
-          existingBreak = shiftBreakRows.find((row) => String(row.id || "") === breakId) || null;
-        }
-        if (!existingBreak && Number.isInteger(breakIndex) && breakIndex >= 0) {
-          existingBreak = shiftBreakRows[breakIndex] || null;
-        }
-
-        if (existingBreak) {
-          const originalStart = String(existingBreak.breakStart || "").trim();
-          const originalFinish = String(existingBreak.breakFinish || "").trim();
-          const isDeleteRequested = !startValue && !finishValue;
-          const isBackendBreak = UUID_RE.test(String(shiftLog.id || "")) && UUID_RE.test(String(existingBreak.id || ""));
-          if (isDeleteRequested) {
-            if (isBackendBreak) await deleteManagerShiftBreak(shiftLog.id, existingBreak.id);
-            const existingBreakId = String(existingBreak.id || "").trim();
-            state.breakRows = (state.breakRows || []).filter((breakRow) => {
-              if (existingBreakId && String(breakRow?.id || "").trim() === existingBreakId) return false;
-              return breakRow !== existingBreak;
-            });
-            changed = true;
-            continue;
-          }
-          const nextStart = startValue || originalStart;
-          const nextFinish = finishValue;
-          if (!nextStart || !strictTimeValid(nextStart)) {
-            alert("Each existing break must have a valid start time.");
-            return false;
-          }
-          if (isBackendBreak) {
-            const breakPatch = {};
-            if (nextStart !== originalStart) breakPatch.breakStart = nextStart;
-            if (nextFinish !== originalFinish) {
-              if (!nextFinish && originalFinish) warnings.add("Break finish cannot be cleared once set.");
-              else if (nextFinish) breakPatch.breakFinish = nextFinish;
-            }
-            if (Object.keys(breakPatch).length) {
-              const savedBreak = await patchManagerShiftBreak(shiftLog.id, existingBreak.id, breakPatch);
-              const savedStart = savedBreak?.breakStart || breakPatch.breakStart || originalStart;
-              const savedFinish = savedBreak?.breakFinish !== undefined
-                ? String(savedBreak.breakFinish || "")
-                : breakPatch.breakFinish !== undefined
-                  ? breakPatch.breakFinish
-                  : originalFinish;
-              Object.assign(existingBreak, {
-                breakStart: savedStart,
-                breakFinish: savedFinish,
-                submittedAt: savedBreak?.submittedAt || nowIso()
-              });
-              changed = true;
-            }
-          } else if (nextStart !== originalStart || nextFinish !== originalFinish) {
-            Object.assign(existingBreak, {
-              breakStart: nextStart,
-              breakFinish: nextFinish,
-              submittedAt: nowIso()
-            });
-            changed = true;
-          }
-          continue;
-        }
-
-        if (!startValue && !finishValue) continue;
-        if (!startValue) {
-          alert("New break rows need a start time.");
-          return false;
-        }
-
-        if (UUID_RE.test(String(shiftLog.id || ""))) {
-          if (!finishValue && !isPendingShiftLogRow(shiftLog)) {
-            alert("Completed shifts require a break finish time.");
-            return false;
-          }
-          const savedBreak = await startManagerShiftBreak(shiftLog.id, startValue, finishValue || null);
-          upsertManagerRowById(state.breakRows, {
-            id: savedBreak?.id || makeLocalLogId("break"),
-            lineId: shiftLog.lineId || state.id,
-            date: shiftLog.date || todayISO(),
-            shift: shiftLog.shift || "Day",
-            shiftLogId: shiftLog.id,
-            breakStart: savedBreak?.breakStart || startValue,
-            breakFinish: savedBreak?.breakFinish || finishValue || "",
-            submittedBy: "manager",
-            submittedAt: savedBreak?.submittedAt || nowIso()
-          });
-          changed = true;
-        } else {
-          upsertManagerRowById(state.breakRows, {
-            id: makeLocalLogId("break"),
-            lineId: shiftLog.lineId || state.id,
-            date: shiftLog.date || todayISO(),
-            shift: shiftLog.shift || "Day",
-            shiftLogId: shiftLog.id,
-            breakStart: startValue,
-            breakFinish: finishValue || "",
-            submittedBy: "manager",
-            submittedAt: nowIso()
-          });
-          changed = true;
-        }
-      }
-
-      if (warnings.size) alert(Array.from(warnings).join("\n"));
-      if (!changed) {
-        if (!warnings.size && !suppressNoChangesAlert) alert("No break changes to save.");
-        return true;
-      }
-      addAudit(
-        state,
-        "MANAGER_BREAK_EDIT",
-        `Manager updated break logs (${shiftLog.shift || "Shift"} ${shiftLog.date || todayISO()})`
-      );
-      return true;
-    } catch (error) {
-      alert(`Could not save break edits.\n${error?.message || "Please try again."}`);
-      return false;
-    }
-  };
 
   const saveManagerLogInlineEdit = async (type, logId, rowNode) => {
     if (!state?.id || !logId || !rowNode) return;
@@ -10161,8 +9565,6 @@ function bindForms() {
         alert("Times must be HH:MM (24h).");
         return;
       }
-      const breakEditsSaved = await saveManagerShiftBreakEdits(row, rowNode, { suppressNoChangesAlert: true });
-      if (breakEditsSaved === false) return;
       const payload = { date, shift, crewOnShift, startTime, finishTime, notes };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
@@ -10434,53 +9836,6 @@ function bindForms() {
     if (!strictTimeValid(startTime)) {
       alert("Shift start time is invalid. Edit the row and set a valid start time first.");
       return;
-    }
-    const existingBreakRows = Array.isArray(state.breakRows) ? state.breakRows : [];
-    const lineHasShiftLinkedBreaks = existingBreakRows.some((breakRow) => Boolean(String(breakRow?.shiftLogId || "").trim()));
-    const belongsToShift = (breakRow) => {
-      if (lineHasShiftLinkedBreaks) return String(breakRow?.shiftLogId || "") === String(row.id || "");
-      return String(breakRow?.date || "") === String(row.date || "") && String(breakRow?.shift || "") === String(row.shift || "");
-    };
-    const openBreak = latestBySubmittedAt(existingBreakRows.filter((breakRow) => belongsToShift(breakRow) && isOpenBreakRow(breakRow)));
-    if (openBreak) {
-      const breakStart = String(openBreak.breakStart || "").trim();
-      const breakFinishPrompt = window.prompt(
-        "End open break first. Break finish time (HH:MM)",
-        managerDefaultFinishTime(strictTimeValid(breakStart) ? breakStart : startTime)
-      );
-      if (breakFinishPrompt === null) return;
-      const breakFinish = String(breakFinishPrompt || "").trim();
-      if (!strictTimeValid(breakFinish)) {
-        alert("Break finish time must be HH:MM (24h).");
-        return;
-      }
-      if (strictTimeValid(breakStart) && breakFinish === breakStart) {
-        alert("Break finish time must be different from break start time.");
-        return;
-      }
-      const canPatchBreakServer = UUID_RE.test(String(logId || "")) && UUID_RE.test(String(openBreak.id || ""));
-      try {
-        if (canPatchBreakServer) {
-          const savedBreak = await patchManagerShiftBreak(logId, openBreak.id, { breakFinish });
-          const nextBreakStart = String(savedBreak?.breakStart || breakStart || "");
-          const nextBreakFinish = String(savedBreak?.breakFinish || breakFinish || "");
-          Object.assign(openBreak, {
-            breakStart: nextBreakStart || breakStart,
-            breakFinish: nextBreakFinish || breakFinish,
-            breakMins: Math.max(0, diffMinutes(nextBreakStart || breakStart, nextBreakFinish || breakFinish)),
-            submittedAt: savedBreak?.submittedAt || nowIso()
-          });
-        } else {
-          Object.assign(openBreak, {
-            breakFinish,
-            breakMins: Math.max(0, diffMinutes(breakStart, breakFinish)),
-            submittedAt: nowIso()
-          });
-        }
-      } catch (error) {
-        alert(`Could not end open break.\n${error?.message || "Please try again."}`);
-        return;
-      }
     }
     const finishPrompt = window.prompt("Finish time (HH:MM)", managerDefaultFinishTime(startTime));
     if (finishPrompt === null) return;
@@ -10767,16 +10122,6 @@ function bindForms() {
         inputEl: patternInput,
         summaryEl: patternSummary
       });
-      return;
-    }
-    const breakDeleteBtn = event.target.closest("[data-manager-break-delete]");
-    if (breakDeleteBtn) {
-      const breakRowNode = breakDeleteBtn.closest("[data-manager-break-editor-row]");
-      if (!breakRowNode) return;
-      const startInput = breakRowNode.querySelector('[data-break-field="start"]');
-      const finishInput = breakRowNode.querySelector('[data-break-field="finish"]');
-      if (startInput) startInput.value = "";
-      if (finishInput) finishInput.value = "";
       return;
     }
     const btn = event.target.closest("[data-log-action]");
@@ -12952,8 +12297,8 @@ function renderVisualiser() {
     bottleneckCard.classList.add("bottleneck");
   }
 
-  const lineUtil = Math.max(0, bottleneckUtilisation);
-  const lineUtilGross = Math.max(0, bottleneckGrossUtilisation);
+  const lineUtil = Math.max(0, bottleneckGrossUtilisation);
+  const lineUtilGross = Math.max(0, bottleneckUtilisation);
   const utilisationText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
   const utilisationGrossText = `${formatNum(Math.max(lineUtilGross, 0), 1)}%`;
   setText("kpiUtilisation", utilisationText);
@@ -13222,27 +12567,13 @@ function renderTrackingTables() {
   const derivedBreakContext = { breakRows: data.breakRows };
   const displayShiftRows = sortNewestFirst(data.shiftRows, "startTime").map((row) => {
     const rowBreakRows = breakRowsForShift(derivedBreakContext, row);
-    const editableBreakRows = rowBreakRows.filter((breakRow) => !breakRow?.isDerivedDowntimeBreak);
     const breakCount = Math.max(0, Math.floor(num(rowBreakRows.length)));
     const breakTimeMins = rowBreakRows.reduce((sum, breakRow) => sum + Math.max(0, num(breakRow.breakMins)), 0);
     const editing = isInlineEditing("shift", String(row.id || ""));
-    const hasOpenBreak = editableBreakRows.some((breakRow) => isPendingBreakLogRow(breakRow));
     const shiftPending = isPendingShiftLogRow(row);
-    const pending = shiftPending || hasOpenBreak;
+    const pending = shiftPending;
     const htmlFields = ["action"];
     if (editing) htmlFields.push("date", "shift", "crewOnShift", "startTime", "finishTime", "notes");
-    const breakEditorRowsHtml = editableBreakRows
-      .map(
-        (breakRow, index) => `
-          <div class="pending-break-editor-row" data-manager-break-editor-row data-break-id="${htmlEscape(breakRow.id || "")}" data-break-index="${index}">
-            <span class="pending-break-editor-label">Break ${index + 1}</span>
-            <input class="pending-break-editor-input" data-break-field="start" value="${htmlEscape(breakRow.breakStart || "")}" placeholder="Start HH:MM" />
-            <input class="pending-break-editor-input" data-break-field="finish" value="${htmlEscape(breakRow.breakFinish || "")}" placeholder="Finish HH:MM" />
-            <button type="button" class="table-edit-pill table-delete-pill pending-break-delete-pill" data-manager-break-delete>Delete</button>
-          </div>
-        `
-      )
-      .join("");
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
@@ -13260,24 +12591,7 @@ function renderTrackingTables() {
       finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
       breakCount,
       breakTimeMins,
-      notes: editing
-        ? `
-          <div class="table-inline-stack">
-            ${inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" })}
-            <div class="pending-break-editor">
-              <h6>Shift Breaks</h6>
-              <div class="pending-break-editor-list">
-                ${breakEditorRowsHtml || `<p class="pending-break-editor-empty">No breaks logged yet.</p>`}
-                <div class="pending-break-editor-row pending-break-editor-row-new" data-manager-break-editor-row data-break-id="" data-break-index="-1">
-                  <span class="pending-break-editor-label">New Break</span>
-                  <input class="pending-break-editor-input" data-break-field="start" value="" placeholder="Start HH:MM" />
-                  <input class="pending-break-editor-input" data-break-field="finish" value="" placeholder="Finish HH:MM" />
-                </div>
-              </div>
-            </div>
-          </div>
-        `
-        : String(row.notes || ""),
+      notes: editing ? inlineInputHtml("notes", String(row.notes || ""), { placeholder: "Notes" }) : String(row.notes || ""),
       submittedBy: managerLogSubmittedByLabel(row),
       action: actionHtml("shift", row, { editing, pending: shiftPending })
     };
@@ -13569,8 +12883,8 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   if (bottleneckCard) {
     bottleneckCard.classList.add("bottleneck");
   }
-  const lineUtil = Math.max(0, bottleneckUtil);
-  const lineUtilGross = Math.max(0, bottleneckUtilGross);
+  const lineUtil = Math.max(0, bottleneckUtilGross);
+  const lineUtilGross = Math.max(0, bottleneckUtil);
   const svUtilText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
   const svUtilGrossText = `${formatNum(Math.max(lineUtilGross, 0), 1)}%`;
   setSvText("svKpiUtilisation", svUtilText);
@@ -13619,9 +12933,6 @@ function renderHome() {
   const shiftDateInput = document.getElementById("superShiftDate");
   const shiftShiftInput = document.getElementById("superShiftShift");
   const shiftLogIdInput = document.getElementById("superShiftLogId");
-  const shiftOpenBreakIdInput = document.getElementById("superShiftOpenBreakId");
-  const shiftBreakStartBtn = document.getElementById("superShiftBreakStart");
-  const shiftBreakEndBtn = document.getElementById("superShiftBreakEnd");
   const shiftOpenList = document.getElementById("superShiftOpenList");
   const runDateInput = document.getElementById("superRunDate");
   const runLogIdInput = document.getElementById("superRunLogId");
@@ -14168,9 +13479,6 @@ function renderHome() {
     strictTimeValid(row?.startTime) &&
     strictTimeValid(row?.finishTime) &&
     row.startTime === row.finishTime;
-  const isBreakOpen = (row) =>
-    strictTimeValid(row?.breakStart) &&
-    !strictTimeValid(row?.breakFinish);
 
   const activeLine = selectedSupervisorLine();
   if (activeLine) {
@@ -14207,78 +13515,31 @@ function renderHome() {
       if (shiftLogIdInput) shiftLogIdInput.value = selectedShiftId;
       supervisorShiftTileEditId = selectedShiftId;
     }
-    const activeShiftId = selectedShiftId;
-    const activeShiftLog = shiftEditableRows.find((row) => String(row.id || "") === activeShiftId) || shiftEditableRows[0] || null;
-    const activeShiftForBreakControls = (activeShiftLog && isShiftOpen(activeShiftLog))
-      ? activeShiftLog
-      : shiftEditableRows.find((row) => isShiftOpen(row)) || null;
-    const openBreak = pickLatest(
-      (activeLine.breakRows || []).filter((row) => row.shiftLogId === activeShiftForBreakControls?.id && isBreakOpen(row))
-    );
-    if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = openBreak?.id || "";
-    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = !activeShiftForBreakControls?.id || Boolean(openBreak?.id);
-    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = !activeShiftForBreakControls?.id || !openBreak?.id;
     if (shiftOpenList) {
       shiftOpenList.innerHTML = shiftEditableRows.length
         ? `
           <div class="pending-log-list">
             ${shiftEditableRows
               .map((row) => {
-                const isSelected = Boolean(supervisorShiftTileEditId) && String(supervisorShiftTileEditId) === String(row.id || "");
-                const selectedClass = isSelected ? " active" : "";
+                const selectedClass = supervisorShiftTileEditId && String(supervisorShiftTileEditId) === String(row.id || "") ? " active" : "";
                 const rowIsOpen = isShiftOpen(row);
-                const rowBreakRows = breakRowsForShift(activeLine, row.id);
-                const rowOpenBreak = rowIsOpen ? pickLatest(rowBreakRows.filter((breakRow) => isBreakOpen(breakRow))) : null;
-                const breakEditorRowsHtml = rowBreakRows
-                  .map(
-                    (breakRow, index) => `
-                      <div class="pending-break-editor-row" data-break-editor-row data-break-id="${htmlEscape(breakRow.id || "")}" data-break-index="${index}">
-                        <span class="pending-break-editor-label">Break ${index + 1}</span>
-                        <input class="pending-break-editor-input" data-break-field="start" value="${htmlEscape(breakRow.breakStart || "")}" placeholder="Start HH:MM" />
-                        <input class="pending-break-editor-input" data-break-field="finish" value="${htmlEscape(breakRow.breakFinish || "")}" placeholder="Finish HH:MM" />
-                      </div>
-                    `
-                  )
-                  .join("");
                 return `
                   <article class="pending-log-item${selectedClass}">
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(row.shift || "Shift")} Shift</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")} | Crew ${formatNum(Math.max(0, num(row.crewOnShift)), 0)}${rowOpenBreak?.id ? ' <span class="pending-break-active">Break active</span>' : ""}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
+                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")} | Crew ${formatNum(Math.max(0, num(row.crewOnShift)), 0)}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
                       </p>
                     </div>
                     <div class="pending-log-actions">
                       <button type="button" class="table-edit-pill ghost-btn" data-super-shift-edit="${row.id}">Edit</button>
                       ${rowIsOpen
                         ? `
-                          ${
-                            rowOpenBreak?.id
-                              ? `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-end="${row.id}" data-super-shift-break-id="${rowOpenBreak.id}">End Break</button>`
-                              : `<button type="button" class="table-edit-pill ghost-btn" data-super-shift-break-start="${row.id}">Start Break</button>`
-                          }
                           <button type="button" class="table-edit-pill finalise-pill" data-super-shift-complete="${row.id}">Finalise</button>
                         `
                         : ""
                       }
                     </div>
-                    ${
-                      isSelected
-                        ? `
-                          <div class="pending-break-editor">
-                            <h6>Shift Breaks</h6>
-                            <div class="pending-break-editor-list">
-                              ${breakEditorRowsHtml || `<p class="pending-break-editor-empty">No breaks logged yet.</p>`}
-                              <div class="pending-break-editor-row pending-break-editor-row-new" data-break-editor-row data-break-id="" data-break-index="-1">
-                                <span class="pending-break-editor-label">New Break</span>
-                                <input class="pending-break-editor-input" data-break-field="start" value="" placeholder="Start HH:MM" />
-                                <input class="pending-break-editor-input" data-break-field="finish" value="" placeholder="Finish HH:MM" />
-                              </div>
-                            </div>
-                          </div>
-                        `
-                        : ""
-                    }
                   </article>
                 `;
               })
@@ -14404,14 +13665,11 @@ function renderHome() {
   } else {
     supervisorShiftTileEditId = "";
     if (shiftLogIdInput) shiftLogIdInput.value = "";
-    if (shiftOpenBreakIdInput) shiftOpenBreakIdInput.value = "";
     if (runLogIdInput) runLogIdInput.value = "";
     if (downLogIdInput) downLogIdInput.value = "";
     if (shiftOpenList) shiftOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
     if (runOpenList) runOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
     if (downOpenList) downOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
-    if (shiftBreakStartBtn) shiftBreakStartBtn.disabled = true;
-    if (shiftBreakEndBtn) shiftBreakEndBtn.disabled = true;
   }
   updateSupervisorProgressButtonLabels();
 
