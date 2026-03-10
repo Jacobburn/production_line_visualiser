@@ -9293,12 +9293,14 @@ function bindStageSettingsModal() {
 function bindTrendModal() {
   const overlay = document.getElementById("trendModal");
   const closeBtn = document.getElementById("closeTrendModal");
+  const exportBtn = document.getElementById("trendExportCsv");
   const dailyBtn = document.getElementById("trendDaily");
   const monthlyBtn = document.getElementById("trendMonthly");
   const prevBtn = document.getElementById("trendPrevMonth");
   const nextBtn = document.getElementById("trendNextMonth");
 
   closeBtn.addEventListener("click", closeTrendModal);
+  if (exportBtn) exportBtn.addEventListener("click", exportTrendModalCsv);
 
   overlay.addEventListener("click", (event) => {
     if (event.target === overlay) closeTrendModal();
@@ -12693,6 +12695,60 @@ function trendDatesForShift(shift, data) {
   return Array.from(dates).sort();
 }
 
+function trendMonthPointLabel(month) {
+  const [year, monthNumber] = String(month || "").split("-").map(Number);
+  if (!year || !monthNumber) return String(month || "");
+  return new Date(year, monthNumber - 1, 1).toLocaleDateString(undefined, { month: "short", year: "2-digit" });
+}
+
+function syncTrendMonthToAvailableMonths(allMonths = []) {
+  if (!state) return "";
+  const selectedMonthFromDate = monthKey(state.selectedDate);
+  if (!state.trendMonth) state.trendMonth = selectedMonthFromDate;
+  if (allMonths.length && !allMonths.includes(state.trendMonth)) {
+    state.trendMonth = allMonths.includes(selectedMonthFromDate) ? selectedMonthFromDate : allMonths[allMonths.length - 1];
+  }
+  return state.trendMonth || selectedMonthFromDate;
+}
+
+function buildStageTrendSeries() {
+  const data = derivedData();
+  const stages = getStages();
+  const stageIdx = stages.findIndex((item) => item.id === state.selectedStageId);
+  const stage = stageIdx >= 0 ? stages[stageIdx] : stages[0];
+  const allDates = trendDatesForShift(state.selectedShift, data);
+  const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
+  syncTrendMonthToAvailableMonths(allMonths);
+
+  const dailyPoints = allDates.map((date) => {
+    const point = stageDailyMetrics(state, stage, date, state.selectedShift, data);
+    return { ...point, label: date.slice(5) };
+  });
+  const monthlyPoints = allMonths.map((month) => {
+    const monthDates = allDates.filter((date) => monthKey(date) === month);
+    const dayPoints = monthDates.map((date) => stageDailyMetrics(state, stage, date, state.selectedShift, data));
+    const utilisation = dayPoints.length ? dayPoints.reduce((sum, point) => sum + point.utilisation, 0) / dayPoints.length : 0;
+    const stageDowntime = dayPoints.reduce((sum, point) => sum + point.stageDowntime, 0);
+    const stageEtc = dayPoints.length ? dayPoints.reduce((sum, point) => sum + point.stageEtc, 0) / dayPoints.length : 0;
+    return {
+      date: month,
+      label: trendMonthPointLabel(month),
+      utilisation,
+      stageDowntime,
+      stageEtc
+    };
+  });
+
+  return {
+    stage,
+    stageIndex: stageIdx >= 0 ? stageIdx : 0,
+    allDates,
+    allMonths,
+    dailyPoints,
+    monthlyPoints
+  };
+}
+
 function dayKpiTrendConfig(metricKey) {
   const keyStageId = normalizeDayVisualiserKeyStageId(state, state?.dayVisualiserKeyStageId);
   const keyStageMetrics = computeDayVisualiserKeyStageMetrics(state, keyStageId, { stages: getStages(), selectedShift: state?.selectedShift || "Day" });
@@ -12831,6 +12887,41 @@ function aggregateTrendMetricValues(values, mode = "avg") {
   return safeValues.reduce((sum, value) => sum + value, 0) / safeValues.length;
 }
 
+function buildDayKpiTrendSeries(metricKey) {
+  const config = dayKpiTrendConfig(metricKey);
+  if (!config || !state) {
+    return { config: null, allDates: [], allMonths: [], dailyPoints: [], monthlyPoints: [] };
+  }
+
+  const data = derivedData();
+  const allDates = trendDatesForShift(state.selectedShift, data);
+  const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
+  syncTrendMonthToAvailableMonths(allMonths);
+
+  const dailyPoints = allDates.map((date) => ({
+    date,
+    label: date.slice(5),
+    value: dayKpiTrendValue(metricKey, date, state.selectedShift, data)
+  }));
+  const monthlyPoints = allMonths.map((month) => {
+    const monthDates = allDates.filter((date) => monthKey(date) === month);
+    const values = monthDates.map((date) => dayKpiTrendValue(metricKey, date, state.selectedShift, data));
+    return {
+      date: month,
+      label: trendMonthPointLabel(month),
+      value: aggregateTrendMetricValues(values, config.aggregate)
+    };
+  });
+
+  return {
+    config,
+    allDates,
+    allMonths,
+    dailyPoints,
+    monthlyPoints
+  };
+}
+
 function renderDayKpiTrendChart(container, points, config) {
   if (!container || !Array.isArray(points) || !points.length || !config) return;
   const width = 1180;
@@ -12920,39 +13011,11 @@ function renderDayKpiTrend() {
   const title = document.getElementById("trendTitle");
   const meta = document.getElementById("trendMeta");
   const metricKey = String(trendModalContext.metricKey || "").trim();
-  const config = dayKpiTrendConfig(metricKey);
+  const { config, allMonths, dailyPoints, monthlyPoints } = buildDayKpiTrendSeries(metricKey);
   if (!container || !title || !meta || !config || !state) return;
-
-  const data = derivedData();
-  const allDates = trendDatesForShift(state.selectedShift, data);
-  const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
-  const selectedMonthFromDate = monthKey(state.selectedDate);
-  if (!state.trendMonth) state.trendMonth = selectedMonthFromDate;
-  if (allMonths.length && !allMonths.includes(state.trendMonth)) {
-    state.trendMonth = allMonths.includes(selectedMonthFromDate) ? selectedMonthFromDate : allMonths[allMonths.length - 1];
-  }
-
-  const pointForDate = (date) => ({
-    date,
-    label: date.slice(5),
-    value: dayKpiTrendValue(metricKey, date, state.selectedShift, data)
-  });
-
-  let points = [];
-  if (state.trendGranularity === "monthly") {
-    points = allMonths.map((month) => {
-      const monthDates = allDates.filter((date) => monthKey(date) === month);
-      const values = monthDates.map((date) => dayKpiTrendValue(metricKey, date, state.selectedShift, data));
-      return {
-        date: month,
-        label: new Date(`${month}-01T00:00:00`).toLocaleDateString(undefined, { month: "short", year: "2-digit" }),
-        value: aggregateTrendMetricValues(values, config.aggregate)
-      };
-    });
-  } else {
-    const monthDates = allDates.filter((date) => monthKey(date) === state.trendMonth);
-    points = monthDates.map(pointForDate);
-  }
+  const points = state.trendGranularity === "monthly"
+    ? monthlyPoints
+    : dailyPoints.filter((point) => monthKey(point.date) === state.trendMonth);
 
   title.textContent = config.title;
   meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : "Daily within selected month"} | ${config.description}`;
@@ -12970,37 +13033,12 @@ function renderStageTrend() {
   const container = document.getElementById("stageTrendChart");
   const title = document.getElementById("trendTitle");
   const meta = document.getElementById("trendMeta");
-  const data = derivedData();
-  const stages = getStages();
-  const stageIdx = stages.findIndex((item) => item.id === state.selectedStageId);
-  const stage = stageIdx >= 0 ? stages[stageIdx] : stages[0];
-  const allDates = trendDatesForShift(state.selectedShift, data);
-  const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
-  const selectedMonthFromDate = monthKey(state.selectedDate);
-  if (!state.trendMonth) state.trendMonth = selectedMonthFromDate;
-  if (allMonths.length && !allMonths.includes(state.trendMonth)) {
-    state.trendMonth = allMonths.includes(selectedMonthFromDate) ? selectedMonthFromDate : allMonths[allMonths.length - 1];
-  }
+  const { stage, stageIndex, allMonths, dailyPoints, monthlyPoints } = buildStageTrendSeries();
+  const points = state.trendGranularity === "monthly"
+    ? monthlyPoints
+    : dailyPoints.filter((point) => monthKey(point.date) === state.trendMonth);
 
-  let points = [];
-  if (state.trendGranularity === "monthly") {
-    points = allMonths.map((month) => {
-      const monthDates = allDates.filter((d) => monthKey(d) === month);
-      const dayPoints = monthDates.map((date) => stageDailyMetrics(state, stage, date, state.selectedShift, data));
-      const utilisation = dayPoints.length ? dayPoints.reduce((s, p) => s + p.utilisation, 0) / dayPoints.length : 0;
-      const stageDowntime = dayPoints.reduce((s, p) => s + p.stageDowntime, 0);
-      const stageEtc = dayPoints.length ? dayPoints.reduce((s, p) => s + p.stageEtc, 0) / dayPoints.length : 0;
-      return { date: month, utilisation, stageDowntime, stageEtc, label: month.slice(2) };
-    });
-  } else {
-    const monthDates = allDates.filter((d) => monthKey(d) === state.trendMonth);
-    points = monthDates.map((date) => {
-      const p = stageDailyMetrics(state, stage, date, state.selectedShift, data);
-      return { ...p, label: date.slice(5) };
-    });
-  }
-
-  title.textContent = `${stageDisplayName(stage, stageIdx >= 0 ? stageIdx : 0)} Trend`;
+  title.textContent = `${stageDisplayName(stage, stageIndex)} Trend`;
   meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : "Daily within selected month"} | Utilisation is based on ETC vs max throughput.`;
   setTrendControlsUI(allMonths);
 
@@ -13087,6 +13125,100 @@ function renderTrendModalContent() {
     return;
   }
   renderStageTrend();
+}
+
+function exportTrendModalCsv() {
+  if (!state) return;
+  const slug = (value) =>
+    String(value || "")
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+      || "trend";
+
+  if (String(trendModalContext.type || "").trim() === "dayKpi") {
+    const metricKey = String(trendModalContext.metricKey || "").trim();
+    const { config, dailyPoints, monthlyPoints } = buildDayKpiTrendSeries(metricKey);
+    if (!config || (!dailyPoints.length && !monthlyPoints.length)) {
+      alert("No trend data available to export.");
+      return;
+    }
+    const rows = [
+      ...dailyPoints.map((point) => ({
+        Line: state.name || "Production Line",
+        Shift: state.selectedShift || "Day",
+        TrendType: "Day KPI",
+        Metric: config.legend,
+        Granularity: "Daily",
+        PeriodKey: point.date,
+        PeriodLabel: formatIsoDateLabel(point.date, { month: "short", day: "numeric", year: "numeric" }),
+        Value: roundToDecimals(num(point.value), 4),
+        DisplayValue: config.formatValue(point.value)
+      })),
+      ...monthlyPoints.map((point) => ({
+        Line: state.name || "Production Line",
+        Shift: state.selectedShift || "Day",
+        TrendType: "Day KPI",
+        Metric: config.legend,
+        Granularity: "Monthly",
+        PeriodKey: point.date,
+        PeriodLabel: formatMonthLabel(point.date),
+        Value: roundToDecimals(num(point.value), 4),
+        DisplayValue: config.formatValue(point.value)
+      }))
+    ];
+    const columns = ["Line", "Shift", "TrendType", "Metric", "Granularity", "PeriodKey", "PeriodLabel", "Value", "DisplayValue"];
+    downloadTextFile(
+      `${slug(state.name)}-${slug(config.title)}-trend.csv`,
+      toCsv(rows, columns),
+      "text/csv;charset=utf-8"
+    );
+    addAudit(state, "EXPORT_TREND_CSV", `${config.title} trend CSV exported`);
+    saveState();
+    return;
+  }
+
+  const { stage, stageIndex, dailyPoints, monthlyPoints } = buildStageTrendSeries();
+  if (!stage || (!dailyPoints.length && !monthlyPoints.length)) {
+    alert("No trend data available to export.");
+    return;
+  }
+  const stageLabel = stageDisplayName(stage, stageIndex);
+  const rows = [
+    ...dailyPoints.map((point) => ({
+      Line: state.name || "Production Line",
+      Shift: state.selectedShift || "Day",
+      TrendType: "Stage",
+      Stage: stageLabel,
+      Granularity: "Daily",
+      PeriodKey: point.date,
+      PeriodLabel: formatIsoDateLabel(point.date, { month: "short", day: "numeric", year: "numeric" }),
+      UtilisationPct: roundToDecimals(num(point.utilisation), 4),
+      DowntimeMin: roundToDecimals(num(point.stageDowntime), 4),
+      EtcUnitsPerMin: roundToDecimals(num(point.stageEtc), 4)
+    })),
+    ...monthlyPoints.map((point) => ({
+      Line: state.name || "Production Line",
+      Shift: state.selectedShift || "Day",
+      TrendType: "Stage",
+      Stage: stageLabel,
+      Granularity: "Monthly",
+      PeriodKey: point.date,
+      PeriodLabel: formatMonthLabel(point.date),
+      UtilisationPct: roundToDecimals(num(point.utilisation), 4),
+      DowntimeMin: roundToDecimals(num(point.stageDowntime), 4),
+      EtcUnitsPerMin: roundToDecimals(num(point.stageEtc), 4)
+    }))
+  ];
+  const columns = ["Line", "Shift", "TrendType", "Stage", "Granularity", "PeriodKey", "PeriodLabel", "UtilisationPct", "DowntimeMin", "EtcUnitsPerMin"];
+  downloadTextFile(
+    `${slug(state.name)}-${slug(stageLabel)}-stage-trend.csv`,
+    toCsv(rows, columns),
+    "text/csv;charset=utf-8"
+  );
+  addAudit(state, "EXPORT_TREND_CSV", `${stageLabel} trend CSV exported`);
+  saveState();
 }
 
 function setTrendControlsUI(allMonths = []) {
