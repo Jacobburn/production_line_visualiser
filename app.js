@@ -140,6 +140,8 @@ let managerLogInlineEdit = { lineId: "", type: "", logId: "" };
 let managerActionTicketEditId = "";
 let supervisorShiftTileEditId = "";
 let runCrewingPatternModalState = null;
+let dayVizBlockModalState = null;
+let dayVizBlockModalBusy = false;
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 appState.lineGroups = normalizeLineGroups(appState.lineGroups);
 appState.dataSources = normalizeDataSources(appState.dataSources);
@@ -1590,7 +1592,7 @@ function derivedDataForLine(line) {
   const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows);
   const shiftRows = operationalShiftRows.map(computeShiftRow);
   const breakRows = [...operationalBreakRows.map(computeBreakRow), ...breakRowsFromDowntime.map(computeBreakRow)];
-  const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
+  const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, calculationDowntimeRows(downtimeRows));
   const runRows = operationalRunRows
     .map((row) => decorateTimedLogShift(row, line, "productionStartTime", "finishTime"))
     .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
@@ -1602,6 +1604,7 @@ function computeLineMetrics(line, date, shift) {
   const data = derivedDataForLine(line || {});
   const selectedRunRows = selectedShiftRowsByDate(data.runRows, date, shift, { line });
   const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, date, shift, { line });
+  const selectedCalcDownRows = calculationDowntimeRows(selectedDownRows);
   const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line });
   const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
 
@@ -1640,9 +1643,9 @@ function computeLineMetrics(line, date, shift) {
   let bottleneckUtil = 0;
   let bottleneckUtilGross = 0;
   if (bottleneck) {
-    const stageDowntime = selectedDownRows
+    const stageDowntime = selectedCalcDownRows
       .filter((row) => matchesStage(bottleneck.stage, row.equipment))
-      .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
+      .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, shift), 0);
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
     const totalMax = Math.max(0, num(bottleneck.capacity));
@@ -2358,11 +2361,7 @@ function normalizeLine(id, line) {
         }))
       : [],
     downtimeRows: Array.isArray(line?.downtimeRows)
-      ? line.downtimeRows.map((row) => ({
-          ...row,
-          assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
-          shift: ""
-        }))
+      ? line.downtimeRows.map((row) => normalizeDowntimeLogRow(row))
       : [],
     supervisorLogs: Array.isArray(line?.supervisorLogs) ? line.supervisorLogs : [],
     auditRows: Array.isArray(line?.auditRows) ? line.auditRows : []
@@ -3804,18 +3803,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
       }))
     : [];
   line.downtimeRows = Array.isArray(logs?.downtimeRows)
-    ? logs.downtimeRows.map((row) => {
-        const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
-        return {
-          ...row,
-          assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
-          shift: "",
-          notes: String(row?.notes || ""),
-          reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
-          reasonDetail: row?.reasonDetail || parsedReason.reasonDetail,
-          reasonNote: row?.reasonNote || parsedReason.reasonNote
-        };
-      })
+    ? logs.downtimeRows.map((row) => normalizeDowntimeLogRow(row))
     : [];
   line.auditRows = [];
   line.supervisorLogs = [];
@@ -4170,19 +4158,23 @@ async function syncManagerDowntimeLog(payload) {
   if (!backendLineId) throw new Error("Line is not synced to server.");
   const backendEquipmentId = await ensureBackendStageId(payload.lineId, payload.equipment, session);
   const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
+  const body = {
+    lineId: backendLineId,
+    date: payload.date,
+    shift: payload.shift,
+    downtimeStart: payload.downtimeStart,
+    downtimeFinish: payload.downtimeFinish,
+    equipmentStageId: safeEquipmentStageId,
+    reason: payload.reason || "",
+    notes: String(payload.notes || "")
+  };
+  if (Object.prototype.hasOwnProperty.call(payload, "excludeFromCalculation")) {
+    body.excludeFromCalculation = normalizeDowntimeCalculationFlag(payload.excludeFromCalculation);
+  }
   const response = await apiRequest("/api/logs/downtime", {
     method: "POST",
     token: session.backendToken,
-    body: {
-      lineId: backendLineId,
-      date: payload.date,
-      shift: payload.shift,
-      downtimeStart: payload.downtimeStart,
-      downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: safeEquipmentStageId,
-      reason: payload.reason || "",
-      notes: String(payload.notes || "")
-    }
+    body
   });
   return response?.downtimeLog || null;
 }
@@ -4237,18 +4229,22 @@ async function patchManagerDowntimeLog(logId, payload) {
     ? await ensureBackendStageId(payload.lineId || state.id, payload.equipment, session)
     : null;
   const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
+  const body = {
+    date: payload.date,
+    shift: payload.shift,
+    downtimeStart: payload.downtimeStart,
+    downtimeFinish: payload.downtimeFinish,
+    equipmentStageId: safeEquipmentStageId,
+    reason: payload.reason || "",
+    notes: String(payload.notes || "")
+  };
+  if (Object.prototype.hasOwnProperty.call(payload, "excludeFromCalculation")) {
+    body.excludeFromCalculation = normalizeDowntimeCalculationFlag(payload.excludeFromCalculation);
+  }
   const response = await apiRequest(`/api/logs/downtime/${logId}`, {
     method: "PATCH",
     token: session.backendToken,
-    body: {
-      date: payload.date,
-      shift: payload.shift,
-      downtimeStart: payload.downtimeStart,
-      downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: safeEquipmentStageId,
-      reason: payload.reason || "",
-      notes: String(payload.notes || "")
-    }
+    body
   });
   return response?.downtimeLog || null;
 }
@@ -4422,19 +4418,23 @@ async function syncSupervisorDowntimeLog(session, payload) {
     ? await ensureBackendStageId(payload.lineId, payload.equipment, session)
     : null;
   const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
+  const body = {
+    lineId: backendLineId,
+    date: payload.date,
+    shift: payload.shift,
+    downtimeStart: payload.downtimeStart,
+    downtimeFinish: payload.downtimeFinish,
+    equipmentStageId: safeEquipmentStageId,
+    reason: payload.reason || "",
+    notes: String(payload.notes || "")
+  };
+  if (Object.prototype.hasOwnProperty.call(payload, "excludeFromCalculation")) {
+    body.excludeFromCalculation = normalizeDowntimeCalculationFlag(payload.excludeFromCalculation);
+  }
   const response = await apiRequest("/api/logs/downtime", {
     method: "POST",
     token: session.backendToken,
-    body: {
-      lineId: backendLineId,
-      date: payload.date,
-      shift: payload.shift,
-      downtimeStart: payload.downtimeStart,
-      downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: safeEquipmentStageId,
-      reason: payload.reason || "",
-      notes: String(payload.notes || "")
-    }
+    body
   });
   return response?.downtimeLog || null;
 }
@@ -4446,16 +4446,20 @@ async function patchSupervisorDowntimeLog(session, logId, payload) {
     ? await ensureBackendStageId(payload.lineId, payload.equipment, session)
     : null;
   const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
+  const body = {
+    downtimeStart: payload.downtimeStart,
+    downtimeFinish: payload.downtimeFinish,
+    equipmentStageId: safeEquipmentStageId,
+    reason: payload.reason || "",
+    notes: String(payload.notes || "")
+  };
+  if (Object.prototype.hasOwnProperty.call(payload, "excludeFromCalculation")) {
+    body.excludeFromCalculation = normalizeDowntimeCalculationFlag(payload.excludeFromCalculation);
+  }
   const response = await apiRequest(`/api/logs/downtime/${logId}`, {
     method: "PATCH",
     token: session.backendToken,
-    body: {
-      downtimeStart: payload.downtimeStart,
-      downtimeFinish: payload.downtimeFinish,
-      equipmentStageId: safeEquipmentStageId,
-      reason: payload.reason || "",
-      notes: String(payload.notes || "")
-    }
+    body
   });
   return response?.downtimeLog || null;
 }
@@ -4688,6 +4692,10 @@ function validateDowntimeBackendPayload(payload) {
   return "";
 }
 
+function normalizeDowntimeCalculationFlag(value) {
+  return value === true || value === "true" || value === 1 || value === "1";
+}
+
 function parseDowntimeReasonParts(reasonText, equipment = "") {
   const raw = String(reasonText || "").trim();
   const parts = raw
@@ -4703,6 +4711,33 @@ function parseDowntimeReasonParts(reasonText, equipment = "") {
     reasonDetail: detail,
     reasonNote: note
   };
+}
+
+function normalizeDowntimeLogRow(row) {
+  const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
+  return {
+    ...(row || {}),
+    assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
+    shift: "",
+    notes: String(row?.notes || ""),
+    reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
+    reasonDetail: row?.reasonDetail || parsedReason.reasonDetail,
+    reasonNote: row?.reasonNote || parsedReason.reasonNote,
+    excludeFromCalculation: normalizeDowntimeCalculationFlag(row?.excludeFromCalculation)
+  };
+}
+
+function isDowntimeExcludedFromCalculation(row) {
+  return normalizeDowntimeCalculationFlag(row?.excludeFromCalculation);
+}
+
+function calculationDowntimeRows(rows = []) {
+  return (rows || []).filter((row) => !isDowntimeExcludedFromCalculation(row));
+}
+
+function downtimeMinutesForCalculations(row, shift) {
+  if (isDowntimeExcludedFromCalculation(row)) return 0;
+  return num(row?.downtimeMins) * timedLogShiftWeight(row, shift);
 }
 
 function downtimeReasonCategoryFromRow(row) {
@@ -5007,7 +5042,11 @@ function diffMinutes(startValue, finishValue) {
 function computeDowntimeRow(row) {
   const fallback = num(row.downtimeMins);
   const calc = diffMinutes(row.downtimeStart, row.downtimeFinish);
-  return { ...row, downtimeMins: calc > 0 ? calc : fallback };
+  return {
+    ...row,
+    downtimeMins: calc > 0 ? calc : fallback,
+    excludeFromCalculation: normalizeDowntimeCalculationFlag(row?.excludeFromCalculation)
+  };
 }
 
 function computeShiftRow(row) {
@@ -5126,6 +5165,7 @@ function downtimeBreakRowFromMigration(line, breakRow, payload, savedDowntime = 
     reasonCategory,
     reasonDetail,
     reasonNote,
+    excludeFromCalculation: normalizeDowntimeCalculationFlag(savedDowntime?.excludeFromCalculation),
     notes: String(savedDowntime?.notes ?? payload?.notes ?? "").trim(),
     submittedBy: String(savedDowntime?.submittedBy || breakRow?.submittedBy || "manager").trim() || "manager",
     submittedByUserId: String(savedDowntime?.submittedByUserId || breakRow?.submittedByUserId || "").trim(),
@@ -5176,7 +5216,7 @@ function derivedData() {
   const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows);
   const shiftRows = operationalShiftRows.map(computeShiftRow);
   const breakRows = [...operationalBreakRows.map(computeBreakRow), ...breakRowsFromDowntime.map(computeBreakRow)];
-  const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, downtimeRows);
+  const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, calculationDowntimeRows(downtimeRows));
   const runRows = operationalRunRows
     .map((row) => decorateTimedLogShift(row, state, "productionStartTime", "finishTime"))
     .map((row) => computeRunRow(row, nonProductionIntervalsByDate));
@@ -8102,6 +8142,9 @@ function bindHome() {
         ...payload,
         assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
         shift: "",
+        excludeFromCalculation: normalizeDowntimeCalculationFlag(
+          saved?.excludeFromCalculation ?? existing?.excludeFromCalculation
+        ),
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
         submittedAt: saved?.submittedAt || nowIso()
@@ -9521,6 +9564,7 @@ function bindForms() {
         ...data,
         assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
         shift: "",
+        excludeFromCalculation: normalizeDowntimeCalculationFlag(saved?.excludeFromCalculation),
         id: saved?.id || data.id || makeLocalLogId("down"),
         submittedBy: "manager",
         submittedAt: saved?.submittedAt || nowIso()
@@ -10435,10 +10479,7 @@ function bindDataControls() {
           }))
         : [];
       const importedDowntimeRows = Array.isArray(parsed.downtimeRows)
-        ? parsed.downtimeRows.map((row) => ({
-            ...row,
-            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift)
-          }))
+        ? parsed.downtimeRows.map((row) => normalizeDowntimeLogRow(row))
         : [];
 
       if (!importedShiftRows.length && !importedBreakRows.length && !importedRunRows.length && !importedDowntimeRows.length) {
@@ -10629,7 +10670,8 @@ function bindDataControls() {
             downtimeFinish,
             equipment,
             reason: reasonText,
-            notes: trimLogNotes(row?.notes)
+            notes: trimLogNotes(row?.notes),
+            excludeFromCalculation: normalizeDowntimeCalculationFlag(row?.excludeFromCalculation)
           };
           await syncManagerDowntimeLog(payload);
           counts.downtime += 1;
@@ -10888,6 +10930,12 @@ function dayVizBlockDetailRows(detail = {}) {
     { label: "Time", value: detail.timeRange || "-" },
     { label: "Duration", value: `${formatNum(Math.max(0, num(detail.durationMins)), 1)} min` }
   ];
+  if (String(detail.typeKey || "").toLowerCase() === "downtime") {
+    rows.push({
+      label: "Calculation Status",
+      value: detail.excludeFromCalculation ? "Excluded from run rate and utilisation" : "Included in run rate and utilisation"
+    });
+  }
   const subtitle = String(detail.subtitle || "").trim();
   if (subtitle) rows.push({ label: "Logged Details", value: subtitle });
   return rows
@@ -10902,24 +10950,124 @@ function dayVizBlockDetailRows(detail = {}) {
     .join("");
 }
 
-function openDayVizBlockModal(detail) {
+function dayVizBlockModalCanToggleDowntime(detail = dayVizBlockModalState) {
+  return Boolean(
+    detail
+    && String(detail.typeKey || "").toLowerCase() === "downtime"
+    && String(detail.rootId || "") === "dayVisualiserCanvas"
+    && appState.appMode === "manager"
+    && state
+    && String(detail.lineId || "") === String(state.id || "")
+    && String(detail.logId || "").trim()
+  );
+}
+
+function currentDayVizDowntimeRow(detail = dayVizBlockModalState) {
+  if (!dayVizBlockModalCanToggleDowntime(detail)) return null;
+  const logId = String(detail?.logId || "").trim();
+  return (state?.downtimeRows || []).find((row) => String(row?.id || "").trim() === logId) || null;
+}
+
+function renderDayVizBlockModal(detail) {
   const overlay = document.getElementById("dayVizBlockModal");
   const titleNode = document.getElementById("dayVizBlockModalTitle");
   const metaNode = document.getElementById("dayVizBlockModalMeta");
   const bodyNode = document.getElementById("dayVizBlockModalBody");
+  const actionsNode = document.getElementById("dayVizBlockModalActions");
   if (!overlay || !titleNode || !metaNode || !bodyNode || !detail) return;
+  dayVizBlockModalState = { ...detail };
   titleNode.textContent = detail.title || "Time Block";
   metaNode.textContent = `${detail.typeLabel || "Time block"} | ${detail.laneLabel || "Schedule"}`;
   bodyNode.innerHTML = dayVizBlockDetailRows(detail);
+  if (actionsNode) {
+    actionsNode.innerHTML = dayVizBlockModalCanToggleDowntime(detail)
+      ? `
+        <p class="day-viz-block-modal-action-note">Keeps the downtime visible, but removes it from run rate and utilisation calculations.</p>
+        <button id="toggleDayVizExcludeFromCalculation" type="button"${dayVizBlockModalBusy ? " disabled" : ""}>
+          ${detail.excludeFromCalculation ? "Include in calculation" : "Exclude from calculation"}
+        </button>
+      `
+      : "";
+  }
   overlay.classList.add("open");
   overlay.setAttribute("aria-hidden", "false");
 }
 
+function openDayVizBlockModal(detail) {
+  renderDayVizBlockModal(detail);
+}
+
 function closeDayVizBlockModal() {
   const overlay = document.getElementById("dayVizBlockModal");
+  const actionsNode = document.getElementById("dayVizBlockModalActions");
   if (!overlay) return;
+  dayVizBlockModalState = null;
+  dayVizBlockModalBusy = false;
+  if (actionsNode) actionsNode.innerHTML = "";
   overlay.classList.remove("open");
   overlay.setAttribute("aria-hidden", "true");
+}
+
+async function toggleDayVizDowntimeCalculationExclusion() {
+  const detail = dayVizBlockModalState;
+  const row = currentDayVizDowntimeRow(detail);
+  if (!detail || !row) return;
+  const nextExcludeFromCalculation = !isDowntimeExcludedFromCalculation(row);
+  const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+  const reasonCategory = String(row.reasonCategory || parsedReason.reasonCategory || "").trim();
+  const reasonDetail = String(row.reasonDetail || parsedReason.reasonDetail || "").trim();
+  const reasonNote = String((row.reasonNote ?? parsedReason.reasonNote) || "").trim();
+  const backendShift = normalizeLogAssignableShift(row.assignedShift || row.shift)
+    || inferShiftForLog(state, row.date, row.downtimeStart, state.selectedShift || "Day");
+  const payload = {
+    lineId: state.id,
+    date: row.date,
+    shift: backendShift,
+    downtimeStart: row.downtimeStart,
+    downtimeFinish: row.downtimeFinish,
+    equipment: String(row.equipment || "").trim(),
+    reason: String(row.reason || buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote) || "Downtime").trim(),
+    notes: String(row.notes || ""),
+    excludeFromCalculation: nextExcludeFromCalculation
+  };
+  const activeLogId = String(row.id || "").trim();
+  dayVizBlockModalBusy = true;
+  renderDayVizBlockModal({
+    ...detail,
+    excludeFromCalculation: isDowntimeExcludedFromCalculation(row)
+  });
+  try {
+    if (UUID_RE.test(activeLogId)) {
+      const saved = await patchManagerDowntimeLog(activeLogId, payload);
+      row.assignedShift = normalizeLogAssignableShift(saved?.shift || backendShift);
+      row.submittedAt = saved?.submittedAt || nowIso();
+      row.excludeFromCalculation = normalizeDowntimeCalculationFlag(saved?.excludeFromCalculation ?? nextExcludeFromCalculation);
+    } else {
+      row.assignedShift = normalizeLogAssignableShift(backendShift);
+      row.submittedAt = nowIso();
+      row.excludeFromCalculation = nextExcludeFromCalculation;
+    }
+    addAudit(
+      state,
+      nextExcludeFromCalculation ? "MANAGER_DOWNTIME_EXCLUDE_CALC" : "MANAGER_DOWNTIME_INCLUDE_CALC",
+      `Manager ${nextExcludeFromCalculation ? "excluded" : "included"} downtime from calculations for ${row.date} (${stageNameById(row.equipment) || lineDowntimeReasonCategory(row) || "Downtime"})`
+    );
+    saveState();
+    renderAll();
+  } catch (error) {
+    alert(`Could not update downtime calculation status.\n${error?.message || "Please try again."}`);
+  } finally {
+    const isSameModal =
+      dayVizBlockModalState
+      && String(dayVizBlockModalState.logId || "").trim() === activeLogId;
+    dayVizBlockModalBusy = false;
+    if (isSameModal) {
+      renderDayVizBlockModal({
+        ...dayVizBlockModalState,
+        excludeFromCalculation: isDowntimeExcludedFromCalculation(row)
+      });
+    }
+  }
 }
 
 function bindDayVizBlockModal() {
@@ -10940,6 +11088,10 @@ function bindDayVizBlockModal() {
 
   document.addEventListener("click", (event) => {
     if (!(event.target instanceof Element)) return;
+    if (event.target.closest("#toggleDayVizExcludeFromCalculation")) {
+      toggleDayVizDowntimeCalculationExclusion();
+      return;
+    }
     const blockEl = event.target.closest(".day-viz-block[data-day-viz-block-id]");
     if (!blockEl) return;
     tryOpenFromElement(blockEl);
@@ -11048,6 +11200,8 @@ function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameRe
         blocks.downtime.push({
           ...segment,
           type: "downtime",
+          sourceRow: row,
+          excludeFromCalculation: isDowntimeExcludedFromCalculation(row),
           title: equipmentLabel || "Downtime",
           sub: `${formatTime12h(row.downtimeStart)} - ${formatTime12h(row.downtimeFinish)}${reasonText ? ` | ${reasonText}` : ""}`
         });
@@ -11135,7 +11289,7 @@ function buildDayAtGlance(blocks, stageNameResolver, selectedShift = "Full Day")
   };
 }
 
-function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageNameResolver) {
+function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageNameResolver, lineContext = null) {
   const root = document.getElementById(rootId);
   if (!root) return;
   const blocks = buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver);
@@ -11212,8 +11366,8 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   );
   const productionMinutes = laneMinutes(blocks.runs);
   const productionIntervals = visibleIntervals(blocks.runs);
-  const downtimeIntervals = visibleIntervals(blocks.downtime);
-  const overlappingDowntimeMins = intervalsOverlapMinutes(productionIntervals, downtimeIntervals);
+  const calculationDowntimeIntervals = visibleIntervals(blocks.downtime.filter((item) => !item.excludeFromCalculation));
+  const overlappingDowntimeMins = intervalsOverlapMinutes(productionIntervals, calculationDowntimeIntervals);
   const netProductionMinutes = Math.max(0, productionMinutes - overlappingDowntimeMins);
   const productionRate = netProductionMinutes > 0 ? productionUnits / netProductionMinutes : 0;
   const productionTrafficForRate = (rate, netMins) =>
@@ -11256,7 +11410,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         .map((segment) => toWindowSegment(segment.start, segment.end))
         .filter(Boolean);
       const grossMins = runIntervals.reduce((sum, interval) => sum + (interval.end - interval.start), 0);
-      const downInRunMins = intervalsOverlapMinutes(runIntervals, downtimeIntervals);
+      const downInRunMins = intervalsOverlapMinutes(runIntervals, calculationDowntimeIntervals);
       const computedNetRunMins = Math.max(0, num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift));
       const fallbackNetRunMins = Math.max(0, grossMins - downInRunMins);
       const netRunMins = computedNetRunMins > 0 ? computedNetRunMins : fallbackNetRunMins;
@@ -11320,14 +11474,19 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         const timeRange = `${formatMinutesToClockLabel(item.start)} - ${formatMinutesToClockLabel(item.end)}`;
         const typeLabel = dayVizBlockTypeLabel(item.type);
         blockDetailsById[detailId] = {
+          rootId,
+          lineId: String(lineContext?.id || ""),
+          logId: String(item?.sourceRow?.id || ""),
           title: String(item.title || ""),
           subtitle: String(item.sub || ""),
           date: selectedDate,
           shiftLabel: selectedShiftLabel,
           laneLabel: label,
+          typeKey: String(item.type || ""),
           typeLabel,
           timeRange,
-          durationMins
+          durationMins,
+          excludeFromCalculation: Boolean(item.excludeFromCalculation)
         };
         const ariaLabel = `${label}: ${item.title}. ${timeRange}. ${formatNum(durationMins, 1)} minutes.`;
         return `
@@ -11433,7 +11592,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
 }
 
 function renderDayVisualiser() {
-  renderDayVisualiserTo("dayVisualiserCanvas", derivedData(), state.selectedDate, state.selectedShift, stageNameById);
+  renderDayVisualiserTo("dayVisualiserCanvas", derivedData(), state.selectedDate, state.selectedShift, stageNameById, state);
 }
 
 function lineTrendRangeKey() {
@@ -12172,7 +12331,8 @@ function renderSupervisorDayVisualiser(line, selectedDate) {
     derivedDataForLine(line),
     selectedDate,
     appState.supervisorSelectedShift,
-    (id) => stageNameByIdForLine(line, id)
+    (id) => stageNameByIdForLine(line, id),
+    line
   );
 }
 
@@ -12182,6 +12342,7 @@ function renderVisualiser() {
   const liveDowntimeByStage = liveEquipmentDowntimeByStage(state, stages);
   const selectedRunRows = selectedRows(data.runRows);
   const selectedDowntimeRows = selectedRows(data.downtimeRows);
+  const selectedCalculationDowntimeRows = calculationDowntimeRows(selectedDowntimeRows);
   const selectedShiftRows = selectedRows(data.shiftRows);
   const selectedShift = state.selectedShift;
 
@@ -12223,9 +12384,9 @@ function renderVisualiser() {
   appendFlowGuidesToMap(map, guides, { editable: Boolean(state.visualEditMode) });
 
   stages.forEach((stage, index) => {
-    const stageDowntime = selectedDowntimeRows
+    const stageDowntime = selectedCalculationDowntimeRows
       .filter((row) => matchesStage(stage, row.equipment))
-      .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
+      .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, selectedShift), 0);
 
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
@@ -12310,9 +12471,9 @@ function renderVisualiser() {
 function stageDailyMetrics(stage, date, shift, data) {
   const shiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line: state });
   const shiftMins = shiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
-  const stageDowntime = selectedShiftRowsByDate(data.downtimeRows, date, shift, { line: state })
+  const stageDowntime = calculationDowntimeRows(selectedShiftRowsByDate(data.downtimeRows, date, shift, { line: state }))
     .filter((row) => matchesStage(stage, row.equipment))
-    .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
+    .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, shift), 0);
 
   const runRows = selectedShiftRowsByDate(data.runRows, date, shift, { line: state });
   const units = runRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, shift), 0);
@@ -12794,6 +12955,7 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   const data = derivedDataForLine(line || {});
   const selectedRunRows = selectedShiftRowsByDate(data.runRows, selectedDate, selectedShift, { line });
   const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, selectedDate, selectedShift, { line });
+  const selectedCalcDownRows = calculationDowntimeRows(selectedDownRows);
   const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, selectedDate, selectedShift, { line });
   const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
   const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, selectedShift), 0);
@@ -12832,9 +12994,9 @@ function renderSupervisorVisualiser(line, selectedDate, selectedShift) {
   appendFlowGuidesToMap(map, guides, { editable: false });
 
   stages.forEach((stage, index) => {
-    const stageDowntime = selectedDownRows
+    const stageDowntime = selectedCalcDownRows
       .filter((row) => matchesStage(stage, row.equipment))
-      .reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
+      .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, selectedShift), 0);
     const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
     const stageRate = netRunRate * uptimeRatio;
     const totalMax = stageTotalMaxThroughputForLine(line, stage.id, selectedShift);

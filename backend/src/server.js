@@ -184,7 +184,8 @@ const downtimeLogSchema = z.object({
   downtimeFinish: z.string().regex(timeRegex),
   equipmentStageId: z.string().uuid().nullable().optional(),
   reason: z.string().max(250).optional().or(z.literal('')).or(z.null()),
-  notes: optionalLogNotes
+  notes: optionalLogNotes,
+  excludeFromCalculation: z.boolean().optional().default(false)
 });
 
 const supervisorActionCreateSchema = z.object({
@@ -259,7 +260,8 @@ const downtimeLogUpdateSchema = z.object({
   downtimeFinish: optionalTime.optional(),
   equipmentStageId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
   reason: z.string().max(250).optional().or(z.literal('')).or(z.null()),
-  notes: optionalLogNotes
+  notes: optionalLogNotes,
+  excludeFromCalculation: z.boolean().optional()
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const supervisorActionUpdateSchema = z.object({
@@ -1350,6 +1352,10 @@ async function ensureLogSchema() {
       `ALTER TABLE downtime_logs
        ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''`
     );
+    await dbQuery(
+      `ALTER TABLE downtime_logs
+       ADD COLUMN IF NOT EXISTS exclude_from_calculation BOOLEAN NOT NULL DEFAULT FALSE`
+    );
     logSchemaReady = true;
   })()
     .catch((error) => {
@@ -2390,6 +2396,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              shift,
              to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
              COALESCE(downtime_logs.notes, '') AS notes,
@@ -2406,6 +2413,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              shift,
              to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
              COALESCE(downtime_logs.notes, '') AS notes,
@@ -2541,6 +2549,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       shift: row.shift,
       downtimeStart: row.downtimeStart,
       downtimeFinish: row.downtimeFinish,
+      excludeFromCalculation: row.excludeFromCalculation,
       equipment: row.equipment,
       reason: row.reason,
       submittedBy: row.submittedBy,
@@ -3509,6 +3518,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              shift,
              to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
              COALESCE(downtime_logs.notes, '') AS notes,
@@ -3524,6 +3534,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              shift,
              to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
              to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
              COALESCE(equipment_stage_id::TEXT, '') AS equipment,
              COALESCE(reason, '') AS reason,
              COALESCE(downtime_logs.notes, '') AS notes,
@@ -4369,8 +4380,19 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
   }
 
   const result = await dbQuery(
-    `INSERT INTO downtime_logs(line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, notes, submitted_by_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), COALESCE($8, ''), $9)
+    `INSERT INTO downtime_logs(
+       line_id,
+       date,
+       shift,
+       downtime_start,
+       downtime_finish,
+       equipment_stage_id,
+       reason,
+       notes,
+       exclude_from_calculation,
+       submitted_by_user_id
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), COALESCE($8, ''), $9, $10)
      RETURNING
        id,
        line_id AS "lineId",
@@ -4378,6 +4400,7 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
        shift,
        reason,
        COALESCE(notes, '') AS notes,
+       COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
        submitted_at AS "submittedAt"`,
     [
       parsed.data.lineId,
@@ -4388,6 +4411,7 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.equipmentStageId || null,
       parsed.data.reason || '',
       String(parsed.data.notes ?? '').trim(),
+      Boolean(parsed.data.excludeFromCalculation),
       req.user.id
     ]
   );
@@ -4611,6 +4635,8 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   const reasonValue = reasonProvided ? String(data.reason ?? '').trim() : '';
   const notesProvided = Object.prototype.hasOwnProperty.call(data, 'notes');
   const notesValue = notesProvided ? String(data.notes ?? '').trim() : '';
+  const excludeFromCalculationProvided = Object.prototype.hasOwnProperty.call(data, 'excludeFromCalculation');
+  const excludeFromCalculationValue = excludeFromCalculationProvided ? Boolean(data.excludeFromCalculation) : false;
   const result = await dbQuery(
     `UPDATE downtime_logs
      SET
@@ -4631,6 +4657,10 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
          WHEN $10::boolean IS FALSE THEN notes
          ELSE $11
        END,
+       exclude_from_calculation = CASE
+         WHEN $12::boolean IS FALSE THEN exclude_from_calculation
+         ELSE $13
+       END,
        submitted_at = NOW()
      WHERE id = $1
      RETURNING
@@ -4640,6 +4670,7 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
        shift,
        to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
        to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+       COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
        COALESCE(equipment_stage_id::TEXT, '') AS equipment,
        COALESCE(reason, '') AS reason,
        COALESCE(notes, '') AS notes,
@@ -4655,7 +4686,9 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
       reasonProvided,
       reasonValue,
       notesProvided,
-      notesValue
+      notesValue,
+      excludeFromCalculationProvided,
+      excludeFromCalculationValue
     ]
   );
 

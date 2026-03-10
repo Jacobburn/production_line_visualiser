@@ -41,13 +41,13 @@ function requiredTimestamp(value: unknown, field: string): string {
   return parsed.toISOString();
 }
 
-function optionalBigintId(value: unknown, field: string): string | undefined {
+function requiredId(value: unknown, field: string): string {
   if (value === undefined || value === null) {
-    return undefined;
+    throw new Error(`Missing or invalid field: ${field}`);
   }
   const raw = typeof value === "string" ? value.trim() : String(value).trim();
-  if (!raw || !/^\d+$/.test(raw)) {
-    throw new Error(`Invalid format for ${field}; expected a positive integer`);
+  if (!raw) {
+    throw new Error(`Missing or invalid field: ${field}`);
   }
   return raw;
 }
@@ -81,9 +81,8 @@ Deno.serve(async (req) => {
   }
 
   try {
-    const providedId = optionalBigintId(payload.id, "id");
     const row = {
-      ...(providedId ? { id: providedId } : {}),
+      id: requiredId(payload.id, "id"),
       ActualNetWeightValue: requiredNumeric(
         payload.ActualNetWeightValue,
         "ActualNetWeightValue",

@@ -643,6 +643,21 @@ button {
   padding-top: 0.2rem;
 }
 
+.day-viz-block-modal-actions {
+  margin-top: 0.9rem;
+  padding-top: 0.85rem;
+  border-top: 1px solid #d9e6f1;
+  justify-content: space-between;
+}
+
+.day-viz-block-modal-action-note {
+  margin: 0;
+  max-width: 28rem;
+  color: #587084;
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .day-viz-block-detail-row {
   display: grid;
   grid-template-columns: minmax(120px, 160px) minmax(0, 1fr);

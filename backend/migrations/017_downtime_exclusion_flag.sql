@@ -1,0 +1,2 @@
+ALTER TABLE downtime_logs
+  ADD COLUMN IF NOT EXISTS exclude_from_calculation BOOLEAN NOT NULL DEFAULT FALSE;
