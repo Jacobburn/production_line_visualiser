@@ -13115,7 +13115,9 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
       <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
       <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
       ${bars}
-      <line x1="${pad.left}" y1="${avgY}" x2="${pad.left + chartW}" y2="${avgY}" class="line-down-avg"><title>${htmlEscape(avgLabel)}</title></line>
+      <line x1="${pad.left}" y1="${avgY}" x2="${pad.left + chartW}" y2="${avgY}" class="trend-avg-line ${htmlEscape(
+        config.avgTheme
+      )}"><title>${htmlEscape(avgLabel)}</title></line>
       <g transform="translate(${avgCalloutX},${avgCalloutY})">
         <rect width="${avgCalloutWidth}" height="${avgCalloutHeight}" rx="${avgCalloutHeight / 2}" class="trend-avg-callout-bg ${htmlEscape(
           config.avgTheme
