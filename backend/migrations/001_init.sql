@@ -86,7 +86,6 @@ CREATE TABLE IF NOT EXISTS run_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   line_id UUID NOT NULL REFERENCES production_lines(id) ON DELETE CASCADE,
   date DATE NOT NULL,
-  shift TEXT NOT NULL CHECK (shift IN ('Day', 'Night', 'Full Day')),
   product TEXT NOT NULL,
   setup_start_time TIME,
   production_start_time TIME NOT NULL,
@@ -101,7 +100,6 @@ CREATE TABLE IF NOT EXISTS downtime_logs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   line_id UUID NOT NULL REFERENCES production_lines(id) ON DELETE CASCADE,
   date DATE NOT NULL,
-  shift TEXT NOT NULL CHECK (shift IN ('Day', 'Night', 'Full Day')),
   downtime_start TIME NOT NULL,
   downtime_finish TIME NOT NULL,
   equipment_stage_id UUID REFERENCES line_stages(id) ON DELETE SET NULL,
@@ -127,6 +125,6 @@ CREATE INDEX IF NOT EXISTS idx_guides_line ON line_layout_guides(line_id);
 CREATE INDEX IF NOT EXISTS idx_assignments_supervisor ON supervisor_line_assignments(supervisor_user_id);
 CREATE INDEX IF NOT EXISTS idx_assignments_line ON supervisor_line_assignments(line_id);
 CREATE INDEX IF NOT EXISTS idx_shift_logs_line_date_shift ON shift_logs(line_id, date, shift);
-CREATE INDEX IF NOT EXISTS idx_run_logs_line_date_shift ON run_logs(line_id, date, shift);
-CREATE INDEX IF NOT EXISTS idx_down_logs_line_date_shift ON downtime_logs(line_id, date, shift);
+CREATE INDEX IF NOT EXISTS idx_run_logs_line_date ON run_logs(line_id, date);
+CREATE INDEX IF NOT EXISTS idx_down_logs_line_date ON downtime_logs(line_id, date);
 CREATE INDEX IF NOT EXISTS idx_audit_events_line_created ON audit_events(line_id, created_at DESC);

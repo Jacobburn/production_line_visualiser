@@ -182,36 +182,36 @@ async function run() {
 
     await dbQuery(
       `INSERT INTO run_logs(
-         line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
-       ) VALUES ($1,$2,'Day',$3,'05:40','06:10','10:35',$4,$5)`,
+         line_id, date, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
+       ) VALUES ($1,$2,$3,'05:40','06:10','10:35',$4,$5)`,
       [demoLine.id, date, dayP1, 2800 + (i % 7) * 90, supervisor.id]
     );
 
     await dbQuery(
       `INSERT INTO run_logs(
-         line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
-       ) VALUES ($1,$2,'Day',$3,'10:40','10:55','15:25',$4,$5)`,
+         line_id, date, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
+       ) VALUES ($1,$2,$3,'10:40','10:55','15:25',$4,$5)`,
       [demoLine.id, date, dayP2, 2500 + (i % 5) * 110, supervisor.id]
     );
 
     await dbQuery(
       `INSERT INTO run_logs(
-         line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
-       ) VALUES ($1,$2,'Night',$3,'13:55','14:15','18:55',$4,$5)`,
+         line_id, date, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
+       ) VALUES ($1,$2,$3,'13:55','14:15','18:55',$4,$5)`,
       [demoLine.id, date, nightP1, 2400 + (i % 6) * 95, supervisor.id]
     );
 
     await dbQuery(
       `INSERT INTO run_logs(
-         line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
-       ) VALUES ($1,$2,'Night',$3,'21:10','21:30','00:25',$4,$5)`,
+         line_id, date, product, setup_start_time, production_start_time, finish_time, units_produced, submitted_by_user_id
+       ) VALUES ($1,$2,$3,'21:10','21:30','00:25',$4,$5)`,
       [demoLine.id, date, nightP2, 2150 + (i % 8) * 85, supervisor.id]
     );
 
     await dbQuery(
       `INSERT INTO downtime_logs(
-         line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
-       ) VALUES ($1,$2,'Day','08:10',$3,$4,'Planned clean-down',$5)`,
+         line_id, date, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
+       ) VALUES ($1,$2,'08:10',$3,$4,'Planned clean-down',$5)`,
       [
         demoLine.id,
         date,
@@ -223,8 +223,8 @@ async function run() {
 
     await dbQuery(
       `INSERT INTO downtime_logs(
-         line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
-       ) VALUES ($1,$2,'Day','11:20',$3,$4,'Label alignment',$5)`,
+         line_id, date, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
+       ) VALUES ($1,$2,'11:20',$3,$4,'Label alignment',$5)`,
       [
         demoLine.id,
         date,
@@ -236,8 +236,8 @@ async function run() {
 
     await dbQuery(
       `INSERT INTO downtime_logs(
-         line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
-       ) VALUES ($1,$2,'Night','16:30',$3,$4,'Sensor reset',$5)`,
+         line_id, date, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
+       ) VALUES ($1,$2,'16:30',$3,$4,'Sensor reset',$5)`,
       [
         demoLine.id,
         date,
@@ -249,8 +249,8 @@ async function run() {
 
     await dbQuery(
       `INSERT INTO downtime_logs(
-         line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
-       ) VALUES ($1,$2,'Night','20:05',$3,$4,'Film change',$5)`,
+         line_id, date, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
+       ) VALUES ($1,$2,'20:05',$3,$4,'Film change',$5)`,
       [
         demoLine.id,
         date,

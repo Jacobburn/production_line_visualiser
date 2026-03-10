@@ -48,8 +48,8 @@ const PERMANENT_STAGE_TEMPLATE = Object.freeze({
 });
 
 const SHIFT_COLUMNS = ["Date", "Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Notes", "Submitted By", "Action"];
-const RUN_COLUMNS = ["Date", "Assigned Shift", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Notes", "Submitted By", "Action"];
-const DOWN_COLUMNS = ["Date", "Assigned Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Notes", "Submitted By", "Action"];
+const RUN_COLUMNS = ["Date", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Notes", "Submitted By", "Action"];
+const DOWN_COLUMNS = ["Date", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Notes", "Submitted By", "Action"];
 const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
 const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "Utilisation (%)", "Net Run Rate (u/min)", "Bottleneck", "Staffing"];
 const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
@@ -1591,7 +1591,7 @@ function derivedDataForLine(line) {
   const computedDowntimeRows = operationalDowntimeRows
     .map(computeDowntimeRow)
     .map((row) => decorateTimedLogShift(row, line, "downtimeStart", "downtimeFinish"));
-  const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows);
+  const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows, line);
   const shiftRows = operationalShiftRows.map(computeShiftRow);
   const breakRows = [...operationalBreakRows.map(computeBreakRow), ...breakRowsFromDowntime.map(computeBreakRow)];
   const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, calculationDowntimeRows(downtimeRows));
@@ -2296,6 +2296,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     trendGranularity: "daily",
     trendMonth: todayISO().slice(0, 7),
     trendDateCursor: baselineDate,
+    trendShowZeroDays: true,
     lineTrendRange: "day",
     lineTrendLegendFocusKey: "",
     crewsByShift: defaultCrewByShift(stages),
@@ -2333,6 +2334,7 @@ function normalizeLine(id, line) {
     flowGuides: normalizeFlowGuides(line?.flowGuides),
     dayVisualiserKeyStageId: "",
     trendDateCursor: normalizeWeekdayIsoDate(line?.trendDateCursor || line?.selectedDate || base.selectedDate, { direction: -1 }),
+    trendShowZeroDays: line?.trendShowZeroDays !== false,
     lineTrendLegendFocusKey: String(line?.lineTrendLegendFocusKey || "").trim(),
     crewsByShift: normalizeCrewByShift(line || {}, stages),
     stageSettings: normalizeStageSettings(line || {}, stages),
@@ -2340,12 +2342,7 @@ function normalizeLine(id, line) {
     shiftRows: line?.shiftRows || [],
     breakRows: line?.breakRows || [],
     runRows: Array.isArray(line?.runRows)
-      ? line.runRows.map((row) => ({
-          ...row,
-          runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
-          assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
-          shift: ""
-        }))
+      ? line.runRows.map((row) => normalizeRunLogRow(row))
       : [],
     downtimeRows: Array.isArray(line?.downtimeRows)
       ? line.downtimeRows.map((row) => normalizeDowntimeLogRow(row))
@@ -2705,7 +2702,13 @@ function latestOpenRunLogRow(line) {
 function liveRunCrewingPatternForLine(line) {
   const openRunRow = latestOpenRunLogRow(line);
   if (!openRunRow) return null;
-  const shift = inferShiftForLog(line, openRunRow.date, openRunRow.productionStartTime, openRunRow.shift || "Day");
+  const shift = preferredTimedLogShift(
+    line,
+    openRunRow.date,
+    openRunRow.productionStartTime,
+    openRunRow.finishTime || openRunRow.productionStartTime,
+    "Day"
+  );
   return normalizeRunCrewingPattern(openRunRow.runCrewingPattern, line, shift, { fallbackToIdeal: false });
 }
 
@@ -2735,8 +2738,13 @@ function latestRunCrewingPatternForRows(line, runRows = [], fallbackShift = "Day
     .slice()
     .sort((a, b) => rowNewestSortValue(b, "productionStartTime") - rowNewestSortValue(a, "productionStartTime"))[0];
   if (!latestRunRow) return null;
-  const rowShift = normalizeLogAssignableShift(latestRunRow.assignedShift || latestRunRow.shift)
-    || inferShiftForLog(line, latestRunRow.date, latestRunRow.productionStartTime, fallbackShift);
+  const rowShift = preferredTimedLogShift(
+    line,
+    latestRunRow.date,
+    latestRunRow.productionStartTime,
+    latestRunRow.finishTime || latestRunRow.productionStartTime,
+    fallbackShift
+  );
   const pattern = normalizeRunCrewingPattern(latestRunRow.runCrewingPattern, line, rowShift, { fallbackToIdeal: false });
   return Object.keys(pattern).length ? pattern : null;
 }
@@ -2746,8 +2754,13 @@ function latestRunCrewingSnapshotForRows(line, runRows = [], fallbackShift = "Da
     .slice()
     .sort((a, b) => rowNewestSortValue(b, "productionStartTime") - rowNewestSortValue(a, "productionStartTime"))[0];
   if (!latestRunRow) return null;
-  const rowShift = normalizeLogAssignableShift(latestRunRow.assignedShift || latestRunRow.shift)
-    || inferShiftForLog(line, latestRunRow.date, latestRunRow.productionStartTime, fallbackShift);
+  const rowShift = preferredTimedLogShift(
+    line,
+    latestRunRow.date,
+    latestRunRow.productionStartTime,
+    latestRunRow.finishTime || latestRunRow.productionStartTime,
+    fallbackShift
+  );
   const pattern = normalizeRunCrewingPattern(latestRunRow.runCrewingPattern, line, rowShift, { fallbackToIdeal: false });
   if (!Object.keys(pattern).length) return null;
   return {
@@ -2762,9 +2775,8 @@ function staffingSnapshotForSelection(line, runRows = [], shift = "Day") {
   if (isFullDayShift(shift)) {
     const snapshots = LOG_ASSIGNABLE_SHIFTS.map((shiftValue) => {
       const rowsForShift = rows.filter((row) => {
-        const rowShift = normalizeLogAssignableShift(row?.assignedShift || row?.shift)
-          || inferShiftForLog(line, row?.date, row?.productionStartTime, shiftValue);
-        return rowShift === shiftValue;
+        const coverage = shiftCoverageForTimedLog(line, row?.date, row?.productionStartTime, row?.finishTime || row?.productionStartTime);
+        return coverage.shiftMatches.includes(shiftValue);
       });
       return latestRunCrewingSnapshotForRows(line, rowsForShift, shiftValue);
     }).filter(Boolean);
@@ -3682,6 +3694,20 @@ function inferShiftForLog(line, date, timeValue, fallbackShift = "Day") {
   return fallback;
 }
 
+function preferredTimedLogShift(line, date, startValue, finishValue, fallbackShift = "Day") {
+  const fallback = fallbackShiftValue(fallbackShift);
+  const coverage = shiftCoverageForTimedLog(line, date, startValue, finishValue);
+  if (coverage.shiftMatches.includes(fallback)) return fallback;
+  const inferred = inferShiftForLog(line, date, startValue, fallback);
+  if (coverage.shiftMatches.includes(inferred)) return inferred;
+  return coverage.shiftMatches[0] || inferred || fallback;
+}
+
+function supervisorCanAccessTimedLog(session, lineId, line, date, startValue, finishValue) {
+  const coverage = shiftCoverageForTimedLog(line, date, startValue, finishValue);
+  return coverage.shiftMatches.some((shift) => supervisorCanAccessShift(session, lineId, shift));
+}
+
 function selectedShiftRowsByDate(rows, date, shift, { line = null } = {}) {
   if (!isOperationalDate(date)) return [];
   return (rows || []).filter((row) => {
@@ -3897,13 +3923,7 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
     : [];
   line.breakRows = Array.isArray(logs?.breakRows) ? logs.breakRows : [];
   line.runRows = Array.isArray(logs?.runRows)
-    ? logs.runRows.map((row) => ({
-        ...row,
-        notes: String(row?.notes || ""),
-        runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
-        assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
-        shift: ""
-      }))
+    ? logs.runRows.map((row) => normalizeRunLogRow(row))
     : [];
   line.downtimeRows = Array.isArray(logs?.downtimeRows)
     ? logs.downtimeRows.map((row) => normalizeDowntimeLogRow(row))
@@ -4270,7 +4290,6 @@ async function syncManagerDowntimeLog(payload) {
   const body = {
     lineId: backendLineId,
     date: payload.date,
-    shift: payload.shift,
     downtimeStart: payload.downtimeStart,
     downtimeFinish: payload.downtimeFinish,
     equipmentStageId: safeEquipmentStageId,
@@ -4340,7 +4359,6 @@ async function patchManagerDowntimeLog(logId, payload) {
   const safeEquipmentStageId = UUID_RE.test(String(backendEquipmentId || "").trim()) ? backendEquipmentId : null;
   const body = {
     date: payload.date,
-    shift: payload.shift,
     downtimeStart: payload.downtimeStart,
     downtimeFinish: payload.downtimeFinish,
     equipmentStageId: safeEquipmentStageId,
@@ -4530,7 +4548,6 @@ async function syncSupervisorDowntimeLog(session, payload) {
   const body = {
     lineId: backendLineId,
     date: payload.date,
-    shift: payload.shift,
     downtimeStart: payload.downtimeStart,
     downtimeFinish: payload.downtimeFinish,
     equipmentStageId: safeEquipmentStageId,
@@ -4779,11 +4796,19 @@ function buildDowntimeReasonText(line, category, detail, note) {
   return `${group} > ${detailText} > ${noteText}`;
 }
 
+function normalizeRunLogRow(row) {
+  return {
+    ...(row || {}),
+    assignedShift: "",
+    shift: "",
+    notes: String(row?.notes || ""),
+    runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern)
+  };
+}
+
 function validateDowntimeBackendPayload(payload) {
   const date = String(payload?.date || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return "Date is invalid.";
-  const shift = String(payload?.shift || "").trim();
-  if (!SHIFT_OPTIONS.includes(shift)) return "Shift is invalid.";
   const downtimeStart = String(payload?.downtimeStart || "").trim();
   const downtimeFinish = String(payload?.downtimeFinish || "").trim();
   if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
@@ -4826,7 +4851,7 @@ function normalizeDowntimeLogRow(row) {
   const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
   return {
     ...(row || {}),
-    assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift),
+    assignedShift: "",
     shift: "",
     notes: String(row?.notes || ""),
     reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
@@ -4988,7 +5013,6 @@ function sampleDataSet(lineModel = state) {
     runRows.push(
       {
         date,
-        shift: "Day",
         product: "Teriyaki",
         productionStartTime: "06:10",
         finishTime: "10:35",
@@ -4996,7 +5020,6 @@ function sampleDataSet(lineModel = state) {
       },
       {
         date,
-        shift: "Day",
         product: "Honey Soy",
         productionStartTime: "10:55",
         finishTime: "15:25",
@@ -5004,7 +5027,6 @@ function sampleDataSet(lineModel = state) {
       },
       {
         date,
-        shift: "Night",
         product: "Peri Peri",
         productionStartTime: "14:15",
         finishTime: "18:55",
@@ -5012,7 +5034,6 @@ function sampleDataSet(lineModel = state) {
       },
       {
         date,
-        shift: "Night",
         product: "Lemon Herb",
         productionStartTime: "21:30",
         finishTime: "00:25",
@@ -5040,7 +5061,6 @@ function sampleDataSet(lineModel = state) {
     downtimeRows.push(
       {
         date,
-        shift: "Day",
         downtimeStart: "08:10",
         downtimeFinish: `08:${String(22 + (i % 8)).padStart(2, "0")}`,
         equipment: dayReasonCategory === "Equipment" ? deq : "",
@@ -5051,7 +5071,6 @@ function sampleDataSet(lineModel = state) {
       },
       {
         date,
-        shift: "Day",
         downtimeStart: "11:20",
         downtimeFinish: `11:${String(30 + (i % 10)).padStart(2, "0")}`,
         equipment: dayReasonCategory2 === "Equipment" ? equipAt(dayEquipment, i, 2) : "",
@@ -5062,7 +5081,6 @@ function sampleDataSet(lineModel = state) {
       },
       {
         date,
-        shift: "Night",
         downtimeStart: "16:30",
         downtimeFinish: `16:${String(42 + (i % 9)).padStart(2, "0")}`,
         equipment: nightReasonCategory === "Equipment" ? neq : "",
@@ -5073,7 +5091,6 @@ function sampleDataSet(lineModel = state) {
       },
       {
         date,
-        shift: "Night",
         downtimeStart: "20:05",
         downtimeFinish: `20:${String(18 + (i % 11)).padStart(2, "0")}`,
         equipment: nightReasonCategory2 === "Equipment" ? equipAt(nightEquipment, i, 3) : "",
@@ -5166,13 +5183,19 @@ function computeBreakRow(row) {
   return { ...row, breakMins: calc > 0 ? calc : fallback };
 }
 
-function deriveBreakRowFromDowntimeRow(row) {
+function deriveBreakRowFromDowntimeRow(row, line = state) {
   const rowId = String(row?.id || "").trim();
   const breakStart = String(row?.downtimeStart || "").trim();
   const breakFinishRaw = String(row?.downtimeFinish || "").trim();
   const isOpenDowntime = strictTimeValid(breakStart) && strictTimeValid(breakFinishRaw) && breakStart === breakFinishRaw;
   const breakFinish = isOpenDowntime ? "" : breakFinishRaw;
-  const assignedShift = normalizeLogAssignableShift(row?.assignedShift || row?.shift);
+  const assignedShift = preferredTimedLogShift(
+    line,
+    String(row?.date || "").trim(),
+    breakStart,
+    breakFinishRaw || breakStart,
+    line?.selectedShift || "Day"
+  );
   const fallbackId = `${String(row?.date || "").trim()}-${breakStart || "start"}-${breakFinishRaw || "finish"}`;
   return {
     ...row,
@@ -5187,7 +5210,7 @@ function deriveBreakRowFromDowntimeRow(row) {
   };
 }
 
-function splitDowntimeRowsForBreakViews(sourceRows = []) {
+function splitDowntimeRowsForBreakViews(sourceRows = [], line = state) {
   const downtimeRowsLogged = [];
   const downtimeRows = [];
   const breakRowsFromDowntime = [];
@@ -5195,7 +5218,7 @@ function splitDowntimeRowsForBreakViews(sourceRows = []) {
     if (!row) return;
     downtimeRowsLogged.push(row);
     if (isDowntimeBreakRow(row)) {
-      breakRowsFromDowntime.push(deriveBreakRowFromDowntimeRow(row));
+      breakRowsFromDowntime.push(deriveBreakRowFromDowntimeRow(row, line));
       return;
     }
     downtimeRows.push(row);
@@ -5222,9 +5245,6 @@ function buildDowntimeBreakMigrationPayload(line, breakRow) {
   if (!isOperationalDate(date) || !strictTimeValid(breakStart)) return null;
   const breakFinishRaw = String(breakRow?.breakFinish || "").trim();
   const downtimeFinish = strictTimeValid(breakFinishRaw) ? breakFinishRaw : breakStart;
-  const assignedShift = normalizeLogAssignableShift(breakRow?.assignedShift || breakRow?.shift);
-  const inferredShift = inferShiftForLog(line, date, breakStart, assignedShift || line?.selectedShift || "Day");
-  const shift = SHIFT_OPTIONS.includes(assignedShift) ? assignedShift : SHIFT_OPTIONS.includes(inferredShift) ? inferredShift : "Day";
   const reasonCategory = "Break";
   const reasonDetail = breakMigrationReasonDetail(breakRow);
   const reasonNote = "";
@@ -5233,7 +5253,6 @@ function buildDowntimeBreakMigrationPayload(line, breakRow) {
   return {
     lineId: String(line?.id || "").trim(),
     date,
-    shift,
     downtimeStart: breakStart,
     downtimeFinish,
     equipment: "",
@@ -5257,7 +5276,7 @@ function downtimeBreakRowFromMigration(line, breakRow, payload, savedDowntime = 
     id: String(savedDowntime?.id || "").trim() || makeLocalLogId("down"),
     lineId: String(line?.id || "").trim() || String(payload?.lineId || "").trim(),
     date: String(savedDowntime?.date || payload?.date || "").trim(),
-    assignedShift: normalizeLogAssignableShift(savedDowntime?.shift || payload?.shift),
+    assignedShift: "",
     shift: "",
     downtimeStart: String(savedDowntime?.downtimeStart || payload?.downtimeStart || "").trim(),
     downtimeFinish: String(savedDowntime?.downtimeFinish || payload?.downtimeFinish || "").trim(),
@@ -5318,7 +5337,7 @@ function derivedData() {
   const computedDowntimeRows = operationalDowntimeRows
     .map(computeDowntimeRow)
     .map((row) => decorateTimedLogShift(row, state, "downtimeStart", "downtimeFinish"));
-  const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows);
+  const { downtimeRowsLogged, downtimeRows, breakRowsFromDowntime } = splitDowntimeRowsForBreakViews(computedDowntimeRows, state);
   const shiftRows = operationalShiftRows.map(computeShiftRow);
   const breakRows = [...operationalBreakRows.map(computeBreakRow), ...breakRowsFromDowntime.map(computeBreakRow)];
   const nonProductionIntervalsByDate = buildNonProductionIntervalsByDate(breakRows, calculationDowntimeRows(downtimeRows));
@@ -7502,7 +7521,8 @@ function bindHome() {
       }
       const runDate = supervisorAutoDateValue("superRunDate", supervisorAutoEntryDate());
       const runStart = String(document.getElementById("superRunProdStart")?.value || nowTimeHHMM());
-      const shiftForPattern = inferShiftForLog(line, runDate, runStart, appState.supervisorSelectedShift || "Day");
+      const runFinish = String(document.getElementById("superRunFinish")?.value || runStart);
+      const shiftForPattern = preferredTimedLogShift(line, runDate, runStart, runFinish, appState.supervisorSelectedShift || "Day");
       openRunCrewingPatternModal({
         line,
         shift: shiftForPattern,
@@ -7672,11 +7692,13 @@ function bindHome() {
       ? Math.max(0, num(existing?.unitsProduced))
       : Math.max(0, num(unitsRaw));
     const notes = notesInput !== "" ? notesInput : String(existing?.notes || "");
-    const backendShift = inferShiftForLog(
+    const timingFinish = finishTime || productionStartTime;
+    const patternShift = preferredTimedLogShift(
       line,
       date,
       productionStartTime,
-      existing?.assignedShift || existing?.shift || appState.supervisorSelectedShift || "Day"
+      timingFinish,
+      appState.supervisorSelectedShift || "Day"
     );
 
     if (!strictTimeValid(productionStartTime)) {
@@ -7705,13 +7727,13 @@ function bindHome() {
         return;
       }
     }
-    if (!supervisorCanAccessShift(session, lineId, backendShift)) {
-      alert(`You are not assigned to the ${backendShift} shift.`);
+    if (!supervisorCanAccessTimedLog(session, lineId, line, date, productionStartTime, timingFinish)) {
+      alert("This run must fall within one of your logged shift windows.");
       return;
     }
 
-    const inputPattern = runCrewingPatternFromInput(superRunCrewingPatternInput, line, backendShift, { fallbackToIdeal: false });
-    const existingPattern = normalizeRunCrewingPattern(existing?.runCrewingPattern, line, backendShift, { fallbackToIdeal: false });
+    const inputPattern = runCrewingPatternFromInput(superRunCrewingPatternInput, line, patternShift, { fallbackToIdeal: false });
+    const existingPattern = normalizeRunCrewingPattern(existing?.runCrewingPattern, line, patternShift, { fallbackToIdeal: false });
     const runCrewingPattern = Object.keys(inputPattern).length ? inputPattern : existingPattern;
     if (!Object.keys(runCrewingPattern).length) {
       alert("Set crewing pattern for this run before saving.");
@@ -7721,7 +7743,7 @@ function bindHome() {
       superRunCrewingPatternInput,
       superRunCrewingPatternSummary,
       line,
-      backendShift,
+      patternShift,
       runCrewingPattern,
       { fallbackToIdeal: false }
     );
@@ -7729,7 +7751,6 @@ function bindHome() {
     const payload = {
       lineId,
       date,
-      shift: backendShift,
       setUpStartTime: "",
       product,
       productionStartTime,
@@ -7746,9 +7767,9 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
-        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
+        assignedShift: "",
         shift: "",
-        runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, line, backendShift, { fallbackToIdeal: false }),
+        runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, line, patternShift, { fallbackToIdeal: false }),
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
         submittedAt: saved?.submittedAt || nowIso()
@@ -7852,8 +7873,13 @@ function bindHome() {
     document.getElementById("superRunUnits").value = num(row.unitsProduced) > 0 ? formatNum(Math.max(0, num(row.unitsProduced)), 0) : "";
     document.getElementById("superRunNotes").value = String(row.notes || "");
     superRunLogIdInput.value = row.id || "";
-    const rowShift = normalizeLogAssignableShift(row.assignedShift || row.shift)
-      || inferShiftForLog(line, row.date, row.productionStartTime, appState.supervisorSelectedShift || "Day");
+    const rowShift = preferredTimedLogShift(
+      line,
+      row.date,
+      row.productionStartTime,
+      row.finishTime || row.productionStartTime,
+      appState.supervisorSelectedShift || "Day"
+    );
     setRunCrewingPatternField(
       superRunCrewingPatternInput,
       superRunCrewingPatternSummary,
@@ -8014,16 +8040,13 @@ function bindHome() {
     const unitsPrompt = window.prompt("Units produced", String(Math.max(0, num(row.unitsProduced))));
     if (unitsPrompt === null) return;
     const unitsProduced = Math.max(0, num(unitsPrompt));
-    const shift = normalizeLogAssignableShift(row.assignedShift || row.shift)
-      || inferShiftForLog(line, row.date, productionStartTime, appState.supervisorSelectedShift || "Day");
-    if (!supervisorCanAccessShift(session, lineId, shift)) {
-      alert(`You are not assigned to the ${shift} shift.`);
+    if (!supervisorCanAccessTimedLog(session, lineId, line, row.date, productionStartTime, finishTime)) {
+      alert("This run must fall within one of your logged shift windows.");
       return;
     }
     const payload = {
       lineId,
       date: row.date,
-      shift,
       setUpStartTime: "",
       product: row.product || "Run",
       productionStartTime,
@@ -8036,7 +8059,7 @@ function bindHome() {
       const savedRow = {
         ...row,
         ...payload,
-        assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
+        assignedShift: "",
         shift: "",
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
@@ -8107,16 +8130,13 @@ function bindHome() {
       alert("Equipment downtime requires an equipment stage.");
       return;
     }
-    const shift = normalizeLogAssignableShift(row.assignedShift || row.shift)
-      || inferShiftForLog(line, row.date, downtimeStart, appState.supervisorSelectedShift || "Day");
-    if (!supervisorCanAccessShift(session, lineId, shift)) {
-      alert(`You are not assigned to the ${shift} shift.`);
+    if (!supervisorCanAccessTimedLog(session, lineId, line, row.date, downtimeStart, downtimeFinish)) {
+      alert("This downtime must fall within one of your logged shift windows.");
       return;
     }
     const payload = {
       lineId,
       date: row.date,
-      shift,
       downtimeStart,
       downtimeFinish,
       equipment,
@@ -8131,7 +8151,7 @@ function bindHome() {
       const savedRow = {
         ...row,
         ...payload,
-        assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
+        assignedShift: "",
         shift: "",
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
@@ -8190,8 +8210,6 @@ function bindHome() {
 
     const downtimeStart = startInput || existing?.downtimeStart || nowTimeHHMM();
     const downtimeFinish = finishInput || (complete ? nowTimeHHMM() : existing?.downtimeFinish || downtimeStart);
-    const backendShift = normalizeLogAssignableShift(existing?.assignedShift || existing?.shift)
-      || inferShiftForLog(line, date, downtimeStart, appState.supervisorSelectedShift || "Day");
     const reasonCategory = reasonCategoryInput || existing?.reasonCategory || "";
     const reasonDetail = reasonDetailInput || existing?.reasonDetail || "";
     const reasonNote = reasonNoteInput !== "" ? reasonNoteInput : existing?.reasonNote || "";
@@ -8215,15 +8233,14 @@ function bindHome() {
       alert("Select an equipment stage.");
       return;
     }
-    if (!supervisorCanAccessShift(session, lineId, backendShift)) {
-      alert(`You are not assigned to the ${backendShift} shift.`);
+    if (!supervisorCanAccessTimedLog(session, lineId, line, date, downtimeStart, downtimeFinish)) {
+      alert("This downtime must fall within one of your logged shift windows.");
       return;
     }
 
     const payload = {
       lineId,
       date,
-      shift: backendShift,
       downtimeStart,
       downtimeFinish,
       equipment,
@@ -8241,7 +8258,7 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
-        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
+        assignedShift: "",
         shift: "",
         excludeFromCalculation: normalizeDowntimeCalculationFlag(
           saved?.excludeFromCalculation ?? existing?.excludeFromCalculation
@@ -9374,6 +9391,7 @@ function bindTrendModal() {
   const exportBtn = document.getElementById("trendExportCsv");
   const dailyBtn = document.getElementById("trendDaily");
   const monthlyBtn = document.getElementById("trendMonthly");
+  const zeroDaysToggleBtn = document.getElementById("trendZeroDaysToggle");
   const prevBtn = document.getElementById("trendPrevMonth");
   const nextBtn = document.getElementById("trendNextMonth");
 
@@ -9401,6 +9419,15 @@ function bindTrendModal() {
     saveState();
     renderTrendModalContent();
   });
+
+  if (zeroDaysToggleBtn) {
+    zeroDaysToggleBtn.addEventListener("click", () => {
+      if (!state) return;
+      state.trendShowZeroDays = state.trendShowZeroDays === false;
+      saveState();
+      renderTrendModalContent();
+    });
+  }
 
   prevBtn.addEventListener("click", () => {
     if (!state) return;
@@ -9631,13 +9658,19 @@ function bindForms() {
       alert("Units produced cannot be negative.");
       return;
     }
-    const backendShift = inferShiftForLog(state, data.date, data.productionStartTime, state.selectedShift || "Day");
-    const runCrewingPattern = runCrewingPatternFromInput(runCrewingPatternInput, state, backendShift, { fallbackToIdeal: false });
+    const patternShift = preferredTimedLogShift(
+      state,
+      data.date,
+      data.productionStartTime,
+      data.finishTime,
+      state.selectedShift || "Day"
+    );
+    const runCrewingPattern = runCrewingPatternFromInput(runCrewingPatternInput, state, patternShift, { fallbackToIdeal: false });
     if (!Object.keys(runCrewingPattern).length) {
       alert("Set crewing pattern for this run before saving.");
       return;
     }
-    setRunCrewingPatternField(runCrewingPatternInput, runCrewingPatternSummary, state, backendShift, runCrewingPattern, { fallbackToIdeal: false });
+    setRunCrewingPatternField(runCrewingPatternInput, runCrewingPatternSummary, state, patternShift, runCrewingPattern, { fallbackToIdeal: false });
     data.setUpStartTime = "";
     data.unitsProduced = num(data.unitsProduced);
     data.runCrewingPattern = runCrewingPattern;
@@ -9645,7 +9678,6 @@ function bindForms() {
       const payload = {
         lineId: state.id,
         date: data.date,
-        shift: backendShift,
         product: data.product,
         setUpStartTime: "",
         productionStartTime: data.productionStartTime,
@@ -9657,9 +9689,9 @@ function bindForms() {
       const saved = await syncManagerRunLog(payload);
       state.runRows.push({
         ...data,
-        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
+        assignedShift: "",
         shift: "",
-        runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || data.runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
+        runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || data.runCrewingPattern, state, patternShift, { fallbackToIdeal: false }),
         id: saved?.id || data.id || makeLocalLogId("run"),
         submittedBy: "manager",
         submittedAt: saved?.submittedAt || nowIso()
@@ -9698,14 +9730,12 @@ function bindForms() {
       alert("Reason detail is required.");
       return;
     }
-    const backendShift = inferShiftForLog(state, data.date, data.downtimeStart, state.selectedShift || "Day");
     data.equipment = data.reasonCategory === "Equipment" ? data.reasonDetail : "";
     data.reason = buildDowntimeReasonText(state, data.reasonCategory, data.reasonDetail, data.reasonNote);
     try {
       const payload = {
         lineId: state.id,
         date: data.date,
-        shift: backendShift,
         downtimeStart: data.downtimeStart,
         downtimeFinish: data.downtimeFinish,
         equipment: data.equipment,
@@ -9715,7 +9745,7 @@ function bindForms() {
       const saved = await syncManagerDowntimeLog(payload);
       state.downtimeRows.push({
         ...data,
-        assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
+        assignedShift: "",
         shift: "",
         excludeFromCalculation: normalizeDowntimeCalculationFlag(saved?.excludeFromCalculation),
         id: saved?.id || data.id || makeLocalLogId("down"),
@@ -9799,7 +9829,6 @@ function bindForms() {
         return;
       }
       const date = inlineValue(rowNode, "date");
-      const assignedShift = normalizeLogAssignableShift(inlineValue(rowNode, "assignedShift"));
       const product = catalogProductCanonicalName(String(inlineValue(rowNode, "product") || "").trim());
       const productionStartTime = inlineValue(rowNode, "productionStartTime");
       const finishTime = inlineValue(rowNode, "finishTime");
@@ -9813,10 +9842,6 @@ function bindForms() {
         alert("Product is required.");
         return;
       }
-      if (!assignedShift) {
-        alert("Assigned shift is required.");
-        return;
-      }
       const productChanged = product !== catalogProductCanonicalName(String(row.product || "").trim());
       if (productChanged && !isCatalogProductName(product)) {
         alert("Product must be selected from Manage Products.");
@@ -9827,12 +9852,12 @@ function bindForms() {
         return;
       }
       const runPatternRaw = inlineValue(rowNode, "runCrewingPattern");
-      const runPatternFromEdit = normalizeRunCrewingPattern(runPatternRaw, state, assignedShift, { fallbackToIdeal: false });
-      const existingRunPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, assignedShift, { fallbackToIdeal: false });
+      const patternShift = preferredTimedLogShift(state, date, productionStartTime, finishTime, state.selectedShift || "Day");
+      const runPatternFromEdit = normalizeRunCrewingPattern(runPatternRaw, state, patternShift, { fallbackToIdeal: false });
+      const existingRunPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, patternShift, { fallbackToIdeal: false });
       const runCrewingPattern = Object.keys(runPatternFromEdit).length ? runPatternFromEdit : existingRunPattern;
       const payload = {
         date,
-        shift: assignedShift,
         product,
         setUpStartTime: "",
         productionStartTime,
@@ -9847,7 +9872,7 @@ function bindForms() {
           const saved = await patchManagerRunLog(logId, payload);
           Object.assign(row, {
             date,
-            assignedShift: normalizeLogAssignableShift(saved?.shift || assignedShift),
+            assignedShift: "",
             product,
             setUpStartTime: "",
             productionStartTime,
@@ -9855,13 +9880,13 @@ function bindForms() {
             unitsProduced,
             notes,
             shift: "",
-            runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, assignedShift, { fallbackToIdeal: false }),
+            runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, patternShift, { fallbackToIdeal: false }),
             submittedAt: saved?.submittedAt || nowIso()
           });
         } else {
           Object.assign(row, {
             date,
-            assignedShift,
+            assignedShift: "",
             product,
             setUpStartTime: "",
             productionStartTime,
@@ -9890,7 +9915,6 @@ function bindForms() {
         return;
       }
       const date = inlineValue(rowNode, "date");
-      const assignedShift = normalizeLogAssignableShift(inlineValue(rowNode, "assignedShift"));
       const downtimeStart = inlineValue(rowNode, "downtimeStart");
       const downtimeFinish = inlineValue(rowNode, "downtimeFinish");
       const reasonCategory = inlineValue(rowNode, "reasonCategory");
@@ -9900,10 +9924,6 @@ function bindForms() {
       let equipment = inlineValue(rowNode, "equipment");
       if (!isOperationalDate(date)) {
         alert("Date is invalid. Weekend dates are excluded.");
-        return;
-      }
-      if (!assignedShift) {
-        alert("Assigned shift is required.");
         return;
       }
       if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
@@ -9928,11 +9948,10 @@ function bindForms() {
         alert("Reason detail is required.");
         return;
       }
-      const shift = assignedShift || inferShiftForLog(state, date, downtimeStart, row.shift || state.selectedShift || "Day");
       const reason = buildDowntimeReasonText(state, reasonCategory, reasonDetail, reasonNote);
       const updatedValues = {
         date,
-        assignedShift,
+        assignedShift: "",
         downtimeStart,
         downtimeFinish,
         equipment,
@@ -9945,7 +9964,6 @@ function bindForms() {
       const payload = {
         lineId: state.id,
         date,
-        shift,
         ...updatedValues
       };
       const canPatchServer = UUID_RE.test(String(logId || ""));
@@ -9953,13 +9971,13 @@ function bindForms() {
         if (canPatchServer) {
           const saved = await patchManagerDowntimeLog(logId, payload);
           Object.assign(row, updatedValues, {
-            assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
+            assignedShift: "",
             shift: "",
             submittedAt: saved?.submittedAt || nowIso()
           });
         } else {
           Object.assign(row, updatedValues, {
-            assignedShift: shift,
+            assignedShift: "",
             shift: "",
             submittedAt: nowIso()
           });
@@ -10097,13 +10115,11 @@ function bindForms() {
     const unitsPrompt = window.prompt("Units produced", String(Math.max(0, num(row.unitsProduced))));
     if (unitsPrompt === null) return;
     const unitsProduced = Math.max(0, num(unitsPrompt));
-    const backendShift = normalizeLogAssignableShift(row.assignedShift || row.shift)
-      || inferShiftForLog(state, row.date, productionStartTime, state.selectedShift || "Day");
-    const runCrewingPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, backendShift, { fallbackToIdeal: false });
+    const patternShift = preferredTimedLogShift(state, row.date, productionStartTime, finishTime, state.selectedShift || "Day");
+    const runCrewingPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, patternShift, { fallbackToIdeal: false });
     const payload = {
       lineId: state.id,
       date: row.date,
-      shift: backendShift,
       product: row.product || "Run",
       setUpStartTime: "",
       productionStartTime,
@@ -10117,14 +10133,14 @@ function bindForms() {
       if (canPatchServer) {
         const saved = await patchManagerRunLog(logId, payload);
         Object.assign(row, payload, {
-          assignedShift: normalizeLogAssignableShift(saved?.shift || backendShift),
+          assignedShift: "",
           shift: "",
-          runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, backendShift, { fallbackToIdeal: false }),
+          runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, state, patternShift, { fallbackToIdeal: false }),
           submittedAt: saved?.submittedAt || nowIso()
         });
       } else {
         Object.assign(row, payload, {
-          assignedShift: backendShift,
+          assignedShift: "",
           shift: "",
           runCrewingPattern,
           submittedAt: nowIso()
@@ -10178,10 +10194,9 @@ function bindForms() {
       alert("Equipment downtime requires an equipment stage.");
       return;
     }
-    const shift = normalizeLogAssignableShift(row.assignedShift || row.shift)
-      || inferShiftForLog(state, row.date, downtimeStart, state.selectedShift || "Day");
     const updatedValues = {
       date: row.date,
+      assignedShift: "",
       downtimeStart,
       downtimeFinish,
       equipment,
@@ -10194,7 +10209,6 @@ function bindForms() {
     const payload = {
       lineId: state.id,
       date: row.date,
-      shift,
       ...updatedValues
     };
     const canPatchServer = UUID_RE.test(String(logId || ""));
@@ -10202,13 +10216,11 @@ function bindForms() {
       if (canPatchServer) {
         const saved = await patchManagerDowntimeLog(logId, payload);
         Object.assign(row, updatedValues, {
-          assignedShift: normalizeLogAssignableShift(saved?.shift || shift),
           shift: "",
           submittedAt: saved?.submittedAt || nowIso()
         });
       } else {
         Object.assign(row, updatedValues, {
-          assignedShift: normalizeLogAssignableShift(shift),
           shift: "",
           submittedAt: nowIso()
         });
@@ -10308,9 +10320,9 @@ function bindForms() {
       if (!patternInput) return;
       const date = inlineValue(rowNode, "date") || state.selectedDate || todayISO();
       const startTime = inlineValue(rowNode, "productionStartTime");
-      const selectedShift = normalizeLogAssignableShift(inlineValue(rowNode, "assignedShift"));
+      const finishTime = inlineValue(rowNode, "finishTime") || startTime;
       const fallbackShift = String(patternBtn.getAttribute("data-pattern-shift") || state.selectedShift || "Day");
-      const shift = selectedShift || inferShiftForLog(state, date, startTime, fallbackShift);
+      const shift = preferredTimedLogShift(state, date, startTime, finishTime, fallbackShift);
       openRunCrewingPatternModal({
         line: state,
         shift,
@@ -10623,11 +10635,7 @@ function bindDataControls() {
       const importedShiftRows = Array.isArray(parsed.shiftRows) ? parsed.shiftRows : [];
       const importedBreakRows = Array.isArray(parsed.breakRows) ? parsed.breakRows : [];
       const importedRunRows = Array.isArray(parsed.runRows)
-        ? parsed.runRows.map((row) => ({
-            ...row,
-            runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern),
-            assignedShift: normalizeLogAssignableShift(row?.assignedShift || row?.shift)
-          }))
+        ? parsed.runRows.map((row) => normalizeRunLogRow(row))
         : [];
       const importedDowntimeRows = Array.isArray(parsed.downtimeRows)
         ? parsed.downtimeRows.map((row) => normalizeDowntimeLogRow(row))
@@ -10741,26 +10749,20 @@ function bindDataControls() {
             skipped.run += 1;
             continue;
           }
-          const explicitShift = String(row?.assignedShift || row?.shift || "").trim();
-          const inferredShift = SHIFT_OPTIONS.includes(explicitShift)
-            ? explicitShift
-            : inferShiftForLog(
-              state,
-              date,
-              productionStartTime,
-              normalizeLogAssignableShift(explicitShift) || state.selectedShift || "Day"
-            );
-          if (!SHIFT_OPTIONS.includes(inferredShift)) {
-            skipped.run += 1;
-            continue;
-          }
           const finishTime = strictTimeValid(String(row?.finishTime || "").trim()) ? String(row.finishTime).trim() : "";
           const setUpStartTime = strictTimeValid(String(row?.setUpStartTime || "").trim()) ? String(row.setUpStartTime).trim() : "";
-          const runCrewingPattern = normalizeRunCrewingPattern(row?.runCrewingPattern, state, inferredShift, { fallbackToIdeal: false });
+          const explicitShift = String(row?.assignedShift || row?.shift || "").trim();
+          const patternShift = preferredTimedLogShift(
+            state,
+            date,
+            productionStartTime,
+            finishTime || productionStartTime,
+            normalizeLogAssignableShift(explicitShift) || state.selectedShift || "Day"
+          );
+          const runCrewingPattern = normalizeRunCrewingPattern(row?.runCrewingPattern, state, patternShift, { fallbackToIdeal: false });
           const payload = {
             lineId: state.id,
             date,
-            shift: inferredShift,
             product,
             setUpStartTime,
             productionStartTime,
@@ -10786,19 +10788,6 @@ function bindDataControls() {
             skipped.downtime += 1;
             continue;
           }
-          const explicitShift = String(row?.assignedShift || row?.shift || "").trim();
-          const inferredShift = SHIFT_OPTIONS.includes(explicitShift)
-            ? explicitShift
-            : inferShiftForLog(
-              state,
-              date,
-              downtimeStart,
-              normalizeLogAssignableShift(explicitShift) || state.selectedShift || "Day"
-            );
-          if (!SHIFT_OPTIONS.includes(inferredShift)) {
-            skipped.downtime += 1;
-            continue;
-          }
           const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
           const reasonCategory = String(row?.reasonCategory || parsedReason.reasonCategory || "").trim();
           const reasonDetail = String(row?.reasonDetail || parsedReason.reasonDetail || "").trim();
@@ -10814,7 +10803,6 @@ function bindDataControls() {
           const payload = {
             lineId: state.id,
             date,
-            shift: inferredShift,
             downtimeStart,
             downtimeFinish,
             equipment,
@@ -11173,12 +11161,9 @@ async function toggleDayVizDowntimeCalculationExclusion() {
   const reasonCategory = String(row.reasonCategory || parsedReason.reasonCategory || "").trim();
   const reasonDetail = String(row.reasonDetail || parsedReason.reasonDetail || "").trim();
   const reasonNote = String((row.reasonNote ?? parsedReason.reasonNote) || "").trim();
-  const backendShift = normalizeLogAssignableShift(row.assignedShift || row.shift)
-    || inferShiftForLog(state, row.date, row.downtimeStart, state.selectedShift || "Day");
   const payload = {
     lineId: state.id,
     date: row.date,
-    shift: backendShift,
     downtimeStart: row.downtimeStart,
     downtimeFinish: row.downtimeFinish,
     equipment: String(row.equipment || "").trim(),
@@ -11195,11 +11180,11 @@ async function toggleDayVizDowntimeCalculationExclusion() {
   try {
     if (UUID_RE.test(activeLogId)) {
       const saved = await patchManagerDowntimeLog(activeLogId, payload);
-      row.assignedShift = normalizeLogAssignableShift(saved?.shift || backendShift);
+      row.assignedShift = "";
       row.submittedAt = saved?.submittedAt || nowIso();
       row.excludeFromCalculation = normalizeDowntimeCalculationFlag(saved?.excludeFromCalculation ?? nextExcludeFromCalculation);
     } else {
-      row.assignedShift = normalizeLogAssignableShift(backendShift);
+      row.assignedShift = "";
       row.submittedAt = nowIso();
       row.excludeFromCalculation = nextExcludeFromCalculation;
     }
@@ -12785,6 +12770,32 @@ function trendMonthPointLabel(month) {
   return new Date(year, monthNumber - 1, 1).toLocaleDateString(undefined, { month: "short", year: "2-digit" });
 }
 
+function isTrendZeroValue(value) {
+  return Math.abs(num(value)) < 0.0001;
+}
+
+function nonZeroAverageTrendValues(values = []) {
+  return (Array.isArray(values) ? values : []).filter((value) => Number.isFinite(value) && !isTrendZeroValue(value));
+}
+
+function averageTrendMetricValues(values = []) {
+  const safeValues = nonZeroAverageTrendValues(values);
+  if (!safeValues.length) return 0;
+  return safeValues.reduce((sum, value) => sum + value, 0) / safeValues.length;
+}
+
+function stageTrendPointIsZeroDay(point = {}) {
+  return isTrendZeroValue(point.utilisation) && isTrendZeroValue(point.stageDowntime) && isTrendZeroValue(point.stageEtc);
+}
+
+function filterTrendWindowPoints(points = [], windowDates = [], { hideZeroDays = false, zeroDayPredicate = () => false } = {}) {
+  const visibleDates = new Set(Array.isArray(windowDates) ? windowDates : []);
+  return (Array.isArray(points) ? points : []).filter((point) => {
+    if (!visibleDates.has(point.date)) return false;
+    return !hideZeroDays || !zeroDayPredicate(point);
+  });
+}
+
 function syncTrendDateCursorToAvailableDates(allDates = []) {
   if (!state) return "";
   const fallbackCursor = normalizeWeekdayIsoDate(state.trendDateCursor || state.selectedDate || todayISO(), { direction: -1 });
@@ -12841,9 +12852,14 @@ function buildStageTrendSeries() {
   const monthlyPoints = allMonths.map((month) => {
     const monthDates = allDates.filter((date) => monthKey(date) === month);
     const dayPoints = monthDates.map((date) => stageDailyMetrics(state, stage, date, state.selectedShift, data));
-    const utilisation = dayPoints.length ? dayPoints.reduce((sum, point) => sum + point.utilisation, 0) / dayPoints.length : 0;
+    const averageDayPoints = dayPoints.filter((point) => !stageTrendPointIsZeroDay(point));
+    const utilisation = averageDayPoints.length
+      ? averageDayPoints.reduce((sum, point) => sum + point.utilisation, 0) / averageDayPoints.length
+      : 0;
     const stageDowntime = dayPoints.reduce((sum, point) => sum + point.stageDowntime, 0);
-    const stageEtc = dayPoints.length ? dayPoints.reduce((sum, point) => sum + point.stageEtc, 0) / dayPoints.length : 0;
+    const stageEtc = averageDayPoints.length
+      ? averageDayPoints.reduce((sum, point) => sum + point.stageEtc, 0) / averageDayPoints.length
+      : 0;
     return {
       date: month,
       label: trendMonthPointLabel(month),
@@ -13000,7 +13016,7 @@ function aggregateTrendMetricValues(values, mode = "avg") {
   const safeValues = values.filter((value) => Number.isFinite(value));
   if (!safeValues.length) return 0;
   if (mode === "sum") return safeValues.reduce((sum, value) => sum + value, 0);
-  return safeValues.reduce((sum, value) => sum + value, 0) / safeValues.length;
+  return averageTrendMetricValues(safeValues);
 }
 
 function buildDayKpiTrendSeries(metricKey) {
@@ -13052,7 +13068,7 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
   const values = points.map((point) => Math.max(0, num(point.value)));
   const scaleValues = (Array.isArray(scalePoints) && scalePoints.length ? scalePoints : points).map((point) => Math.max(0, num(point.value)));
   const maxValue = Math.max(Math.max(0, num(config.scaleFloor)), ...scaleValues);
-  const avgValue = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const avgValue = averageTrendMetricValues(values);
   const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
   const x = (index) => pad.left + stepX * index;
   const yValue = (value) => pad.top + chartH - (Math.max(0, value) / maxValue) * chartH;
@@ -13135,17 +13151,27 @@ function renderDayKpiTrend() {
   const { config, allDates, allMonths, cursorDate, windowDates, dailyPoints, monthlyPoints } = buildDayKpiTrendSeries(metricKey);
   if (!container || !title || !meta || !config || !state) return;
   const isMonthly = state.trendGranularity === "monthly";
+  const hideZeroDays = state.trendShowZeroDays === false;
   const points = isMonthly
     ? monthlyPoints
-    : dailyPoints.filter((point) => windowDates.includes(point.date));
+    : filterTrendWindowPoints(dailyPoints, windowDates, {
+        hideZeroDays,
+        zeroDayPredicate: (point) => isTrendZeroValue(point.value)
+      });
   const scalePoints = isMonthly ? monthlyPoints : dailyPoints;
 
   title.textContent = config.title;
-  meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : `Rolling ${TREND_DAILY_WINDOW_SIZE}-day view ending ${formatIsoDateLabel(cursorDate, { month: "short", day: "numeric", year: "numeric" })}`} | ${config.description}`;
+  meta.textContent = `Shift: ${state.selectedShift} | ${
+    state.trendGranularity === "monthly"
+      ? "Monthly aggregated"
+      : `Rolling ${TREND_DAILY_WINDOW_SIZE}-day view ending ${formatIsoDateLabel(cursorDate, { month: "short", day: "numeric", year: "numeric" })}${hideZeroDays ? " | 0 days hidden" : ""}`
+  } | ${config.description}`;
   setTrendControlsUI({ allDates, allMonths, cursorDate, windowDates });
 
   if (points.length < 2) {
-    container.innerHTML = `<div class="empty-chart">Need at least 2 ${state.trendGranularity === "monthly" ? "months" : "dates in the selected month"} to draw a trend.</div>`;
+    container.innerHTML = `<div class="empty-chart">Need at least 2 ${
+      isMonthly ? "months" : hideZeroDays ? "visible non-zero dates" : "visible dates"
+    } to draw a trend.</div>`;
     return;
   }
 
@@ -13158,17 +13184,27 @@ function renderStageTrend() {
   const meta = document.getElementById("trendMeta");
   const { stage, stageIndex, allDates, allMonths, cursorDate, windowDates, dailyPoints, monthlyPoints } = buildStageTrendSeries();
   const isMonthly = state.trendGranularity === "monthly";
+  const hideZeroDays = state.trendShowZeroDays === false;
   const points = isMonthly
     ? monthlyPoints
-    : dailyPoints.filter((point) => windowDates.includes(point.date));
+    : filterTrendWindowPoints(dailyPoints, windowDates, {
+        hideZeroDays,
+        zeroDayPredicate: stageTrendPointIsZeroDay
+      });
   const scalePoints = isMonthly ? monthlyPoints : dailyPoints;
 
   title.textContent = `${stageDisplayName(stage, stageIndex)} Trend`;
-  meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : `Rolling ${TREND_DAILY_WINDOW_SIZE}-day view ending ${formatIsoDateLabel(cursorDate, { month: "short", day: "numeric", year: "numeric" })}`} | Utilisation is based on ETC vs max throughput.`;
+  meta.textContent = `Shift: ${state.selectedShift} | ${
+    state.trendGranularity === "monthly"
+      ? "Monthly aggregated"
+      : `Rolling ${TREND_DAILY_WINDOW_SIZE}-day view ending ${formatIsoDateLabel(cursorDate, { month: "short", day: "numeric", year: "numeric" })}${hideZeroDays ? " | 0 days hidden" : ""}`
+  } | Utilisation is based on ETC vs max throughput.`;
   setTrendControlsUI({ allDates, allMonths, cursorDate, windowDates });
 
   if (points.length < 2) {
-    container.innerHTML = `<div class="empty-chart">Need at least 2 ${state.trendGranularity === "monthly" ? "months" : "dates in the selected month"} to draw a trend.</div>`;
+    container.innerHTML = `<div class="empty-chart">Need at least 2 ${
+      isMonthly ? "months" : hideZeroDays ? "visible non-zero dates" : "visible dates"
+    } to draw a trend.</div>`;
     return;
   }
 
@@ -13349,13 +13385,20 @@ function exportTrendModalCsv() {
 function setTrendControlsUI({ allDates = [], allMonths = [], cursorDate = "", windowDates = [] } = {}) {
   const dailyBtn = document.getElementById("trendDaily");
   const monthlyBtn = document.getElementById("trendMonthly");
+  const zeroDaysToggleBtn = document.getElementById("trendZeroDaysToggle");
   const label = document.getElementById("trendMonthLabel");
   const prevBtn = document.getElementById("trendPrevMonth");
   const nextBtn = document.getElementById("trendNextMonth");
   const activeMonth = state.trendMonth || monthKey(state.selectedDate);
+  const zeroDaysHidden = state.trendShowZeroDays === false;
 
   dailyBtn.classList.toggle("active", state.trendGranularity === "daily");
   monthlyBtn.classList.toggle("active", state.trendGranularity === "monthly");
+  if (zeroDaysToggleBtn) {
+    zeroDaysToggleBtn.textContent = `${zeroDaysHidden ? "Show" : "Hide"} 0 Days`;
+    zeroDaysToggleBtn.classList.toggle("active", zeroDaysHidden);
+    zeroDaysToggleBtn.setAttribute("aria-pressed", String(zeroDaysHidden));
+  }
 
   if (state.trendGranularity === "daily") {
     const safeCursor = cursorDate || syncTrendDateCursorToAvailableDates(allDates);
@@ -13527,16 +13570,14 @@ function renderTrackingTables() {
     const editing = isInlineEditing("run", String(row.id || ""));
     const pending = isPendingRunLogRow(row);
     const htmlFields = ["action"];
-    if (editing) htmlFields.push("date", "assignedShift", "product", "productionStartTime", "finishTime", "unitsProduced", "notes");
-    const explicitAssignedShift = normalizeLogAssignableShift(row.assignedShift || row.shift);
-    const inferredAssignedShift = inferShiftForLog(
+    if (editing) htmlFields.push("date", "product", "productionStartTime", "finishTime", "unitsProduced", "notes");
+    const patternShift = preferredTimedLogShift(
       state,
       String(row.date || todayISO()),
       String(row.productionStartTime || ""),
+      String(row.finishTime || ""),
       state.selectedShift || "Day"
     );
-    const editableAssignedShift = explicitAssignedShift || normalizeLogAssignableShift(inferredAssignedShift) || LOG_ASSIGNABLE_SHIFTS[0];
-    const patternShift = editing ? editableAssignedShift : explicitAssignedShift || inferredAssignedShift;
     const runPattern = normalizeRunCrewingPattern(row.runCrewingPattern, state, patternShift, { fallbackToIdeal: false });
     const runPatternRaw = Object.keys(runPattern).length ? JSON.stringify(runPattern) : "";
     const runPatternSummary = runCrewingPatternSummaryText(runPattern, state);
@@ -13545,13 +13586,6 @@ function renderTrackingTables() {
       __rowClass: pending ? "table-row-pending" : "",
       __htmlFields: htmlFields,
       date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
-      assignedShift: editing
-        ? inlineSelectHtml(
-          "assignedShift",
-          editableAssignedShift,
-          LOG_ASSIGNABLE_SHIFTS.map((shiftOption) => ({ value: shiftOption, label: shiftOption }))
-        )
-        : resolveTimedLogShiftLabel(row, state, "productionStartTime", "finishTime"),
       product: editing
         ? `
           <div class="table-inline-stack">
@@ -13578,7 +13612,6 @@ function renderTrackingTables() {
   });
   renderTable("runTable", RUN_COLUMNS, displayRunRows, {
     Date: "date",
-    "Assigned Shift": "assignedShift",
     Product: "product",
     "Production Start Time": "productionStartTime",
     "Finish Time": "finishTime",
@@ -13598,7 +13631,7 @@ function renderTrackingTables() {
     const editing = isInlineEditing("downtime", String(row.id || ""));
     const pending = isPendingDowntimeLogRow(row);
     const htmlFields = ["action"];
-    if (editing) htmlFields.push("date", "assignedShift", "downtimeStart", "downtimeFinish", "equipment", "reason", "notes");
+    if (editing) htmlFields.push("date", "downtimeStart", "downtimeFinish", "equipment", "reason", "notes");
     const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
     const reasonCategory = String(row.reasonCategory || parsedReason.reasonCategory || "");
     const reasonDetail = String(row.reasonDetail || parsedReason.reasonDetail || "");
@@ -13607,26 +13640,11 @@ function renderTrackingTables() {
     const reasonDetailChoices = downtimeDetailOptions(state, reasonCategory);
     const equipmentChoices = downtimeDetailOptions(state, "Equipment");
     const equipmentValue = String(row.equipment || (reasonCategory === "Equipment" ? reasonDetail : ""));
-    const explicitAssignedShift = normalizeLogAssignableShift(row.assignedShift || row.shift);
-    const inferredAssignedShift = inferShiftForLog(
-      state,
-      String(row.date || todayISO()),
-      String(row.downtimeStart || ""),
-      state.selectedShift || "Day"
-    );
-    const editableAssignedShift = explicitAssignedShift || normalizeLogAssignableShift(inferredAssignedShift) || LOG_ASSIGNABLE_SHIFTS[0];
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
       __htmlFields: htmlFields,
       date: editing ? inlineInputHtml("date", String(row.date || ""), { type: "date" }) : row.date,
-      assignedShift: editing
-        ? inlineSelectHtml(
-          "assignedShift",
-          editableAssignedShift,
-          LOG_ASSIGNABLE_SHIFTS.map((shiftOption) => ({ value: shiftOption, label: shiftOption }))
-        )
-        : resolveTimedLogShiftLabel(row, state, "downtimeStart", "downtimeFinish"),
       downtimeStart: editing ? inlineInputHtml("downtimeStart", String(row.downtimeStart || ""), { placeholder: "HH:MM" }) : row.downtimeStart,
       downtimeFinish: editing ? inlineInputHtml("downtimeFinish", String(row.downtimeFinish || ""), { placeholder: "HH:MM" }) : row.downtimeFinish,
       equipment: editing
@@ -13660,7 +13678,6 @@ function renderTrackingTables() {
   });
   renderTable("downtimeTable", DOWN_COLUMNS, displayDowntimeRows, {
     Date: "date",
-    "Assigned Shift": "assignedShift",
     "Downtime Start": "downtimeStart",
     "Downtime Finish": "downtimeFinish",
     "Downtime (mins)": "downtimeMins",
@@ -14492,13 +14509,12 @@ function renderHome() {
               .map((row) => {
                 const selectedClass = runLogIdInput?.value && runLogIdInput.value === row.id ? " active" : "";
                 const rowIsOpen = isRunOpen(row);
-                const shiftLabel = resolveTimedLogShiftLabel(row, activeLine, "productionStartTime", "finishTime");
                 return `
                   <article class="pending-log-item${selectedClass}">
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(row.product || "Run")}</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
+                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
                       </p>
                     </div>
                     <div class="pending-log-actions">
@@ -14552,13 +14568,12 @@ function renderHome() {
                 const detailLabel = rowCategory === "Equipment"
                   ? stageNameByIdForLine(activeLine, row.equipment || rowDetail) || "Equipment"
                   : rowDetail;
-                const shiftLabel = resolveTimedLogShiftLabel(row, activeLine, "downtimeStart", "downtimeFinish");
                 return `
                   <article class="pending-log-item${selectedClass}">
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(rowCategory)}${detailLabel ? ` > ${htmlEscape(detailLabel)}` : ""}</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | ${htmlEscape(shiftLabel)} | Start ${htmlEscape(row.downtimeStart || "-")}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
+                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.downtimeStart || "-")}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
                       </p>
                     </div>
                     <div class="pending-log-actions">

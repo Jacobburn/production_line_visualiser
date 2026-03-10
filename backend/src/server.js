@@ -165,7 +165,6 @@ const shiftLogSchema = z.object({
 const runLogSchema = z.object({
   lineId: z.string().uuid(),
   date: z.string().regex(isoDateRegex),
-  shift: z.enum(shiftValues),
   product: z.string().min(1).max(120),
   setUpStartTime: optionalTime,
   productionStartTime: z.string().regex(timeRegex),
@@ -178,7 +177,6 @@ const runLogSchema = z.object({
 const downtimeLogSchema = z.object({
   lineId: z.string().uuid(),
   date: z.string().regex(isoDateRegex),
-  shift: z.enum(shiftValues),
   downtimeStart: z.string().regex(timeRegex),
   downtimeFinish: z.string().regex(timeRegex),
   equipmentStageId: z.string().uuid().nullable().optional(),
@@ -241,7 +239,6 @@ const shiftBreakUpdateSchema = z.object({
 
 const runLogUpdateSchema = z.object({
   date: z.string().regex(isoDateRegex).optional(),
-  shift: z.enum(shiftValues).optional(),
   product: z.string().min(1).max(120).optional(),
   setUpStartTime: optionalTime.optional(),
   productionStartTime: optionalTime.optional(),
@@ -253,7 +250,6 @@ const runLogUpdateSchema = z.object({
 
 const downtimeLogUpdateSchema = z.object({
   date: z.string().regex(isoDateRegex).optional(),
-  shift: z.enum(shiftValues).optional(),
   downtimeStart: optionalTime.optional(),
   downtimeFinish: optionalTime.optional(),
   equipmentStageId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
@@ -677,6 +673,117 @@ async function hasLineShiftAccess(user, lineId, shift) {
   return result.rowCount > 0;
 }
 
+function parseTimeToMinutes(value) {
+  const match = timeRegex.exec(String(value || '').trim());
+  if (!match) return Number.NaN;
+  return (Number(match[1]) * 60) + Number(match[2]);
+}
+
+function splitTimedIntervals(startValue, finishValue) {
+  const startMinutes = parseTimeToMinutes(startValue);
+  const finishMinutes = parseTimeToMinutes(finishValue);
+  if (!Number.isFinite(startMinutes) || !Number.isFinite(finishMinutes)) return [];
+  if (finishMinutes === startMinutes) return [];
+  if (finishMinutes > startMinutes) {
+    return [{ start: startMinutes, end: finishMinutes }];
+  }
+  return [
+    { start: startMinutes, end: 24 * 60 },
+    { start: 0, end: finishMinutes }
+  ];
+}
+
+function intervalOverlapMinutes(left, right) {
+  if (!left || !right) return 0;
+  const start = Math.max(Number(left.start), Number(right.start));
+  const end = Math.min(Number(left.end), Number(right.end));
+  return end > start ? end - start : 0;
+}
+
+function timedLogMatchesShiftRows(shiftRows, startValue, finishValue) {
+  const startMinutes = parseTimeToMinutes(startValue);
+  const finishMinutes = parseTimeToMinutes(finishValue);
+  if (!Number.isFinite(startMinutes) || !Number.isFinite(finishMinutes)) return false;
+  const pointEvent = startMinutes === finishMinutes;
+  const eventIntervals = pointEvent ? [] : splitTimedIntervals(startValue, finishValue);
+  return (Array.isArray(shiftRows) ? shiftRows : []).some((row) => {
+    const shiftIntervals = splitTimedIntervals(row.startTime, row.finishTime);
+    if (pointEvent) {
+      return shiftIntervals.some((interval) => startMinutes >= interval.start && startMinutes <= interval.end);
+    }
+    return eventIntervals.some((eventInterval) => shiftIntervals.some((shiftInterval) => intervalOverlapMinutes(eventInterval, shiftInterval) > 0));
+  });
+}
+
+async function fetchAccessibleShiftRowsForTimedLog(user, lineId, date) {
+  if (!isoDateRegex.test(String(date || '').trim())) return [];
+  const params = user?.role === 'manager' ? [lineId, date] : [user.id, lineId, date];
+  const result = await dbQuery(
+    user?.role === 'manager'
+      ? `SELECT
+           shift,
+           to_char(start_time, 'HH24:MI') AS "startTime",
+           to_char(finish_time, 'HH24:MI') AS "finishTime"
+         FROM shift_logs
+         WHERE line_id = $1
+           AND date = $2::date
+           AND shift IN ('Day', 'Night')
+         ORDER BY submitted_at ASC, id ASC`
+      : `SELECT
+           shift,
+           to_char(start_time, 'HH24:MI') AS "startTime",
+           to_char(finish_time, 'HH24:MI') AS "finishTime"
+         FROM shift_logs
+         WHERE line_id = $2
+           AND date = $3::date
+           AND shift IN ('Day', 'Night')
+           AND EXISTS (
+             SELECT 1
+             FROM supervisor_line_shift_assignments a
+             WHERE a.supervisor_user_id = $1
+               AND a.line_id = shift_logs.line_id
+               AND a.shift = shift_logs.shift
+           )
+         ORDER BY submitted_at ASC, id ASC`,
+    params
+  );
+  return result.rows;
+}
+
+async function hasLineTimedLogAccess(user, lineId, date, startValue, finishValue) {
+  if (user?.role === 'manager') return true;
+  const shiftRows = await fetchAccessibleShiftRowsForTimedLog(user, lineId, date);
+  return timedLogMatchesShiftRows(shiftRows, startValue, finishValue);
+}
+
+function buildTimedLogShiftIndex(rows, { includeLineId = false } = {}) {
+  const index = new Map();
+  (Array.isArray(rows) ? rows : []).forEach((row) => {
+    const date = String(row?.date || '').trim();
+    if (!isoDateRegex.test(date)) return;
+    const shift = String(row?.shift || '').trim();
+    if (shift !== 'Day' && shift !== 'Night') return;
+    const key = includeLineId
+      ? `${String(row?.lineId || '').trim()}|${date}`
+      : date;
+    const list = index.get(key) || [];
+    list.push(row);
+    index.set(key, list);
+  });
+  return index;
+}
+
+function filterTimedLogRowsByShiftIndex(rows, shiftIndex, { startField, finishField, includeLineId = false } = {}) {
+  return (Array.isArray(rows) ? rows : []).filter((row) => {
+    const date = String(row?.date || '').trim();
+    if (!isoDateRegex.test(date)) return false;
+    const key = includeLineId
+      ? `${String(row?.lineId || '').trim()}|${date}`
+      : date;
+    return timedLogMatchesShiftRows(shiftIndex.get(key) || [], row?.[startField], row?.[finishField]);
+  });
+}
+
 function canMutateSubmittedLog(user, submittedByUserId) {
   if (!user) return false;
   if (user.role === 'manager') return true;
@@ -1008,7 +1115,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
     runRows.push(
       {
         date,
-        shift: 'Day',
         product: 'Teriyaki',
         setUpStartTime: null,
         productionStartTime: '06:10',
@@ -1017,7 +1123,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
       },
       {
         date,
-        shift: 'Day',
         product: 'Honey Soy',
         setUpStartTime: null,
         productionStartTime: '10:55',
@@ -1026,7 +1131,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
       },
       {
         date,
-        shift: 'Night',
         product: 'Peri Peri',
         setUpStartTime: null,
         productionStartTime: '14:15',
@@ -1035,7 +1139,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
       },
       {
         date,
-        shift: 'Night',
         product: 'Lemon Herb',
         setUpStartTime: null,
         productionStartTime: '21:30',
@@ -1080,7 +1183,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
     downtimeRows.push(
       {
         date,
-        shift: 'Day',
         downtimeStart: '08:10',
         downtimeFinish: `08:${String(22 + (i % 8)).padStart(2, '0')}`,
         equipmentStageId: dayReasonCategory === 'Equipment' ? dayEquipmentId : null,
@@ -1088,7 +1190,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
       },
       {
         date,
-        shift: 'Day',
         downtimeStart: '11:20',
         downtimeFinish: `11:${String(30 + (i % 10)).padStart(2, '0')}`,
         equipmentStageId: dayReasonCategory2 === 'Equipment' ? dayEquipmentAltId : null,
@@ -1096,7 +1197,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
       },
       {
         date,
-        shift: 'Night',
         downtimeStart: '16:30',
         downtimeFinish: `16:${String(42 + (i % 9)).padStart(2, '0')}`,
         equipmentStageId: nightReasonCategory === 'Equipment' ? nightEquipmentId : null,
@@ -1104,7 +1204,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
       },
       {
         date,
-        shift: 'Night',
         downtimeStart: '20:05',
         downtimeFinish: `20:${String(18 + (i % 11)).padStart(2, '0')}`,
         equipmentStageId: nightReasonCategory2 === 'Equipment' ? nightEquipmentAltId : null,
@@ -2307,133 +2406,42 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       snapshotScopedParams
     ),
     dbQuery(
-      isManager
-        ? `SELECT
-             line_id AS "lineId",
-             run_logs.id,
-             date::TEXT AS date,
-             shift,
-             product,
-             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
-             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
-             units_produced AS "unitsProduced",
-             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
-             COALESCE(run_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM run_logs
-           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-           WHERE line_id = ANY($1::UUID[])
-           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`
-        : `SELECT
-             line_id AS "lineId",
-             run_logs.id,
-             date::TEXT AS date,
-             shift,
-             product,
-             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
-             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
-             units_produced AS "unitsProduced",
-             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
-             COALESCE(run_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM run_logs
-           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-           WHERE line_id = ANY($2::UUID[])
-             AND EXISTS (
-               SELECT 1
-               FROM supervisor_line_shift_assignments a
-               WHERE a.supervisor_user_id = $1
-                 AND a.line_id = run_logs.line_id
-                 AND (
-                   a.shift = run_logs.shift
-                   OR (
-                   run_logs.shift = 'Full Day'
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments day_access
-                     WHERE day_access.supervisor_user_id = $1
-                       AND day_access.line_id = run_logs.line_id
-                       AND day_access.shift = 'Day'
-                   )
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments night_access
-                     WHERE night_access.supervisor_user_id = $1
-                       AND night_access.line_id = run_logs.line_id
-                       AND night_access.shift = 'Night'
-                   )
-                 )
-                 )
-             )
-           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      `SELECT
+         line_id AS "lineId",
+         run_logs.id,
+         date::TEXT AS date,
+         product,
+         COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+         to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+         COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
+         units_produced AS "unitsProduced",
+         COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+         COALESCE(run_logs.notes, '') AS notes,
+         COALESCE(u.name, u.username, '') AS "submittedBy",
+         submitted_at AS "submittedAt"
+       FROM run_logs
+       LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
+       WHERE line_id = ANY($${isManager ? 1 : 2}::UUID[])
+       ORDER BY line_id, date ASC, submitted_at ASC`,
       snapshotScopedParams
     ),
     dbQuery(
-      isManager
-        ? `SELECT
-             line_id AS "lineId",
-             downtime_logs.id,
-             date::TEXT AS date,
-             shift,
-             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
-             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
-             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
-             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
-             COALESCE(reason, '') AS reason,
-             COALESCE(downtime_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM downtime_logs
-           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-           WHERE line_id = ANY($1::UUID[])
-           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`
-        : `SELECT
-             line_id AS "lineId",
-             downtime_logs.id,
-             date::TEXT AS date,
-             shift,
-             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
-             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
-             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
-             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
-             COALESCE(reason, '') AS reason,
-             COALESCE(downtime_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM downtime_logs
-           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-           WHERE line_id = ANY($2::UUID[])
-             AND EXISTS (
-               SELECT 1
-               FROM supervisor_line_shift_assignments a
-               WHERE a.supervisor_user_id = $1
-                 AND a.line_id = downtime_logs.line_id
-                 AND (
-                   a.shift = downtime_logs.shift
-                   OR (
-                   downtime_logs.shift = 'Full Day'
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments day_access
-                     WHERE day_access.supervisor_user_id = $1
-                       AND day_access.line_id = downtime_logs.line_id
-                       AND day_access.shift = 'Day'
-                   )
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments night_access
-                     WHERE night_access.supervisor_user_id = $1
-                       AND night_access.line_id = downtime_logs.line_id
-                       AND night_access.shift = 'Night'
-                   )
-                 )
-                 )
-             )
-           ORDER BY line_id, date ASC, shift ASC, submitted_at ASC`,
+      `SELECT
+         line_id AS "lineId",
+         downtime_logs.id,
+         date::TEXT AS date,
+         to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+         to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+         COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
+         COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+         COALESCE(reason, '') AS reason,
+         COALESCE(downtime_logs.notes, '') AS notes,
+         COALESCE(u.name, u.username, '') AS "submittedBy",
+         submitted_at AS "submittedAt"
+       FROM downtime_logs
+       LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
+       WHERE line_id = ANY($${isManager ? 1 : 2}::UUID[])
+       ORDER BY line_id, date ASC, submitted_at ASC`,
       snapshotScopedParams
     )
   ]);
@@ -2505,13 +2513,28 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     breakByLine.set(row.lineId, list);
   });
 
+  const timedShiftIndex = buildTimedLogShiftIndex(shiftLogsResult.rows, { includeLineId: true });
+  const visibleRunRows = isManager
+    ? runLogsResult.rows
+    : filterTimedLogRowsByShiftIndex(runLogsResult.rows, timedShiftIndex, {
+      startField: 'productionStartTime',
+      finishField: 'finishTime',
+      includeLineId: true
+    });
+  const visibleDowntimeRows = isManager
+    ? downtimeLogsResult.rows
+    : filterTimedLogRowsByShiftIndex(downtimeLogsResult.rows, timedShiftIndex, {
+      startField: 'downtimeStart',
+      finishField: 'downtimeFinish',
+      includeLineId: true
+    });
+
   const runByLine = new Map();
-  runLogsResult.rows.forEach((row) => {
+  visibleRunRows.forEach((row) => {
     const list = runByLine.get(row.lineId) || [];
     list.push({
       id: row.id,
       date: row.date,
-      shift: row.shift,
       product: row.product,
       setUpStartTime: row.setUpStartTime,
       productionStartTime: row.productionStartTime,
@@ -2525,12 +2548,11 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   });
 
   const downtimeByLine = new Map();
-  downtimeLogsResult.rows.forEach((row) => {
+  visibleDowntimeRows.forEach((row) => {
     const list = downtimeByLine.get(row.lineId) || [];
     list.push({
       id: row.id,
       date: row.date,
-      shift: row.shift,
       downtimeStart: row.downtimeStart,
       downtimeFinish: row.downtimeFinish,
       excludeFromCalculation: row.excludeFromCalculation,
@@ -3429,138 +3451,63 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
       lineLogsParams
     ),
     dbQuery(
-      isManager
-        ? `SELECT
-             run_logs.id,
-             date::TEXT AS date,
-             shift,
-             product,
-             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
-             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
-             units_produced AS "unitsProduced",
-             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
-             COALESCE(run_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM run_logs
-           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-           WHERE line_id = $1
-           ORDER BY date ASC, shift ASC, submitted_at ASC`
-        : `SELECT
-             run_logs.id,
-             date::TEXT AS date,
-             shift,
-             product,
-             COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
-             to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
-             COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
-             units_produced AS "unitsProduced",
-             COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
-             COALESCE(run_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM run_logs
-           LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-           WHERE line_id = $2
-             AND EXISTS (
-               SELECT 1
-               FROM supervisor_line_shift_assignments a
-               WHERE a.supervisor_user_id = $1
-                 AND a.line_id = run_logs.line_id
-                 AND (
-                   a.shift = run_logs.shift
-                   OR (
-                   run_logs.shift = 'Full Day'
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments day_access
-                     WHERE day_access.supervisor_user_id = $1
-                       AND day_access.line_id = run_logs.line_id
-                       AND day_access.shift = 'Day'
-                   )
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments night_access
-                     WHERE night_access.supervisor_user_id = $1
-                       AND night_access.line_id = run_logs.line_id
-                       AND night_access.shift = 'Night'
-                   )
-                 )
-                 )
-             )
-           ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      `SELECT
+         run_logs.id,
+         date::TEXT AS date,
+         product,
+         COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
+         to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+         COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
+         units_produced AS "unitsProduced",
+         COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
+         COALESCE(run_logs.notes, '') AS notes,
+         COALESCE(u.name, u.username, '') AS "submittedBy",
+         submitted_at AS "submittedAt"
+       FROM run_logs
+       LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
+       WHERE line_id = $${isManager ? 1 : 2}
+       ORDER BY date ASC, submitted_at ASC`,
       lineLogsParams
     ),
     dbQuery(
-      isManager
-        ? `SELECT
-             downtime_logs.id,
-             date::TEXT AS date,
-             shift,
-             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
-             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
-             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
-             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
-             COALESCE(reason, '') AS reason,
-             COALESCE(downtime_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM downtime_logs
-           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-           WHERE line_id = $1
-           ORDER BY date ASC, shift ASC, submitted_at ASC`
-        : `SELECT
-             downtime_logs.id,
-             date::TEXT AS date,
-             shift,
-             to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
-             to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
-             COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
-             COALESCE(equipment_stage_id::TEXT, '') AS equipment,
-             COALESCE(reason, '') AS reason,
-             COALESCE(downtime_logs.notes, '') AS notes,
-             COALESCE(u.name, u.username, '') AS "submittedBy",
-             submitted_at AS "submittedAt"
-           FROM downtime_logs
-           LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-           WHERE line_id = $2
-             AND EXISTS (
-               SELECT 1
-               FROM supervisor_line_shift_assignments a
-               WHERE a.supervisor_user_id = $1
-                 AND a.line_id = downtime_logs.line_id
-                 AND (
-                   a.shift = downtime_logs.shift
-                   OR (
-                   downtime_logs.shift = 'Full Day'
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments day_access
-                     WHERE day_access.supervisor_user_id = $1
-                       AND day_access.line_id = downtime_logs.line_id
-                       AND day_access.shift = 'Day'
-                   )
-                   AND EXISTS (
-                     SELECT 1
-                     FROM supervisor_line_shift_assignments night_access
-                     WHERE night_access.supervisor_user_id = $1
-                       AND night_access.line_id = downtime_logs.line_id
-                       AND night_access.shift = 'Night'
-                   )
-                 )
-                 )
-             )
-           ORDER BY date ASC, shift ASC, submitted_at ASC`,
+      `SELECT
+         downtime_logs.id,
+         date::TEXT AS date,
+         to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+         to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+         COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
+         COALESCE(equipment_stage_id::TEXT, '') AS equipment,
+         COALESCE(reason, '') AS reason,
+         COALESCE(downtime_logs.notes, '') AS notes,
+         COALESCE(u.name, u.username, '') AS "submittedBy",
+         submitted_at AS "submittedAt"
+       FROM downtime_logs
+       LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
+       WHERE line_id = $${isManager ? 1 : 2}
+       ORDER BY date ASC, submitted_at ASC`,
       lineLogsParams
     )
   ]);
 
+  const timedShiftIndex = buildTimedLogShiftIndex(shiftRows.rows);
+  const visibleRunRows = isManager
+    ? runRows.rows
+    : filterTimedLogRowsByShiftIndex(runRows.rows, timedShiftIndex, {
+      startField: 'productionStartTime',
+      finishField: 'finishTime'
+    });
+  const visibleDowntimeRows = isManager
+    ? downtimeRows.rows
+    : filterTimedLogRowsByShiftIndex(downtimeRows.rows, timedShiftIndex, {
+      startField: 'downtimeStart',
+      finishField: 'downtimeFinish'
+    });
+
   return res.json({
     shiftRows: shiftRows.rows,
     breakRows: breakRows.rows,
-    runRows: runRows.rows,
-    downtimeRows: downtimeRows.rows
+    runRows: visibleRunRows,
+    downtimeRows: visibleDowntimeRows
   });
 }));
 
@@ -3855,7 +3802,6 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
   }));
   const runPayload = sample.runRows.map((row) => ({
     date: row.date,
-    shift: row.shift,
     product: row.product,
     set_up_start_time: row.setUpStartTime || '',
     production_start_time: row.productionStartTime,
@@ -3864,7 +3810,6 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
   }));
   const downtimePayload = sample.downtimeRows.map((row) => ({
     date: row.date,
-    shift: row.shift,
     downtime_start: row.downtimeStart,
     downtime_finish: row.downtimeFinish,
     equipment_stage_id: row.equipmentStageId || '',
@@ -3947,7 +3892,6 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
       `WITH run_data AS (
          SELECT
            r.date::date AS date,
-           r.shift::text AS shift,
            r.product::text AS product,
            NULLIF(COALESCE(r.set_up_start_time, ''), '')::time AS set_up_start_time,
            r.production_start_time::time AS production_start_time,
@@ -3955,7 +3899,6 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
            GREATEST(0, COALESCE(r.units_produced, 0)) AS units_produced
          FROM jsonb_to_recordset($2::jsonb) AS r(
            date text,
-           shift text,
            product text,
            set_up_start_time text,
            production_start_time text,
@@ -3965,12 +3908,11 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
        ),
        inserted_runs AS (
          INSERT INTO run_logs(
-           line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, submitted_by_user_id
+           line_id, date, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, submitted_by_user_id
          )
          SELECT
            $1,
            date,
-           shift,
            product,
            set_up_start_time,
            production_start_time,
@@ -3990,14 +3932,12 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
       `WITH downtime_data AS (
          SELECT
            d.date::date AS date,
-           d.shift::text AS shift,
            d.downtime_start::time AS downtime_start,
            d.downtime_finish::time AS downtime_finish,
            NULLIF(COALESCE(d.equipment_stage_id, ''), '')::uuid AS equipment_stage_id,
            NULLIF(COALESCE(d.reason, ''), '') AS reason
          FROM jsonb_to_recordset($2::jsonb) AS d(
            date text,
-           shift text,
            downtime_start text,
            downtime_finish text,
            equipment_stage_id text,
@@ -4006,12 +3946,11 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
        ),
        inserted_downtime AS (
          INSERT INTO downtime_logs(
-           line_id, date, shift, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
+           line_id, date, downtime_start, downtime_finish, equipment_stage_id, reason, submitted_by_user_id
          )
          SELECT
            $1,
            date,
-           shift,
            downtime_start,
            downtime_finish,
            equipment_stage_id,
@@ -4292,18 +4231,20 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = runLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid run log payload' });
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
-  if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
+  const runFinishForAccess = String(parsed.data.finishTime || parsed.data.productionStartTime || '').trim() || parsed.data.productionStartTime;
+  if (!(await hasLineTimedLogAccess(req.user, parsed.data.lineId, parsed.data.date, parsed.data.productionStartTime, runFinishForAccess))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
 
   const result = await dbQuery(
     `INSERT INTO run_logs(
-       line_id, date, shift, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, notes, submitted_by_user_id
+       line_id, date, product, setup_start_time, production_start_time, finish_time, units_produced, run_crewing_pattern, notes, submitted_by_user_id
      )
-     VALUES ($1, $2, $3, $4, NULLIF($5, '')::time, $6, NULLIF($7, '')::time, $8, $9::jsonb, COALESCE($10, ''), $11)
+     VALUES ($1, $2, $3, NULLIF($4, '')::time, $5, NULLIF($6, '')::time, $7, $8::jsonb, COALESCE($9, ''), $10)
      RETURNING
        id,
        line_id AS "lineId",
        date::TEXT AS date,
-       shift,
        product,
        COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
        to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
@@ -4315,7 +4256,6 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
     [
       parsed.data.lineId,
       parsed.data.date,
-      parsed.data.shift,
       parsed.data.product,
       parsed.data.setUpStartTime || '',
       parsed.data.productionStartTime,
@@ -4351,7 +4291,9 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
     });
   }
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
-  if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (!(await hasLineTimedLogAccess(req.user, parsed.data.lineId, parsed.data.date, parsed.data.downtimeStart, parsed.data.downtimeFinish))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (parsed.data.equipmentStageId && !(await isLineStage(parsed.data.lineId, parsed.data.equipmentStageId))) {
     return res.status(400).json({ error: 'Equipment stage does not belong to this line' });
   }
@@ -4360,7 +4302,6 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
     `INSERT INTO downtime_logs(
        line_id,
        date,
-       shift,
        downtime_start,
        downtime_finish,
        equipment_stage_id,
@@ -4369,12 +4310,11 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
        exclude_from_calculation,
        submitted_by_user_id
      )
-     VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7, ''), COALESCE($8, ''), $9, $10)
+     VALUES ($1, $2, $3, $4, $5, NULLIF($6, ''), COALESCE($7, ''), $8, $9)
      RETURNING
        id,
        line_id AS "lineId",
        date,
-       shift,
        reason,
        COALESCE(notes, '') AS notes,
        COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
@@ -4382,7 +4322,6 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
     [
       parsed.data.lineId,
       parsed.data.date,
-      parsed.data.shift,
       parsed.data.downtimeStart,
       parsed.data.downtimeFinish,
       parsed.data.equipmentStageId || null,
@@ -4503,7 +4442,13 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
   if (!parsed.success) return res.status(400).json({ error: 'Invalid run log update payload' });
 
   const existingResult = await dbQuery(
-    `SELECT id, line_id AS "lineId", shift, submitted_by_user_id AS "submittedByUserId"
+    `SELECT
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+       COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
+       submitted_by_user_id AS "submittedByUserId"
      FROM run_logs
      WHERE id = $1`,
     [logId]
@@ -4512,8 +4457,14 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
   const existing = existingResult.rows[0];
 
   const data = parsed.data;
-  const accessShift = data.shift || existing.shift;
-  if (!(await hasLineShiftAccess(req.user, existing.lineId, accessShift))) return res.status(403).json({ error: 'Forbidden' });
+  const nextDate = String(data.date || existing.date || '').trim();
+  const nextProductionStart = String(data.productionStartTime || existing.productionStartTime || '').trim();
+  const nextFinish = Object.prototype.hasOwnProperty.call(data, 'finishTime')
+    ? (String(data.finishTime || '').trim() || nextProductionStart)
+    : (String(existing.finishTime || '').trim() || nextProductionStart);
+  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, nextDate, nextProductionStart, nextFinish))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
     return res.status(403).json({ error: 'Supervisors can only edit their own logs' });
   }
@@ -4524,16 +4475,15 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
     `UPDATE run_logs
      SET
        date = COALESCE($2::date, date),
-       shift = COALESCE($3, shift),
-       product = COALESCE(NULLIF($4, ''), product),
-       setup_start_time = CASE WHEN $5::text IS NULL THEN setup_start_time ELSE NULLIF($5, '')::time END,
-       production_start_time = COALESCE(NULLIF($6, '')::time, production_start_time),
-       finish_time = CASE WHEN $7::text IS NULL THEN finish_time ELSE NULLIF($7, '')::time END,
-       units_produced = COALESCE($8, units_produced),
-       run_crewing_pattern = COALESCE($9::jsonb, run_crewing_pattern),
+       product = COALESCE(NULLIF($3, ''), product),
+       setup_start_time = CASE WHEN $4::text IS NULL THEN setup_start_time ELSE NULLIF($4, '')::time END,
+       production_start_time = COALESCE(NULLIF($5, '')::time, production_start_time),
+       finish_time = CASE WHEN $6::text IS NULL THEN finish_time ELSE NULLIF($6, '')::time END,
+       units_produced = COALESCE($7, units_produced),
+       run_crewing_pattern = COALESCE($8::jsonb, run_crewing_pattern),
        notes = CASE
-         WHEN $10::boolean IS FALSE THEN notes
-         ELSE $11
+         WHEN $9::boolean IS FALSE THEN notes
+         ELSE $10
        END,
        submitted_at = NOW()
      WHERE id = $1
@@ -4541,7 +4491,6 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        id,
        line_id AS "lineId",
        date::TEXT AS date,
-       shift,
        product,
        COALESCE(to_char(setup_start_time, 'HH24:MI'), '') AS "setUpStartTime",
        to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
@@ -4553,7 +4502,6 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
     [
       logId,
       data.date ?? null,
-      data.shift ?? null,
       data.product ?? null,
       data.setUpStartTime ?? null,
       data.productionStartTime ?? null,
@@ -4585,7 +4533,13 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   if (!parsed.success) return res.status(400).json({ error: 'Invalid downtime log update payload' });
 
   const existingResult = await dbQuery(
-    `SELECT id, line_id AS "lineId", shift, submitted_by_user_id AS "submittedByUserId"
+    `SELECT
+       id,
+       line_id AS "lineId",
+       date::TEXT AS date,
+       to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+       to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
+       submitted_by_user_id AS "submittedByUserId"
      FROM downtime_logs
      WHERE id = $1`,
     [logId]
@@ -4594,8 +4548,12 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   const existing = existingResult.rows[0];
 
   const data = parsed.data;
-  const accessShift = data.shift || existing.shift;
-  if (!(await hasLineShiftAccess(req.user, existing.lineId, accessShift))) return res.status(403).json({ error: 'Forbidden' });
+  const nextDate = String(data.date || existing.date || '').trim();
+  const nextDowntimeStart = String(data.downtimeStart || existing.downtimeStart || '').trim();
+  const nextDowntimeFinish = String(data.downtimeFinish || existing.downtimeFinish || '').trim();
+  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, nextDate, nextDowntimeStart, nextDowntimeFinish))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
     return res.status(403).json({ error: 'Supervisors can only edit their own logs' });
   }
@@ -4614,25 +4572,24 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
     `UPDATE downtime_logs
      SET
        date = COALESCE($2::date, date),
-       shift = COALESCE($3, shift),
-       downtime_start = COALESCE(NULLIF($4, '')::time, downtime_start),
-       downtime_finish = COALESCE(NULLIF($5, '')::time, downtime_finish),
+       downtime_start = COALESCE(NULLIF($3, '')::time, downtime_start),
+       downtime_finish = COALESCE(NULLIF($4, '')::time, downtime_finish),
        equipment_stage_id = CASE
-         WHEN $6::boolean IS FALSE THEN equipment_stage_id
-         WHEN NULLIF($7, '')::uuid IS NULL THEN NULL
-         ELSE NULLIF($7, '')::uuid
+         WHEN $5::boolean IS FALSE THEN equipment_stage_id
+         WHEN NULLIF($6, '')::uuid IS NULL THEN NULL
+         ELSE NULLIF($6, '')::uuid
        END,
        reason = CASE
-         WHEN $8::boolean IS FALSE THEN reason
-         ELSE NULLIF($9, '')
+         WHEN $7::boolean IS FALSE THEN reason
+         ELSE NULLIF($8, '')
        END,
        notes = CASE
-         WHEN $10::boolean IS FALSE THEN notes
-         ELSE $11
+         WHEN $9::boolean IS FALSE THEN notes
+         ELSE $10
        END,
        exclude_from_calculation = CASE
-         WHEN $12::boolean IS FALSE THEN exclude_from_calculation
-         ELSE $13
+         WHEN $11::boolean IS FALSE THEN exclude_from_calculation
+         ELSE $12
        END,
        submitted_at = NOW()
      WHERE id = $1
@@ -4640,7 +4597,6 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
        id,
        line_id AS "lineId",
        date::TEXT AS date,
-       shift,
        to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
        to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
        COALESCE(exclude_from_calculation, FALSE) AS "excludeFromCalculation",
@@ -4651,7 +4607,6 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
     [
       logId,
       data.date ?? null,
-      data.shift ?? null,
       data.downtimeStart ?? null,
       data.downtimeFinish ?? null,
       equipmentStageProvided,
@@ -4722,7 +4677,8 @@ app.delete('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) 
        id,
        line_id AS "lineId",
        date::TEXT AS date,
-       shift,
+       to_char(production_start_time, 'HH24:MI') AS "productionStartTime",
+       COALESCE(to_char(finish_time, 'HH24:MI'), '') AS "finishTime",
        product,
        submitted_by_user_id AS "submittedByUserId"
      FROM run_logs
@@ -4732,7 +4688,10 @@ app.delete('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) 
   if (!existingResult.rowCount) return res.status(404).json({ error: 'Run log not found' });
   const existing = existingResult.rows[0];
 
-  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  const finishForAccess = String(existing.finishTime || existing.productionStartTime || '').trim() || existing.productionStartTime;
+  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, existing.date, existing.productionStartTime, finishForAccess))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
     return res.status(403).json({ error: 'Supervisors can only delete their own logs' });
   }
@@ -4744,7 +4703,7 @@ app.delete('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) 
     actorName: req.user.name,
     actorRole: req.user.role,
     action: 'DELETE_RUN_LOG',
-    details: `Run log ${logId} deleted (${existing.product}, ${existing.date} ${existing.shift})`
+    details: `Run log ${logId} deleted (${existing.product}, ${existing.date})`
   });
 
   return res.status(204).send();
@@ -4759,7 +4718,8 @@ app.delete('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, r
        id,
        line_id AS "lineId",
        date::TEXT AS date,
-       shift,
+        to_char(downtime_start, 'HH24:MI') AS "downtimeStart",
+        to_char(downtime_finish, 'HH24:MI') AS "downtimeFinish",
        COALESCE(reason, '') AS reason,
        submitted_by_user_id AS "submittedByUserId"
      FROM downtime_logs
@@ -4769,7 +4729,9 @@ app.delete('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, r
   if (!existingResult.rowCount) return res.status(404).json({ error: 'Downtime log not found' });
   const existing = existingResult.rows[0];
 
-  if (!(await hasLineShiftAccess(req.user, existing.lineId, existing.shift))) return res.status(403).json({ error: 'Forbidden' });
+  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, existing.date, existing.downtimeStart, existing.downtimeFinish))) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
     return res.status(403).json({ error: 'Supervisors can only delete their own logs' });
   }
@@ -4781,7 +4743,7 @@ app.delete('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, r
     actorName: req.user.name,
     actorRole: req.user.role,
     action: 'DELETE_DOWNTIME_LOG',
-    details: `Downtime log ${logId} deleted (${existing.reason || `${existing.date} ${existing.shift}`})`
+    details: `Downtime log ${logId} deleted (${existing.reason || existing.date})`
   });
 
   return res.status(204).send();
