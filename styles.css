@@ -407,6 +407,10 @@ button {
   gap: 0.55rem;
 }
 
+.day-visualiser-kpis {
+  align-items: start;
+}
+
 .day-key-stage-select {
   width: 100%;
   min-height: 2.5rem;
@@ -453,6 +457,16 @@ button {
   display: block;
   font-size: 0.94rem;
   color: #203548;
+}
+
+@media (min-width: 1400px) {
+  .day-visualiser-kpis {
+    grid-template-columns: repeat(7, minmax(0, 1fr));
+  }
+
+  .day-visualiser-kpis > .day-key-stage-kpi {
+    grid-column: span 2;
+  }
 }
 
 .line-map {
