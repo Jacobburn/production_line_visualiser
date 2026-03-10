@@ -12922,7 +12922,7 @@ function buildDayKpiTrendSeries(metricKey) {
   };
 }
 
-function renderDayKpiTrendChart(container, points, config) {
+function renderDayKpiTrendChart(container, points, config, { scalePoints = points } = {}) {
   if (!container || !Array.isArray(points) || !points.length || !config) return;
   const width = 1180;
   const height = 340;
@@ -12930,7 +12930,8 @@ function renderDayKpiTrendChart(container, points, config) {
   const chartW = width - pad.left - pad.right;
   const chartH = height - pad.top - pad.bottom;
   const values = points.map((point) => Math.max(0, num(point.value)));
-  const maxValue = Math.max(Math.max(0, num(config.scaleFloor)), ...values);
+  const scaleValues = (Array.isArray(scalePoints) && scalePoints.length ? scalePoints : points).map((point) => Math.max(0, num(point.value)));
+  const maxValue = Math.max(Math.max(0, num(config.scaleFloor)), ...scaleValues);
   const avgValue = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
   const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
   const x = (index) => pad.left + stepX * index;
@@ -13013,9 +13014,11 @@ function renderDayKpiTrend() {
   const metricKey = String(trendModalContext.metricKey || "").trim();
   const { config, allMonths, dailyPoints, monthlyPoints } = buildDayKpiTrendSeries(metricKey);
   if (!container || !title || !meta || !config || !state) return;
-  const points = state.trendGranularity === "monthly"
+  const isMonthly = state.trendGranularity === "monthly";
+  const points = isMonthly
     ? monthlyPoints
     : dailyPoints.filter((point) => monthKey(point.date) === state.trendMonth);
+  const scalePoints = isMonthly ? monthlyPoints : dailyPoints;
 
   title.textContent = config.title;
   meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : "Daily within selected month"} | ${config.description}`;
@@ -13026,7 +13029,7 @@ function renderDayKpiTrend() {
     return;
   }
 
-  renderDayKpiTrendChart(container, points, config);
+  renderDayKpiTrendChart(container, points, config, { scalePoints });
 }
 
 function renderStageTrend() {
@@ -13034,9 +13037,11 @@ function renderStageTrend() {
   const title = document.getElementById("trendTitle");
   const meta = document.getElementById("trendMeta");
   const { stage, stageIndex, allMonths, dailyPoints, monthlyPoints } = buildStageTrendSeries();
-  const points = state.trendGranularity === "monthly"
+  const isMonthly = state.trendGranularity === "monthly";
+  const points = isMonthly
     ? monthlyPoints
     : dailyPoints.filter((point) => monthKey(point.date) === state.trendMonth);
+  const scalePoints = isMonthly ? monthlyPoints : dailyPoints;
 
   title.textContent = `${stageDisplayName(stage, stageIndex)} Trend`;
   meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : "Daily within selected month"} | Utilisation is based on ETC vs max throughput.`;
@@ -13052,9 +13057,9 @@ function renderStageTrend() {
   const pad = { top: 22, right: 88, bottom: 58, left: 62 };
   const chartW = width - pad.left - pad.right;
   const chartH = height - pad.top - pad.bottom;
-  const maxUtil = Math.max(100, ...points.map((p) => p.utilisation));
-  const maxDown = Math.max(1, ...points.map((p) => p.stageDowntime));
-  const maxEtc = Math.max(1, ...points.map((p) => p.stageEtc));
+  const maxUtil = Math.max(100, ...scalePoints.map((p) => p.utilisation));
+  const maxDown = Math.max(1, ...scalePoints.map((p) => p.stageDowntime));
+  const maxEtc = Math.max(1, ...scalePoints.map((p) => p.stageEtc));
   const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
 
   const yUtil = (v) => pad.top + chartH - (Math.max(0, Math.min(maxUtil, v)) / maxUtil) * chartH;
