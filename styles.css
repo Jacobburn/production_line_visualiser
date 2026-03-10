@@ -440,9 +440,6 @@ button {
 }
 
 .day-key-stage-metric {
-  display: flex;
-  align-items: baseline;
-  gap: 0.32rem;
   border: 1px solid #d8e4ef;
   border-radius: 0.7rem;
   background: #f8fbff;
@@ -450,6 +447,7 @@ button {
 }
 
 .day-key-stage-metric span {
+  display: block;
   margin: 0;
   font-size: 0.6rem;
   font-weight: 700;
@@ -459,8 +457,11 @@ button {
 }
 
 .day-key-stage-metric strong {
+  display: block;
+  margin-top: 0.14rem;
   font-size: 0.72rem;
   line-height: 1.1;
+  overflow-wrap: anywhere;
   color: #203548;
 }
 
@@ -475,8 +476,8 @@ button {
 
   .kpi-grid article.day-key-stage-kpi {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(210px, 1.15fr);
-    align-items: center;
+    grid-template-columns: minmax(110px, 0.85fr) minmax(0, 1.15fr);
+    align-items: start;
     gap: 0.35rem 0.7rem;
   }
 
@@ -490,13 +491,13 @@ button {
   }
 
   .kpi-grid article.day-key-stage-kpi .day-key-stage-name {
-    grid-column: 1;
+    grid-column: 1 / -1;
     grid-row: 2;
   }
 
   .day-key-stage-metrics {
-    grid-column: 2;
-    grid-row: 2;
+    grid-column: 1 / -1;
+    grid-row: 3;
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
