@@ -749,23 +749,23 @@
           </div>
 
           <div class="kpi-grid day-visualiser-kpis">
-            <article>
+            <article class="day-kpi-trigger" data-day-kpi-metric="units" role="button" tabindex="0" aria-label="Show total units trend">
               <h3>Total Units</h3>
               <p id="dayKpiUnits">0</p>
             </article>
-            <article>
+            <article class="day-kpi-trigger" data-day-kpi-metric="downtime" role="button" tabindex="0" aria-label="Show total downtime trend">
               <h3>Total Downtime</h3>
               <p id="dayKpiDowntime">0 min</p>
             </article>
-            <article>
+            <article class="day-kpi-trigger" data-day-kpi-metric="utilisation" role="button" tabindex="0" aria-label="Show uptime utilisation trend">
               <h3>Uptime Utilisation</h3>
               <p id="dayKpiUtilisation">0%</p>
             </article>
-            <article>
+            <article class="day-kpi-trigger" data-day-kpi-metric="utilisationGross" role="button" tabindex="0" aria-label="Show gross utilisation trend">
               <h3>Gross Utilisation</h3>
               <p id="dayKpiUtilisationGross">0%</p>
             </article>
-            <article>
+            <article class="day-kpi-trigger" data-day-kpi-metric="netRunRate" role="button" tabindex="0" aria-label="Show net run rate trend">
               <h3>Net Run Rate</h3>
               <p id="dayKpiRunRate">0 u/min</p>
             </article>
@@ -776,11 +776,11 @@
               </select>
               <p id="dayKpiKeyStageName" class="day-key-stage-name">Select key stage</p>
               <div class="day-key-stage-metrics">
-                <div class="day-key-stage-metric">
+                <div class="day-key-stage-metric day-kpi-trigger" data-day-kpi-metric="keyStageCrew" role="button" tabindex="0" aria-label="Show key stage crew trend">
                   <span>Crew</span>
                   <strong id="dayKpiKeyStageCrew">Not set</strong>
                 </div>
-                <div class="day-key-stage-metric">
+                <div class="day-key-stage-metric day-kpi-trigger" data-day-kpi-metric="keyStageRatePerCrew" role="button" tabindex="0" aria-label="Show key stage net rate per crew trend">
                   <span>Net Rate / Crew</span>
                   <strong id="dayKpiKeyStageRatePerCrew">-</strong>
                 </div>
@@ -983,8 +983,8 @@
       <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="trendTitle">
         <div class="modal-head">
           <div class="modal-title-block">
-            <h2 id="trendTitle">Stage Performance Trend</h2>
-            <p class="muted" id="trendMeta">Click a stage to view performance over time.</p>
+            <h2 id="trendTitle">Performance Trend</h2>
+            <p class="muted" id="trendMeta">Click a stage or day callout stat to view performance over time.</p>
           </div>
           <div class="trend-controls">
             <div class="shift-toggle" role="group" aria-label="Trend view mode">

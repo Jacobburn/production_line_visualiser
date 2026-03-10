@@ -142,6 +142,7 @@ let supervisorShiftTileEditId = "";
 let runCrewingPatternModalState = null;
 let dayVizBlockModalState = null;
 let dayVizBlockModalBusy = false;
+let trendModalContext = { type: "stage", metricKey: "" };
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 appState.lineGroups = normalizeLineGroups(appState.lineGroups);
 appState.dataSources = normalizeDataSources(appState.dataSources);
@@ -1599,9 +1600,8 @@ function derivedDataForLine(line) {
   return { shiftRows, breakRows, runRows, downtimeRows, downtimeRowsLogged };
 }
 
-function computeLineMetrics(line, date, shift) {
+function computeLineMetricsFromData(line, date, shift, data = derivedDataForLine(line || {})) {
   const stages = line?.stages?.length ? line.stages : STAGES;
-  const data = derivedDataForLine(line || {});
   const selectedRunRows = selectedShiftRowsByDate(data.runRows, date, shift, { line });
   const selectedDownRows = selectedShiftRowsByDate(data.downtimeRows, date, shift, { line });
   const selectedCalcDownRows = calculationDowntimeRows(selectedDownRows);
@@ -1669,6 +1669,10 @@ function computeLineMetrics(line, date, shift) {
     understaffedBy,
     staffingCallout
   };
+}
+
+function computeLineMetrics(line, date, shift) {
+  return computeLineMetricsFromData(line, date, shift, derivedDataForLine(line || {}));
 }
 
 function csvEscape(value) {
@@ -8764,6 +8768,7 @@ function bindVisualiserControls() {
   const lineTrendPrevBtn = document.getElementById("lineTrendPrevPeriod");
   const lineTrendNextBtn = document.getElementById("lineTrendNextPeriod");
   const lineTrendRangeButtons = Array.from(document.querySelectorAll("[data-line-trend-range]"));
+  const dayKpiTriggers = Array.from(document.querySelectorAll("[data-day-kpi-metric]"));
   const saveStageSettingsBtn = document.getElementById("saveStageCrewSettingsBtn");
   const dayKeyStageSelect = document.getElementById("dayKeyStageSelect");
   let layoutDragState = null;
@@ -8838,6 +8843,19 @@ function bindVisualiserControls() {
       renderVisualiser();
     });
   }
+  dayKpiTriggers.forEach((trigger) => {
+    const activate = () => {
+      const metricKey = String(trigger.dataset.dayKpiMetric || "").trim();
+      if (!metricKey) return;
+      openDayKpiTrend(metricKey);
+    };
+    trigger.addEventListener("click", activate);
+    trigger.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      activate();
+    });
+  });
   crewShiftButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       if (!state) return;
@@ -9291,28 +9309,45 @@ function bindTrendModal() {
   });
 
   dailyBtn.addEventListener("click", () => {
+    if (!state) return;
     state.trendGranularity = "daily";
     saveState();
-    renderStageTrend();
+    renderTrendModalContent();
   });
 
   monthlyBtn.addEventListener("click", () => {
+    if (!state) return;
     state.trendGranularity = "monthly";
     saveState();
-    renderStageTrend();
+    renderTrendModalContent();
   });
 
   prevBtn.addEventListener("click", () => {
+    if (!state) return;
     state.trendMonth = addMonths(state.trendMonth || monthKey(state.selectedDate), -1);
     saveState();
-    renderStageTrend();
+    renderTrendModalContent();
   });
 
   nextBtn.addEventListener("click", () => {
+    if (!state) return;
     state.trendMonth = addMonths(state.trendMonth || monthKey(state.selectedDate), 1);
     saveState();
-    renderStageTrend();
+    renderTrendModalContent();
   });
+}
+
+function openDayKpiTrend(metricKey) {
+  const safeMetricKey = String(metricKey || "").trim();
+  if (!state || !safeMetricKey) return;
+  const requiresKeyStage = safeMetricKey === "keyStageCrew" || safeMetricKey === "keyStageRatePerCrew";
+  if (requiresKeyStage && !normalizeDayVisualiserKeyStageId(state, state.dayVisualiserKeyStageId)) {
+    alert("Select a key stage first.");
+    return;
+  }
+  trendModalContext = { type: "dayKpi", metricKey: safeMetricKey };
+  renderTrendModalContent();
+  openTrendModal();
 }
 
 function bindLineTrendDetailModal() {
@@ -10784,7 +10819,7 @@ function renderCrewInputs() {
       markLineSettingsDirty(state.id);
       saveState();
       renderVisualiser();
-      renderStageTrend();
+      renderTrendModalContent();
     });
 
     row.append(name, input);
@@ -10816,7 +10851,7 @@ function renderThroughputInputs() {
       markLineSettingsDirty(state.id);
       saveState();
       renderVisualiser();
-      renderStageTrend();
+      renderTrendModalContent();
     });
 
     row.append(name, input);
@@ -12372,6 +12407,75 @@ function renderSupervisorDayVisualiser(line, selectedDate) {
   );
 }
 
+function computeDayVisualiserKeyStageMetrics(
+  line,
+  stageId,
+  {
+    stages = [],
+    selectedRunRows = [],
+    selectedCalculationDowntimeRows = [],
+    selectedShift = "Day",
+    shiftMins = 0,
+    netRunRate = 0
+  } = {}
+) {
+  const stageList = Array.isArray(stages) && stages.length ? stages : line?.stages || [];
+  const normalizedStageId = normalizeDayVisualiserKeyStageId(line, stageId);
+  const selectedStageIndex = stageList.findIndex((stage) => stage.id === normalizedStageId);
+  const selectedStage = selectedStageIndex >= 0 ? stageList[selectedStageIndex] : null;
+  if (!selectedStage) {
+    return {
+      stage: null,
+      stageIndex: -1,
+      stageLabel: "Select key stage",
+      crewCount: 0,
+      stageDowntime: 0,
+      stageNetRunRate: 0,
+      perCrewRate: 0
+    };
+  }
+
+  const baseCrewMap = crewMapForLineShift(line, selectedShift, stageList);
+  const selectedRunPattern = latestRunCrewingPatternForRows(line, selectedRunRows, selectedShift);
+  const crewCount = stageCrewCountForVisual(line, selectedStage, baseCrewMap, selectedRunPattern);
+  const stageDowntime = selectedCalculationDowntimeRows
+    .filter((row) => matchesStage(selectedStage, row.equipment))
+    .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, selectedShift), 0);
+  const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
+  const stageNetRunRate = netRunRate * uptimeRatio;
+  const perCrewRate = crewCount > 0 ? stageNetRunRate / crewCount : 0;
+
+  return {
+    stage: selectedStage,
+    stageIndex: selectedStageIndex,
+    stageLabel: stageDisplayName(selectedStage, selectedStageIndex),
+    crewCount,
+    stageDowntime,
+    stageNetRunRate,
+    perCrewRate
+  };
+}
+
+function computeDayVisualiserKeyStageMetricsForDate(line, stageId, date, shift, data = derivedDataForLine(line || {})) {
+  const stages = line?.stages?.length ? line.stages : STAGES;
+  const selectedRunRows = selectedShiftRowsByDate(data.runRows, date, shift, { line });
+  const selectedCalculationDowntimeRows = calculationDowntimeRows(selectedShiftRowsByDate(data.downtimeRows, date, shift, { line }));
+  const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line });
+  const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
+  const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, shift), 0);
+  const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
+  const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
+
+  return computeDayVisualiserKeyStageMetrics(line, stageId, {
+    stages,
+    selectedRunRows,
+    selectedCalculationDowntimeRows,
+    selectedShift: shift,
+    shiftMins,
+    netRunRate
+  });
+}
+
 function renderDayVisualiserKeyStageKpi(
   line,
   {
@@ -12408,19 +12512,17 @@ function renderDayVisualiserKeyStageKpi(
     return;
   }
 
-  const baseCrewMap = crewMapForLineShift(line, selectedShift, stageList);
-  const selectedRunPattern = latestRunCrewingPatternForRows(line, selectedRunRows, selectedShift);
-  const crewCount = stageCrewCountForVisual(line, selectedStage, baseCrewMap, selectedRunPattern);
-  const stageDowntime = selectedCalculationDowntimeRows
-    .filter((row) => matchesStage(selectedStage, row.equipment))
-    .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, selectedShift), 0);
-  const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
-  const stageNetRunRate = netRunRate * uptimeRatio;
-  const perCrewRate = crewCount > 0 ? stageNetRunRate / crewCount : 0;
-
-  nameNode.textContent = stageDisplayName(selectedStage, selectedStageIndex);
-  crewNode.textContent = `${formatNum(crewCount, 0)} crew`;
-  rateNode.textContent = crewCount > 0 ? `${formatNum(perCrewRate, 2)} u/min/crew` : "No crew set";
+  const keyStageMetrics = computeDayVisualiserKeyStageMetrics(line, normalizedKeyStageId, {
+    stages: stageList,
+    selectedRunRows,
+    selectedCalculationDowntimeRows,
+    selectedShift,
+    shiftMins,
+    netRunRate
+  });
+  nameNode.textContent = keyStageMetrics.stageLabel;
+  crewNode.textContent = `${formatNum(keyStageMetrics.crewCount, 0)} crew`;
+  rateNode.textContent = keyStageMetrics.crewCount > 0 ? `${formatNum(keyStageMetrics.perCrewRate, 2)} u/min/crew` : "No crew set";
 }
 
 function renderVisualiser() {
@@ -12514,9 +12616,10 @@ function renderVisualiser() {
     if (!state.visualEditMode) {
       card.addEventListener("click", () => {
         state.selectedStageId = stage.id;
+        trendModalContext = { type: "stage", metricKey: "" };
         saveState();
         renderVisualiser();
-        renderStageTrend();
+        renderTrendModalContent();
         openTrendModal();
       });
     } else {
@@ -12563,20 +12666,20 @@ function renderVisualiser() {
   setText("dayKpiUtilisationGross", utilisationGrossText);
 }
 
-function stageDailyMetrics(stage, date, shift, data) {
-  const shiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line: state });
+function stageDailyMetrics(line, stage, date, shift, data) {
+  const shiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line });
   const shiftMins = shiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
-  const stageDowntime = calculationDowntimeRows(selectedShiftRowsByDate(data.downtimeRows, date, shift, { line: state }))
+  const stageDowntime = calculationDowntimeRows(selectedShiftRowsByDate(data.downtimeRows, date, shift, { line }))
     .filter((row) => matchesStage(stage, row.equipment))
     .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, shift), 0);
 
-  const runRows = selectedShiftRowsByDate(data.runRows, date, shift, { line: state });
+  const runRows = selectedShiftRowsByDate(data.runRows, date, shift, { line });
   const units = runRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, shift), 0);
   const totalNetTime = runRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
   const stageEtc = netRunRate * uptimeRatio;
-  const totalMaxThroughput = stageTotalMaxThroughput(stage.id, shift);
+  const totalMaxThroughput = stageTotalMaxThroughputForLine(line, stage.id, shift);
   const utilisation = totalMaxThroughput > 0 ? (stageEtc / totalMaxThroughput) * 100 : 0;
 
   return { date, shiftMins, stageDowntime, utilisation, stageEtc };
@@ -12588,6 +12691,279 @@ function trendDatesForShift(shift, data) {
   data.runRows.forEach((row) => rowMatchesDateShift(row, row.date, shift) && row.date && dates.add(row.date));
   data.downtimeRows.forEach((row) => rowMatchesDateShift(row, row.date, shift) && row.date && dates.add(row.date));
   return Array.from(dates).sort();
+}
+
+function dayKpiTrendConfig(metricKey) {
+  const keyStageId = normalizeDayVisualiserKeyStageId(state, state?.dayVisualiserKeyStageId);
+  const keyStageMetrics = computeDayVisualiserKeyStageMetrics(state, keyStageId, { stages: getStages(), selectedShift: state?.selectedShift || "Day" });
+  const keyStageLabel = keyStageMetrics.stageLabel || "Key Stage";
+  const crewFormat = (value) => `${formatNum(value, Math.abs(value - Math.round(value)) >= 0.05 ? 1 : 0)} crew`;
+
+  const configs = {
+    units: {
+      title: "Total Units Trend",
+      description: "Production units by selected day visualiser period.",
+      legend: "Total units",
+      aggregate: "sum",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#1f4f8a",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, 0)} units`,
+      formatTick: (value) => formatNum(value, 0)
+    },
+    downtime: {
+      title: "Total Downtime Trend",
+      description: "Logged downtime minutes in the selected shift.",
+      legend: "Total downtime",
+      aggregate: "sum",
+      barClass: "bar-down",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#a73838",
+      avgTheme: "down",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, value < 10 ? 1 : 0)} min`,
+      formatTick: (value) => formatNum(value, value < 10 ? 1 : 0)
+    },
+    utilisation: {
+      title: "Uptime Utilisation Trend",
+      description: "Utilisation based on bottleneck stage ETC against max throughput.",
+      legend: "Uptime utilisation",
+      aggregate: "avg",
+      barClass: "bar-units",
+      lineClass: "line-util",
+      dotClass: "dot-util",
+      lineColor: "",
+      avgTheme: "units",
+      scaleFloor: 100,
+      formatValue: (value) => `${formatNum(value, 1)}%`,
+      formatTick: (value) => `${formatNum(value, 0)}%`
+    },
+    utilisationGross: {
+      title: "Gross Utilisation Trend",
+      description: "Gross utilisation before stage downtime is applied.",
+      legend: "Gross utilisation",
+      aggregate: "avg",
+      barClass: "bar-units",
+      lineClass: "line-util",
+      dotClass: "dot-util",
+      lineColor: "",
+      avgTheme: "units",
+      scaleFloor: 100,
+      formatValue: (value) => `${formatNum(value, 1)}%`,
+      formatTick: (value) => `${formatNum(value, 0)}%`
+    },
+    netRunRate: {
+      title: "Net Run Rate Trend",
+      description: "Units produced divided by net production minutes.",
+      legend: "Net run rate",
+      aggregate: "avg",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#1f4f8a",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, 2)} u/min`,
+      formatTick: (value) => formatNum(value, value < 10 ? 2 : 1)
+    },
+    keyStageCrew: {
+      title: `${keyStageLabel} Crew Trend`,
+      description: "Crew allocated to the selected key stage.",
+      legend: `${keyStageLabel} crew`,
+      aggregate: "avg",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#0f766e",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: crewFormat,
+      formatTick: (value) => formatNum(value, Math.abs(value - Math.round(value)) >= 0.05 ? 1 : 0)
+    },
+    keyStageRatePerCrew: {
+      title: `${keyStageLabel} Net Rate / Crew Trend`,
+      description: "Key stage net run rate adjusted for stage downtime, divided by crew.",
+      legend: `${keyStageLabel} net rate / crew`,
+      aggregate: "avg",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#1f4f8a",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, 2)} u/min/crew`,
+      formatTick: (value) => formatNum(value, value < 10 ? 2 : 1)
+    }
+  };
+
+  return configs[String(metricKey || "").trim()] || null;
+}
+
+function dayKpiTrendValue(metricKey, date, shift, data) {
+  const safeMetricKey = String(metricKey || "").trim();
+  const metrics = computeLineMetricsFromData(state, date, shift, data);
+  if (safeMetricKey === "units") return Math.max(0, num(metrics.units));
+  if (safeMetricKey === "downtime") return Math.max(0, num(metrics.totalDowntime));
+  if (safeMetricKey === "utilisation") return Math.max(0, num(metrics.lineUtil));
+  if (safeMetricKey === "utilisationGross") return Math.max(0, num(metrics.lineUtilGross));
+  if (safeMetricKey === "netRunRate") return Math.max(0, num(metrics.netRunRate));
+  if (safeMetricKey === "keyStageCrew" || safeMetricKey === "keyStageRatePerCrew") {
+    const keyStageMetrics = computeDayVisualiserKeyStageMetricsForDate(
+      state,
+      state?.dayVisualiserKeyStageId,
+      date,
+      shift,
+      data
+    );
+    return safeMetricKey === "keyStageCrew" ? Math.max(0, num(keyStageMetrics.crewCount)) : Math.max(0, num(keyStageMetrics.perCrewRate));
+  }
+  return 0;
+}
+
+function aggregateTrendMetricValues(values, mode = "avg") {
+  const safeValues = values.filter((value) => Number.isFinite(value));
+  if (!safeValues.length) return 0;
+  if (mode === "sum") return safeValues.reduce((sum, value) => sum + value, 0);
+  return safeValues.reduce((sum, value) => sum + value, 0) / safeValues.length;
+}
+
+function renderDayKpiTrendChart(container, points, config) {
+  if (!container || !Array.isArray(points) || !points.length || !config) return;
+  const width = 1180;
+  const height = 340;
+  const pad = { top: 26, right: 88, bottom: 58, left: 72 };
+  const chartW = width - pad.left - pad.right;
+  const chartH = height - pad.top - pad.bottom;
+  const values = points.map((point) => Math.max(0, num(point.value)));
+  const maxValue = Math.max(Math.max(0, num(config.scaleFloor)), ...values);
+  const avgValue = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const stepX = points.length > 1 ? chartW / (points.length - 1) : chartW;
+  const x = (index) => pad.left + stepX * index;
+  const yValue = (value) => pad.top + chartH - (Math.max(0, value) / maxValue) * chartH;
+  const avgY = yValue(avgValue);
+  const avgLabel = `Avg ${config.formatValue(avgValue)}`;
+  const avgCalloutWidth = Math.max(132, avgLabel.length * 8 + 24);
+  const avgCalloutHeight = 28;
+  const avgCalloutX = pad.left + chartW - avgCalloutWidth - 10;
+  const avgCalloutY = Math.max(pad.top + 6, Math.min(avgY - avgCalloutHeight / 2, pad.top + chartH - avgCalloutHeight - 6));
+  const barWidth = Math.max(12, Math.min(28, stepX * 0.46));
+  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"}${x(index)},${yValue(point.value)}`).join(" ");
+  const lineStyle = config.lineColor ? ` style="stroke:${config.lineColor};"` : "";
+  const dotStyle = config.lineColor ? ` style="fill:${config.lineColor};"` : "";
+  const bars = points
+    .map((point, index) => {
+      const y = yValue(point.value);
+      const h = pad.top + chartH - y;
+      return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(
+        1,
+        h
+      )}" rx="3" class="${htmlEscape(config.barClass)}"><title>${htmlEscape(
+        `${point.label}: ${config.formatValue(point.value)}`
+      )}</title></rect>`;
+    })
+    .join("");
+  const dots = points
+    .map(
+      (point, index) => `<circle cx="${x(index)}" cy="${yValue(point.value)}" r="4" class="${htmlEscape(config.dotClass)}"${dotStyle}>
+        <title>${htmlEscape(`${point.label}: ${config.formatValue(point.value)}`)}</title>
+      </circle>`
+    )
+    .join("");
+  const ticks = [0, 0.25, 0.5, 0.75, 1]
+    .map((fraction) => maxValue * fraction)
+    .map((tickValue) => {
+      const y = yValue(tickValue);
+      return `<g>
+        <line x1="${pad.left}" y1="${y}" x2="${pad.left + chartW}" y2="${y}" class="grid"/>
+        <text x="${pad.left - 12}" y="${y + 5}" text-anchor="end" class="axis">${htmlEscape(config.formatTick(tickValue))}</text>
+      </g>`;
+    })
+    .join("");
+  const labelSkip = points.length > 16 ? Math.ceil(points.length / 12) : 1;
+  const labels = points
+    .map((point, index) => {
+      const label = index % labelSkip === 0 || index === points.length - 1 ? point.label : "";
+      return `<text x="${x(index)}" y="${height - 16}" text-anchor="middle" class="axis">${htmlEscape(label)}</text>`;
+    })
+    .join("");
+
+  container.innerHTML = `
+    <svg viewBox="0 0 ${width} ${height}" class="trend-svg" role="img" aria-label="${htmlEscape(config.title)}">
+      ${ticks}
+      <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
+      <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
+      ${bars}
+      <path d="${linePath}" class="${htmlEscape(config.lineClass)}"${lineStyle} />
+      <line x1="${pad.left}" y1="${avgY}" x2="${pad.left + chartW}" y2="${avgY}" class="line-down-avg"><title>${htmlEscape(avgLabel)}</title></line>
+      <g transform="translate(${avgCalloutX},${avgCalloutY})">
+        <rect width="${avgCalloutWidth}" height="${avgCalloutHeight}" rx="${avgCalloutHeight / 2}" class="trend-avg-callout-bg ${htmlEscape(
+          config.avgTheme
+        )}" />
+        <text x="${avgCalloutWidth / 2}" y="${avgCalloutHeight / 2}" text-anchor="middle" dominant-baseline="middle" class="trend-avg-callout-text ${htmlEscape(
+          config.avgTheme
+        )}">${htmlEscape(avgLabel)}</text>
+      </g>
+      ${dots}
+      ${labels}
+      <text x="${pad.left}" y="${16}" class="legend units">${htmlEscape(config.legend)} (bars + trend line)</text>
+      <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Scale max ${htmlEscape(config.formatValue(maxValue))}</text>
+    </svg>
+  `;
+}
+
+function renderDayKpiTrend() {
+  const container = document.getElementById("stageTrendChart");
+  const title = document.getElementById("trendTitle");
+  const meta = document.getElementById("trendMeta");
+  const metricKey = String(trendModalContext.metricKey || "").trim();
+  const config = dayKpiTrendConfig(metricKey);
+  if (!container || !title || !meta || !config || !state) return;
+
+  const data = derivedData();
+  const allDates = trendDatesForShift(state.selectedShift, data);
+  const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
+  const selectedMonthFromDate = monthKey(state.selectedDate);
+  if (!state.trendMonth) state.trendMonth = selectedMonthFromDate;
+  if (allMonths.length && !allMonths.includes(state.trendMonth)) {
+    state.trendMonth = allMonths.includes(selectedMonthFromDate) ? selectedMonthFromDate : allMonths[allMonths.length - 1];
+  }
+
+  const pointForDate = (date) => ({
+    date,
+    label: date.slice(5),
+    value: dayKpiTrendValue(metricKey, date, state.selectedShift, data)
+  });
+
+  let points = [];
+  if (state.trendGranularity === "monthly") {
+    points = allMonths.map((month) => {
+      const monthDates = allDates.filter((date) => monthKey(date) === month);
+      const values = monthDates.map((date) => dayKpiTrendValue(metricKey, date, state.selectedShift, data));
+      return {
+        date: month,
+        label: new Date(`${month}-01T00:00:00`).toLocaleDateString(undefined, { month: "short", year: "2-digit" }),
+        value: aggregateTrendMetricValues(values, config.aggregate)
+      };
+    });
+  } else {
+    const monthDates = allDates.filter((date) => monthKey(date) === state.trendMonth);
+    points = monthDates.map(pointForDate);
+  }
+
+  title.textContent = config.title;
+  meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : "Daily within selected month"} | ${config.description}`;
+  setTrendControlsUI(allMonths);
+
+  if (points.length < 2) {
+    container.innerHTML = `<div class="empty-chart">Need at least 2 ${state.trendGranularity === "monthly" ? "months" : "dates in the selected month"} to draw a trend.</div>`;
+    return;
+  }
+
+  renderDayKpiTrendChart(container, points, config);
 }
 
 function renderStageTrend() {
@@ -12610,7 +12986,7 @@ function renderStageTrend() {
   if (state.trendGranularity === "monthly") {
     points = allMonths.map((month) => {
       const monthDates = allDates.filter((d) => monthKey(d) === month);
-      const dayPoints = monthDates.map((date) => stageDailyMetrics(stage, date, state.selectedShift, data));
+      const dayPoints = monthDates.map((date) => stageDailyMetrics(state, stage, date, state.selectedShift, data));
       const utilisation = dayPoints.length ? dayPoints.reduce((s, p) => s + p.utilisation, 0) / dayPoints.length : 0;
       const stageDowntime = dayPoints.reduce((s, p) => s + p.stageDowntime, 0);
       const stageEtc = dayPoints.length ? dayPoints.reduce((s, p) => s + p.stageEtc, 0) / dayPoints.length : 0;
@@ -12619,7 +12995,7 @@ function renderStageTrend() {
   } else {
     const monthDates = allDates.filter((d) => monthKey(d) === state.trendMonth);
     points = monthDates.map((date) => {
-      const p = stageDailyMetrics(stage, date, state.selectedShift, data);
+      const p = stageDailyMetrics(state, stage, date, state.selectedShift, data);
       return { ...p, label: date.slice(5) };
     });
   }
@@ -12703,6 +13079,14 @@ function renderStageTrend() {
       <text x="${width - 6}" y="${pad.top + 10}" text-anchor="end" class="axis">Downtime scale max ${formatNum(maxDown, 1)} min</text>
     </svg>
   `;
+}
+
+function renderTrendModalContent() {
+  if (String(trendModalContext.type || "").trim() === "dayKpi") {
+    renderDayKpiTrend();
+    return;
+  }
+  renderStageTrend();
 }
 
 function setTrendControlsUI(allMonths = []) {

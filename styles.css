@@ -389,6 +389,30 @@ button {
   background: var(--panel);
 }
 
+.day-kpi-trigger {
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease,
+    background-color 160ms ease,
+    color 160ms ease;
+}
+
+.kpi-grid article.day-kpi-trigger:hover,
+.day-key-stage-metric.day-kpi-trigger:hover {
+  border-color: #9fb2c4;
+  box-shadow: 0 10px 24px rgba(31, 79, 138, 0.1);
+  transform: translateY(-1px);
+}
+
+.kpi-grid article.day-kpi-trigger:focus-visible,
+.day-key-stage-metric.day-kpi-trigger:focus-visible {
+  outline: none;
+  border-color: #6f8aa5;
+  box-shadow: 0 0 0 3px rgba(31, 79, 138, 0.16);
+}
+
 .kpi-grid h3 {
   margin: 0;
   font-size: 0.82rem;
