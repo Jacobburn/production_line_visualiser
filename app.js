@@ -8130,10 +8130,6 @@ function bindHome() {
       alert("Equipment downtime requires an equipment stage.");
       return;
     }
-    if (!supervisorCanAccessTimedLog(session, lineId, line, row.date, downtimeStart, downtimeFinish)) {
-      alert("This downtime must fall within one of your logged shift windows.");
-      return;
-    }
     const payload = {
       lineId,
       date: row.date,
@@ -8233,11 +8229,6 @@ function bindHome() {
       alert("Select an equipment stage.");
       return;
     }
-    if (!supervisorCanAccessTimedLog(session, lineId, line, date, downtimeStart, downtimeFinish)) {
-      alert("This downtime must fall within one of your logged shift windows.");
-      return;
-    }
-
     const payload = {
       lineId,
       date,

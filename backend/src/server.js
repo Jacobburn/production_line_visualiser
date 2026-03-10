@@ -773,8 +773,14 @@ function buildTimedLogShiftIndex(rows, { includeLineId = false } = {}) {
   return index;
 }
 
-function filterTimedLogRowsByShiftIndex(rows, shiftIndex, { startField, finishField, includeLineId = false } = {}) {
+function filterTimedLogRowsByShiftIndex(rows, shiftIndex, {
+  startField,
+  finishField,
+  includeLineId = false,
+  allowRow = null
+} = {}) {
   return (Array.isArray(rows) ? rows : []).filter((row) => {
+    if (typeof allowRow === 'function' && allowRow(row)) return true;
     const date = String(row?.date || '').trim();
     if (!isoDateRegex.test(date)) return false;
     const key = includeLineId
@@ -2437,6 +2443,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          COALESCE(equipment_stage_id::TEXT, '') AS equipment,
          COALESCE(reason, '') AS reason,
          COALESCE(downtime_logs.notes, '') AS notes,
+         COALESCE(downtime_logs.submitted_by_user_id::TEXT, '') AS "submittedByUserId",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM downtime_logs
@@ -2527,7 +2534,8 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     : filterTimedLogRowsByShiftIndex(downtimeLogsResult.rows, timedShiftIndex, {
       startField: 'downtimeStart',
       finishField: 'downtimeFinish',
-      includeLineId: true
+      includeLineId: true,
+      allowRow: (row) => String(row?.submittedByUserId || '').trim() === String(req.user.id || '').trim()
     });
 
   const runByLine = new Map();
@@ -3481,6 +3489,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          COALESCE(equipment_stage_id::TEXT, '') AS equipment,
          COALESCE(reason, '') AS reason,
          COALESCE(downtime_logs.notes, '') AS notes,
+         COALESCE(downtime_logs.submitted_by_user_id::TEXT, '') AS "submittedByUserId",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM downtime_logs
@@ -3502,7 +3511,8 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
     ? downtimeRows.rows
     : filterTimedLogRowsByShiftIndex(downtimeRows.rows, timedShiftIndex, {
       startField: 'downtimeStart',
-      finishField: 'downtimeFinish'
+      finishField: 'downtimeFinish',
+      allowRow: (row) => String(row?.submittedByUserId || '').trim() === String(req.user.id || '').trim()
     });
 
   return res.json({
@@ -4293,7 +4303,7 @@ app.post('/api/logs/downtime', authMiddleware, asyncRoute(async (req, res) => {
     });
   }
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
-  if (!(await hasLineTimedLogAccess(req.user, parsed.data.lineId, parsed.data.date, parsed.data.downtimeStart, parsed.data.downtimeFinish))) {
+  if (!(await hasLineAccess(req.user, parsed.data.lineId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   if (parsed.data.equipmentStageId && !(await isLineStage(parsed.data.lineId, parsed.data.equipmentStageId))) {
@@ -4550,10 +4560,7 @@ app.patch('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, re
   const existing = existingResult.rows[0];
 
   const data = parsed.data;
-  const nextDate = String(data.date || existing.date || '').trim();
-  const nextDowntimeStart = String(data.downtimeStart || existing.downtimeStart || '').trim();
-  const nextDowntimeFinish = String(data.downtimeFinish || existing.downtimeFinish || '').trim();
-  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, nextDate, nextDowntimeStart, nextDowntimeFinish))) {
+  if (!(await hasLineAccess(req.user, existing.lineId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
@@ -4731,7 +4738,7 @@ app.delete('/api/logs/downtime/:logId', authMiddleware, asyncRoute(async (req, r
   if (!existingResult.rowCount) return res.status(404).json({ error: 'Downtime log not found' });
   const existing = existingResult.rows[0];
 
-  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, existing.date, existing.downtimeStart, existing.downtimeFinish))) {
+  if (!(await hasLineAccess(req.user, existing.lineId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
