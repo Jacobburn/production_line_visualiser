@@ -356,7 +356,11 @@
               <section id="superShift" class="data-section active">
                 <form id="supervisorShiftForm" class="form-grid">
                   <input id="superShiftLogId" type="hidden" />
-                  <input id="superShiftDate" type="date" required />
+                  <input id="superShiftDate" type="hidden" />
+                  <div class="supervisor-auto-date" data-supervisor-auto-date="superShiftDate" aria-live="polite">
+                    <span class="supervisor-auto-date-label">Date</span>
+                    <strong class="supervisor-auto-date-value"></strong>
+                  </div>
                   <select id="superShiftShift" required>
                     <option value="Day">Day</option>
                     <option value="Night">Night</option>
@@ -382,7 +386,11 @@
                 <form id="supervisorRunForm" class="form-grid">
                   <input id="superRunLogId" type="hidden" />
                   <input id="superRunCrewingPattern" type="hidden" />
-                  <input id="superRunDate" type="date" required />
+                  <input id="superRunDate" type="hidden" />
+                  <div class="supervisor-auto-date" data-supervisor-auto-date="superRunDate" aria-live="polite">
+                    <span class="supervisor-auto-date-label">Date</span>
+                    <strong class="supervisor-auto-date-value"></strong>
+                  </div>
                   <select id="superRunProduct" required>
                     <option value="">Product Code</option>
                   </select>
@@ -408,7 +416,11 @@
               <section id="superDown" class="data-section">
                 <form id="supervisorDownForm" class="form-grid">
                   <input id="superDownLogId" type="hidden" />
-                  <input id="superDownDate" type="date" required />
+                  <input id="superDownDate" type="hidden" />
+                  <div class="supervisor-auto-date" data-supervisor-auto-date="superDownDate" aria-live="polite">
+                    <span class="supervisor-auto-date-label">Date</span>
+                    <strong class="supervisor-auto-date-value"></strong>
+                  </div>
                   <label class="input-now-wrap" data-time-prefix="START">
                     <input id="superDownStart" placeholder="Downtime Start (HH:MM)" aria-label="Downtime start time" />
                     <button type="button" class="ghost-btn input-now-btn" data-now-target="superDownStart">Now</button>
@@ -471,7 +483,11 @@
                     <option value="Blocked">Blocked</option>
                     <option value="Completed">Completed</option>
                   </select>
-                  <input id="supervisorActionDueDate" type="date" required />
+                  <input id="supervisorActionDueDate" type="hidden" />
+                  <div class="supervisor-auto-date" data-supervisor-auto-date="supervisorActionDueDate" aria-live="polite">
+                    <span class="supervisor-auto-date-label">Due Date</span>
+                    <strong class="supervisor-auto-date-value"></strong>
+                  </div>
                   <input id="supervisorActionTitle" placeholder="Action title" required />
                   <textarea id="supervisorActionDescription" placeholder="Description" rows="5" required></textarea>
                   <div class="form-submit-actions">

@@ -64,6 +64,7 @@ const LINE_SHIFT_TRACKER_CELL_SIZE = 8;
 const LINE_SHIFT_TRACKER_CELL_GAP = 2;
 const LINE_TILE_FEEDBACK_REFRESH_MS = 30000;
 const LINE_TILE_DOWNTIME_CRITICAL_MINS = 15;
+const TREND_DAILY_WINDOW_SIZE = 22;
 const SUPERVISOR_SHIFT_OPTIONS = ["Day", "Night"];
 const CREW_SETTINGS_SHIFTS = ["Day", "Night"];
 const BACKEND_LOG_NOTES_MAX_LENGTH = 2000;
@@ -2316,6 +2317,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     activeDataTab: "dataShift",
     trendGranularity: "daily",
     trendMonth: todayISO().slice(0, 7),
+    trendDateCursor: baselineDate,
     lineTrendRange: "day",
     lineTrendLegendFocusKey: "",
     crewsByShift: defaultCrewByShift(stages),
@@ -2352,6 +2354,7 @@ function normalizeLine(id, line) {
     visualEditMode: Boolean(line?.visualEditMode),
     flowGuides: normalizeFlowGuides(line?.flowGuides),
     dayVisualiserKeyStageId: "",
+    trendDateCursor: normalizeWeekdayIsoDate(line?.trendDateCursor || line?.selectedDate || base.selectedDate, { direction: -1 }),
     lineTrendLegendFocusKey: String(line?.lineTrendLegendFocusKey || "").trim(),
     crewsByShift: normalizeCrewByShift(line || {}, stages),
     stageSettings: normalizeStageSettings(line || {}, stages),
@@ -2517,6 +2520,29 @@ function isOperationalDate(isoDate) {
 
 function todayISO() {
   return formatDateLocal(new Date());
+}
+
+function supervisorAutoEntryDate() {
+  return normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
+}
+
+function setSupervisorAutoDateValue(inputOrId, isoDate, { fallbackIso = supervisorAutoEntryDate() } = {}) {
+  const input = typeof inputOrId === "string" ? document.getElementById(inputOrId) : inputOrId;
+  const safeFallback = isIsoDateValue(fallbackIso) ? String(fallbackIso).trim() : supervisorAutoEntryDate();
+  const nextValue = isIsoDateValue(isoDate) ? String(isoDate).trim() : safeFallback;
+  if (input) input.value = nextValue;
+  if (input?.id && typeof document !== "undefined") {
+    const display = document.querySelector(`[data-supervisor-auto-date="${input.id}"] .supervisor-auto-date-value`);
+    if (display) display.textContent = formatIsoDateLabel(nextValue, { month: "short", day: "numeric", year: "numeric" });
+    const wrapper = document.querySelector(`[data-supervisor-auto-date="${input.id}"]`);
+    if (wrapper) wrapper.setAttribute("title", nextValue);
+  }
+  return nextValue;
+}
+
+function supervisorAutoDateValue(inputOrId, fallbackIso = supervisorAutoEntryDate()) {
+  const input = typeof inputOrId === "string" ? document.getElementById(inputOrId) : inputOrId;
+  return setSupervisorAutoDateValue(input, String(input?.value || "").trim(), { fallbackIso });
 }
 
 function shiftPresenceByDate(line) {
@@ -3482,6 +3508,19 @@ function rowMatchesDateShift(row, date, shift, { line = null, startField = "", f
     return coverage.shiftMatches.includes(requestedShift);
   }
   return shiftKeysForSelection(shift).includes(row.shift);
+}
+
+function supervisorAutoListIncludesRow(
+  row,
+  date,
+  shift,
+  { line = null, startField = "", finishField = "", openPredicate = null } = {}
+) {
+  if (rowMatchesDateShift(row, date, shift, { line, startField, finishField })) return true;
+  if (typeof openPredicate !== "function" || !openPredicate(row)) return false;
+  const rowDate = String(row?.date || "").trim();
+  if (!isOperationalDate(rowDate)) return false;
+  return rowMatchesDateShift(row, rowDate, shift, { line, startField, finishField });
 }
 
 function fallbackShiftValue(shift) {
@@ -5026,6 +5065,7 @@ function loadSampleDataIntoLine(line) {
   line.selectedShift = sample.selectedShift;
   line.trendGranularity = sample.trendGranularity;
   line.trendMonth = sample.trendMonth;
+  line.trendDateCursor = line.selectedDate;
   line.shiftRows = sample.shiftRows;
   line.breakRows = sample.breakRows;
   line.runRows = sample.runRows;
@@ -7350,7 +7390,7 @@ function bindHome() {
         alert("Description is required.");
         return;
       }
-      const dueDate = String(supervisorActionDueDateInput?.value || "").trim();
+      const dueDate = supervisorAutoDateValue(supervisorActionDueDateInput, todayISO());
       if (dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)) {
         alert("Due date is invalid.");
         return;
@@ -7403,7 +7443,7 @@ function bindHome() {
       }
       if (supervisorActionPriorityInput) supervisorActionPriorityInput.value = "Medium";
       if (supervisorActionStatusInput) supervisorActionStatusInput.value = "Open";
-      if (supervisorActionDueDateInput) supervisorActionDueDateInput.value = todayISO();
+      setSupervisorAutoDateValue(supervisorActionDueDateInput, todayISO(), { fallbackIso: todayISO() });
       if (supervisorActionEquipmentInput) supervisorActionEquipmentInput.value = "";
       if (supervisorActionReasonCategoryInput) supervisorActionReasonCategoryInput.value = "";
       if (supervisorActionReasonDetailInput) supervisorActionReasonDetailInput.value = "";
@@ -7419,7 +7459,7 @@ function bindHome() {
         alert("No assigned line selected.");
         return;
       }
-      const runDate = String(document.getElementById("superRunDate")?.value || appState.supervisorSelectedDate || todayISO());
+      const runDate = supervisorAutoDateValue("superRunDate", supervisorAutoEntryDate());
       const runStart = String(document.getElementById("superRunProdStart")?.value || nowTimeHHMM());
       const shiftForPattern = inferShiftForLog(line, runDate, runStart, appState.supervisorSelectedShift || "Day");
       openRunCrewingPatternModal({
@@ -7441,7 +7481,7 @@ function bindHome() {
       return;
     }
 
-    const date = document.getElementById("superShiftDate").value || appState.supervisorSelectedDate || normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
+    const date = supervisorAutoDateValue("superShiftDate", supervisorAutoEntryDate());
     const shift = document.getElementById("superShiftShift").value || "Day";
     const startInput = document.getElementById("superShiftStart").value || "";
     const finishInput = document.getElementById("superShiftFinish").value || "";
@@ -7520,16 +7560,17 @@ function bindHome() {
       );
       if (complete) {
         supervisorShiftForm.reset();
-        document.getElementById("superShiftDate").value = date;
+        setSupervisorAutoDateValue("superShiftDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
         document.getElementById("superShiftShift").value = shift;
       }
-      saveState();
-      renderAll();
       if (!complete) {
         supervisorShiftForm.reset();
         if (superShiftLogIdInput) superShiftLogIdInput.value = "";
         supervisorShiftTileEditId = "";
+        setSupervisorAutoDateValue("superShiftDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
       }
+      saveState();
+      renderAll();
     } catch (error) {
       alert(`Could not save shift log.\n${error?.message || "Please try again."}`);
     }
@@ -7544,7 +7585,7 @@ function bindHome() {
       return;
     }
 
-    const date = document.getElementById("superRunDate").value || appState.supervisorSelectedDate || normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
+    const date = supervisorAutoDateValue("superRunDate", supervisorAutoEntryDate());
     const productInput = String(document.getElementById("superRunProduct").value || "").trim();
     const prodStartInput = String(document.getElementById("superRunProdStart").value || "").trim();
     const finishInput = String(document.getElementById("superRunFinish").value || "").trim();
@@ -7688,7 +7729,20 @@ function bindHome() {
       );
       if (complete) {
         supervisorRunForm.reset();
-        document.getElementById("superRunDate").value = date;
+        setSupervisorAutoDateValue("superRunDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
+        setRunCrewingPatternField(
+          superRunCrewingPatternInput,
+          superRunCrewingPatternSummary,
+          line,
+          appState.supervisorSelectedShift || "Day",
+          {},
+          { fallbackToIdeal: false }
+        );
+      }
+      if (!complete) {
+        supervisorRunForm.reset();
+        if (superRunLogIdInput) superRunLogIdInput.value = "";
+        setSupervisorAutoDateValue("superRunDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
         setRunCrewingPatternField(
           superRunCrewingPatternInput,
           superRunCrewingPatternSummary,
@@ -7700,18 +7754,6 @@ function bindHome() {
       }
       saveState();
       renderAll();
-      if (!complete) {
-        supervisorRunForm.reset();
-        if (superRunLogIdInput) superRunLogIdInput.value = "";
-        setRunCrewingPatternField(
-          superRunCrewingPatternInput,
-          superRunCrewingPatternSummary,
-          line,
-          appState.supervisorSelectedShift || "Day",
-          {},
-          { fallbackToIdeal: false }
-        );
-      }
     } catch (error) {
       alert(`Could not save production run.\n${error?.message || "Please try again."}`);
     }
@@ -7740,7 +7782,7 @@ function bindHome() {
     }
 
     suppressSupervisorSelectionReset = true;
-    document.getElementById("superShiftDate").value = row.date || todayISO();
+    setSupervisorAutoDateValue("superShiftDate", row.date || supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
     document.getElementById("superShiftShift").value = row.shift || "Day";
     document.getElementById("superShiftCrew").value = String(Math.max(0, Math.floor(num(row.crewOnShift))));
     document.getElementById("superShiftStart").value = row.startTime || "";
@@ -7766,7 +7808,7 @@ function bindHome() {
     if (!row) return;
 
     suppressSupervisorSelectionReset = true;
-    document.getElementById("superRunDate").value = row.date || todayISO();
+    setSupervisorAutoDateValue("superRunDate", row.date || supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
     document.getElementById("superRunProduct").value = row.product || "";
     document.getElementById("superRunProdStart").value = row.productionStartTime || "";
     const rowIsOpen = isOpenRunRow(row);
@@ -7804,7 +7846,7 @@ function bindHome() {
     const reasonDetail = row.reasonDetail || parsedReason.reasonDetail;
     const reasonNote = String((row.reasonNote ?? parsedReason.reasonNote) || "");
     suppressSupervisorSelectionReset = true;
-    document.getElementById("superDownDate").value = row.date || todayISO();
+    setSupervisorAutoDateValue("superDownDate", row.date || supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
     document.getElementById("superDownStart").value = row.downtimeStart || "";
     document.getElementById("superDownFinish").value = isOpenDowntimeRow(row) ? "" : row.downtimeFinish || "";
     if (supervisorDownReasonCategory) supervisorDownReasonCategory.value = reasonCategory || "";
@@ -8084,7 +8126,7 @@ function bindHome() {
       return;
     }
 
-    const date = document.getElementById("superDownDate").value || appState.supervisorSelectedDate || normalizeWeekdayIsoDate(todayISO(), { direction: -1 });
+    const date = supervisorAutoDateValue("superDownDate", supervisorAutoEntryDate());
     const startInput = document.getElementById("superDownStart").value || "";
     const finishInput = document.getElementById("superDownFinish").value || "";
     const reasonCategoryInput = document.getElementById("superDownReasonCategory").value || "";
@@ -8186,18 +8228,19 @@ function bindHome() {
       );
       if (complete) {
         supervisorDownForm.reset();
-        document.getElementById("superDownDate").value = date;
+        setSupervisorAutoDateValue("superDownDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
         if (supervisorDownReasonCategory) supervisorDownReasonCategory.value = "";
         refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
       }
-      saveState();
-      renderAll();
       if (!complete) {
         supervisorDownForm.reset();
         if (superDownLogIdInput) superDownLogIdInput.value = "";
         if (supervisorDownReasonCategory) supervisorDownReasonCategory.value = "";
+        setSupervisorAutoDateValue("superDownDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
         refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
       }
+      saveState();
+      renderAll();
     } catch (error) {
       alert(`Could not save downtime log.\n${error?.message || "Please try again."}`);
     }
@@ -9326,14 +9369,28 @@ function bindTrendModal() {
 
   prevBtn.addEventListener("click", () => {
     if (!state) return;
-    state.trendMonth = addMonths(state.trendMonth || monthKey(state.selectedDate), -1);
+    if (state.trendGranularity === "monthly") {
+      state.trendMonth = addMonths(state.trendMonth || monthKey(state.selectedDate), -1);
+    } else {
+      const allDates = trendDatesForShift(state.selectedShift, derivedData());
+      const cursorDate = syncTrendDateCursorToAvailableDates(allDates);
+      const currentIndex = allDates.indexOf(cursorDate);
+      if (currentIndex > 0) state.trendDateCursor = allDates[currentIndex - 1];
+    }
     saveState();
     renderTrendModalContent();
   });
 
   nextBtn.addEventListener("click", () => {
     if (!state) return;
-    state.trendMonth = addMonths(state.trendMonth || monthKey(state.selectedDate), 1);
+    if (state.trendGranularity === "monthly") {
+      state.trendMonth = addMonths(state.trendMonth || monthKey(state.selectedDate), 1);
+    } else {
+      const allDates = trendDatesForShift(state.selectedShift, derivedData());
+      const cursorDate = syncTrendDateCursorToAvailableDates(allDates);
+      const currentIndex = allDates.indexOf(cursorDate);
+      if (currentIndex >= 0 && currentIndex < allDates.length - 1) state.trendDateCursor = allDates[currentIndex + 1];
+    }
     saveState();
     renderTrendModalContent();
   });
@@ -9347,6 +9404,7 @@ function openDayKpiTrend(metricKey) {
     alert("Select a key stage first.");
     return;
   }
+  state.trendDateCursor = normalizeWeekdayIsoDate(state.selectedDate || todayISO(), { direction: -1 });
   trendModalContext = { type: "dayKpi", metricKey: safeMetricKey };
   renderTrendModalContent();
   openTrendModal();
@@ -12618,6 +12676,7 @@ function renderVisualiser() {
     if (!state.visualEditMode) {
       card.addEventListener("click", () => {
         state.selectedStageId = stage.id;
+        state.trendDateCursor = normalizeWeekdayIsoDate(state.selectedDate || todayISO(), { direction: -1 });
         trendModalContext = { type: "stage", metricKey: "" };
         saveState();
         renderVisualiser();
@@ -12701,6 +12760,34 @@ function trendMonthPointLabel(month) {
   return new Date(year, monthNumber - 1, 1).toLocaleDateString(undefined, { month: "short", year: "2-digit" });
 }
 
+function syncTrendDateCursorToAvailableDates(allDates = []) {
+  if (!state) return "";
+  const fallbackCursor = normalizeWeekdayIsoDate(state.trendDateCursor || state.selectedDate || todayISO(), { direction: -1 });
+  if (!allDates.length) {
+    state.trendDateCursor = fallbackCursor;
+    return fallbackCursor;
+  }
+  const requestedCursor = isIsoDateValue(state.trendDateCursor)
+    ? normalizeWeekdayIsoDate(state.trendDateCursor, { direction: -1, fallbackIso: fallbackCursor })
+    : fallbackCursor;
+  if (allDates.includes(requestedCursor)) {
+    state.trendDateCursor = requestedCursor;
+    return requestedCursor;
+  }
+  const previousDates = allDates.filter((date) => date <= requestedCursor);
+  const nextCursor = previousDates.length ? previousDates[previousDates.length - 1] : allDates[0];
+  state.trendDateCursor = nextCursor;
+  return nextCursor;
+}
+
+function trendDailyWindowDates(allDates = [], cursorDate = "", windowSize = TREND_DAILY_WINDOW_SIZE) {
+  if (!Array.isArray(allDates) || !allDates.length) return [];
+  const idx = allDates.indexOf(cursorDate);
+  const safeIdx = idx >= 0 ? idx : allDates.length - 1;
+  const startIdx = Math.max(0, safeIdx - Math.max(1, Math.floor(num(windowSize)) || 1) + 1);
+  return allDates.slice(startIdx, safeIdx + 1);
+}
+
 function syncTrendMonthToAvailableMonths(allMonths = []) {
   if (!state) return "";
   const selectedMonthFromDate = monthKey(state.selectedDate);
@@ -12718,6 +12805,8 @@ function buildStageTrendSeries() {
   const stage = stageIdx >= 0 ? stages[stageIdx] : stages[0];
   const allDates = trendDatesForShift(state.selectedShift, data);
   const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
+  const cursorDate = syncTrendDateCursorToAvailableDates(allDates);
+  const windowDates = trendDailyWindowDates(allDates, cursorDate);
   syncTrendMonthToAvailableMonths(allMonths);
 
   const dailyPoints = allDates.map((date) => {
@@ -12744,6 +12833,8 @@ function buildStageTrendSeries() {
     stageIndex: stageIdx >= 0 ? stageIdx : 0,
     allDates,
     allMonths,
+    cursorDate,
+    windowDates,
     dailyPoints,
     monthlyPoints
   };
@@ -12896,6 +12987,8 @@ function buildDayKpiTrendSeries(metricKey) {
   const data = derivedData();
   const allDates = trendDatesForShift(state.selectedShift, data);
   const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
+  const cursorDate = syncTrendDateCursorToAvailableDates(allDates);
+  const windowDates = trendDailyWindowDates(allDates, cursorDate);
   syncTrendMonthToAvailableMonths(allMonths);
 
   const dailyPoints = allDates.map((date) => ({
@@ -12917,6 +13010,8 @@ function buildDayKpiTrendSeries(metricKey) {
     config,
     allDates,
     allMonths,
+    cursorDate,
+    windowDates,
     dailyPoints,
     monthlyPoints
   };
@@ -13012,17 +13107,17 @@ function renderDayKpiTrend() {
   const title = document.getElementById("trendTitle");
   const meta = document.getElementById("trendMeta");
   const metricKey = String(trendModalContext.metricKey || "").trim();
-  const { config, allMonths, dailyPoints, monthlyPoints } = buildDayKpiTrendSeries(metricKey);
+  const { config, allDates, allMonths, cursorDate, windowDates, dailyPoints, monthlyPoints } = buildDayKpiTrendSeries(metricKey);
   if (!container || !title || !meta || !config || !state) return;
   const isMonthly = state.trendGranularity === "monthly";
   const points = isMonthly
     ? monthlyPoints
-    : dailyPoints.filter((point) => monthKey(point.date) === state.trendMonth);
+    : dailyPoints.filter((point) => windowDates.includes(point.date));
   const scalePoints = isMonthly ? monthlyPoints : dailyPoints;
 
   title.textContent = config.title;
-  meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : "Daily within selected month"} | ${config.description}`;
-  setTrendControlsUI(allMonths);
+  meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : `Rolling ${TREND_DAILY_WINDOW_SIZE}-day view ending ${formatIsoDateLabel(cursorDate, { month: "short", day: "numeric", year: "numeric" })}`} | ${config.description}`;
+  setTrendControlsUI({ allDates, allMonths, cursorDate, windowDates });
 
   if (points.length < 2) {
     container.innerHTML = `<div class="empty-chart">Need at least 2 ${state.trendGranularity === "monthly" ? "months" : "dates in the selected month"} to draw a trend.</div>`;
@@ -13036,16 +13131,16 @@ function renderStageTrend() {
   const container = document.getElementById("stageTrendChart");
   const title = document.getElementById("trendTitle");
   const meta = document.getElementById("trendMeta");
-  const { stage, stageIndex, allMonths, dailyPoints, monthlyPoints } = buildStageTrendSeries();
+  const { stage, stageIndex, allDates, allMonths, cursorDate, windowDates, dailyPoints, monthlyPoints } = buildStageTrendSeries();
   const isMonthly = state.trendGranularity === "monthly";
   const points = isMonthly
     ? monthlyPoints
-    : dailyPoints.filter((point) => monthKey(point.date) === state.trendMonth);
+    : dailyPoints.filter((point) => windowDates.includes(point.date));
   const scalePoints = isMonthly ? monthlyPoints : dailyPoints;
 
   title.textContent = `${stageDisplayName(stage, stageIndex)} Trend`;
-  meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : "Daily within selected month"} | Utilisation is based on ETC vs max throughput.`;
-  setTrendControlsUI(allMonths);
+  meta.textContent = `Shift: ${state.selectedShift} | ${state.trendGranularity === "monthly" ? "Monthly aggregated" : `Rolling ${TREND_DAILY_WINDOW_SIZE}-day view ending ${formatIsoDateLabel(cursorDate, { month: "short", day: "numeric", year: "numeric" })}`} | Utilisation is based on ETC vs max throughput.`;
+  setTrendControlsUI({ allDates, allMonths, cursorDate, windowDates });
 
   if (points.length < 2) {
     container.innerHTML = `<div class="empty-chart">Need at least 2 ${state.trendGranularity === "monthly" ? "months" : "dates in the selected month"} to draw a trend.</div>`;
@@ -13226,7 +13321,7 @@ function exportTrendModalCsv() {
   saveState();
 }
 
-function setTrendControlsUI(allMonths = []) {
+function setTrendControlsUI({ allDates = [], allMonths = [], cursorDate = "", windowDates = [] } = {}) {
   const dailyBtn = document.getElementById("trendDaily");
   const monthlyBtn = document.getElementById("trendMonthly");
   const label = document.getElementById("trendMonthLabel");
@@ -13236,8 +13331,25 @@ function setTrendControlsUI(allMonths = []) {
 
   dailyBtn.classList.toggle("active", state.trendGranularity === "daily");
   monthlyBtn.classList.toggle("active", state.trendGranularity === "monthly");
-  label.textContent = formatMonthLabel(activeMonth);
 
+  if (state.trendGranularity === "daily") {
+    const safeCursor = cursorDate || syncTrendDateCursorToAvailableDates(allDates);
+    const visibleDates = windowDates.length ? windowDates : trendDailyWindowDates(allDates, safeCursor);
+    label.textContent = visibleDates.length
+      ? lineTrendBucketDateRangeLabel({ startIso: visibleDates[0], endIso: visibleDates[visibleDates.length - 1] })
+      : formatIsoDateLabel(safeCursor, { month: "short", day: "numeric", year: "numeric" });
+    if (!allDates.length) {
+      prevBtn.disabled = true;
+      nextBtn.disabled = true;
+      return;
+    }
+    const currentIndex = allDates.indexOf(safeCursor);
+    prevBtn.disabled = currentIndex <= 0;
+    nextBtn.disabled = currentIndex < 0 || currentIndex >= allDates.length - 1;
+    return;
+  }
+
+  label.textContent = formatMonthLabel(activeMonth);
   if (!allMonths.length) {
     prevBtn.disabled = true;
     nextBtn.disabled = true;
@@ -14193,9 +14305,7 @@ function renderHome() {
   if (actionStatusInput && !ACTION_STATUS_OPTIONS.includes(actionStatusInput.value)) {
     actionStatusInput.value = "Open";
   }
-  if (actionDueDateInput && !actionDueDateInput.value) {
-    actionDueDateInput.value = todayISO();
-  }
+  supervisorAutoDateValue(actionDueDateInput, todayISO());
   syncRunProductInputsFromCatalog();
   svDateInputs.forEach((svDateInput) => {
     svDateInput.value = appState.supervisorSelectedDate;
@@ -14229,9 +14339,9 @@ function renderHome() {
   renderSupervisorVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate, appState.supervisorSelectedShift);
   renderSupervisorDayVisualiser(selectedSupervisorLine(), appState.supervisorSelectedDate);
 
-  if (!shiftDateInput.value) shiftDateInput.value = appState.supervisorSelectedDate;
-  if (!runDateInput.value) runDateInput.value = appState.supervisorSelectedDate;
-  if (!downDateInput.value) downDateInput.value = appState.supervisorSelectedDate;
+  supervisorAutoDateValue(shiftDateInput, supervisorAutoEntryDate());
+  supervisorAutoDateValue(runDateInput, supervisorAutoEntryDate());
+  supervisorAutoDateValue(downDateInput, supervisorAutoEntryDate());
 
   const pickLatest = (rows = []) =>
     rows.reduce((latest, row) => {
@@ -14265,7 +14375,7 @@ function renderHome() {
     const shiftEditableRows = (activeLine.shiftRows || [])
       .filter(
         (row) =>
-          rowMatchesDateShift(row, shiftKeyDate, shiftKeyShift) &&
+          supervisorAutoListIncludesRow(row, shiftKeyDate, shiftKeyShift, { openPredicate: isShiftOpen }) &&
           supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
@@ -14324,18 +14434,18 @@ function renderHome() {
               .join("")}
           </div>
         `
-        : `<p class="muted pending-log-empty">No shift logs for this date/shift.</p>`;
+        : `<p class="muted pending-log-empty">No shift logs for the current day or open logs for this shift.</p>`;
     }
 
     const runKeyDate = runDateInput.value || appState.supervisorSelectedDate;
     const runEditableRows = (activeLine.runRows || [])
       .filter(
         (row) =>
-          row.date === runKeyDate &&
-          rowMatchesDateShift(row, runKeyDate, appState.supervisorSelectedShift, {
+          supervisorAutoListIncludesRow(row, runKeyDate, appState.supervisorSelectedShift, {
             line: activeLine,
             startField: "productionStartTime",
-            finishField: "finishTime"
+            finishField: "finishTime",
+            openPredicate: isRunOpen
           }) &&
           supervisorOwnsPendingLogRow(row, session)
       )
@@ -14378,18 +14488,18 @@ function renderHome() {
               .join("")}
           </div>
         `
-        : `<p class="muted pending-log-empty">No production runs for this date/shift.</p>`;
+        : `<p class="muted pending-log-empty">No production runs for the current day or open runs for this shift.</p>`;
     }
 
     const downKeyDate = downDateInput.value || appState.supervisorSelectedDate;
     const downEditableRows = (activeLine.downtimeRows || [])
       .filter(
         (row) =>
-          row.date === downKeyDate &&
-          rowMatchesDateShift(row, downKeyDate, appState.supervisorSelectedShift, {
+          supervisorAutoListIncludesRow(row, downKeyDate, appState.supervisorSelectedShift, {
             line: activeLine,
             startField: "downtimeStart",
-            finishField: "downtimeFinish"
+            finishField: "downtimeFinish",
+            openPredicate: isDownOpen
           }) &&
           supervisorOwnsPendingLogRow(row, session)
       )
@@ -14438,7 +14548,7 @@ function renderHome() {
               .join("")}
           </div>
         `
-        : `<p class="muted pending-log-empty">No downtime logs for this date/shift.</p>`;
+        : `<p class="muted pending-log-empty">No downtime logs for the current day or open logs for this shift.</p>`;
     }
   } else {
     supervisorShiftTileEditId = "";
