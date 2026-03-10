@@ -2307,6 +2307,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
     crewSettingsShift: "Day",
     visualEditMode: false,
     flowGuides: [],
+    dayVisualiserKeyStageId: "",
     selectedStageId: STAGES[0].id,
     activeDataTab: "dataShift",
     trendGranularity: "daily",
@@ -2346,6 +2347,7 @@ function normalizeLine(id, line) {
       : fallbackShiftValue(line?.selectedShift || base.selectedShift),
     visualEditMode: Boolean(line?.visualEditMode),
     flowGuides: normalizeFlowGuides(line?.flowGuides),
+    dayVisualiserKeyStageId: "",
     lineTrendLegendFocusKey: String(line?.lineTrendLegendFocusKey || "").trim(),
     crewsByShift: normalizeCrewByShift(line || {}, stages),
     stageSettings: normalizeStageSettings(line || {}, stages),
@@ -2366,6 +2368,7 @@ function normalizeLine(id, line) {
     supervisorLogs: Array.isArray(line?.supervisorLogs) ? line.supervisorLogs : [],
     auditRows: Array.isArray(line?.auditRows) ? line.auditRows : []
   };
+  normalized.dayVisualiserKeyStageId = normalizeDayVisualiserKeyStageId(normalized, line?.dayVisualiserKeyStageId);
   enforcePermanentCrewAndThroughput(normalized);
   ensureManagerLogRowIds(normalized);
   return normalized;
@@ -2717,6 +2720,17 @@ function stageCrewCountForVisual(line, stage, baseCrewMap, liveRunPattern = null
   if (!liveRunPattern || !isCrewedStage(stage)) return baseCrew;
   if (!Object.prototype.hasOwnProperty.call(liveRunPattern, stage.id)) return baseCrew;
   return Math.max(0, Math.floor(num(liveRunPattern[stage.id])));
+}
+
+function latestRunCrewingPatternForRows(line, runRows = [], fallbackShift = "Day") {
+  const latestRunRow = (runRows || [])
+    .slice()
+    .sort((a, b) => rowNewestSortValue(b, "productionStartTime") - rowNewestSortValue(a, "productionStartTime"))[0];
+  if (!latestRunRow) return null;
+  const rowShift = normalizeLogAssignableShift(latestRunRow.assignedShift || latestRunRow.shift)
+    || inferShiftForLog(line, latestRunRow.date, latestRunRow.productionStartTime, fallbackShift);
+  const pattern = normalizeRunCrewingPattern(latestRunRow.runCrewingPattern, line, rowShift, { fallbackToIdeal: false });
+  return Object.keys(pattern).length ? pattern : null;
 }
 
 function lineTileLiveFeedbackLevel(snapshot) {
@@ -3808,12 +3822,14 @@ function makeLineFromBackend(lineSummary, lineDetail, logs) {
   line.auditRows = [];
   line.supervisorLogs = [];
   line.selectedStageId = line.stages[0]?.id || "";
+  line.dayVisualiserKeyStageId = "";
   enforcePermanentCrewAndThroughput(line);
   return line;
 }
 
 async function refreshHostedState(preferredSession = null) {
   try {
+    const previousLines = appState.lines || {};
     const activeSession = preferredSession || (await ensureManagerBackendSession());
     if (!activeSession?.backendToken) throw new Error("Missing backend token.");
     const activeSessionName = String(activeSession?.name || "").trim();
@@ -3903,6 +3919,10 @@ async function refreshHostedState(preferredSession = null) {
       };
       if (!lineSummary?.id) return;
       const line = makeLineFromBackend(lineSummary, lineDetail, logs);
+      line.dayVisualiserKeyStageId = normalizeDayVisualiserKeyStageId(
+        line,
+        previousLines?.[line.id]?.dayVisualiserKeyStageId || ""
+      );
       hostedLines[line.id] = line;
       activeSession.backendLineMap[line.id] = line.id;
       (line.stages || []).forEach((stage) => {
@@ -8745,6 +8765,7 @@ function bindVisualiserControls() {
   const lineTrendNextBtn = document.getElementById("lineTrendNextPeriod");
   const lineTrendRangeButtons = Array.from(document.querySelectorAll("[data-line-trend-range]"));
   const saveStageSettingsBtn = document.getElementById("saveStageCrewSettingsBtn");
+  const dayKeyStageSelect = document.getElementById("dayKeyStageSelect");
   let layoutDragState = null;
 
   const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -8809,6 +8830,14 @@ function bindVisualiserControls() {
       renderAll();
     });
   });
+  if (dayKeyStageSelect) {
+    dayKeyStageSelect.addEventListener("change", () => {
+      if (!state) return;
+      state.dayVisualiserKeyStageId = normalizeDayVisualiserKeyStageId(state, dayKeyStageSelect.value);
+      saveState();
+      renderVisualiser();
+    });
+  }
   crewShiftButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       if (!state) return;
@@ -10881,6 +10910,13 @@ function stageNameByIdForLine(line, id) {
   return stageDisplayName(stages[idx], idx);
 }
 
+function normalizeDayVisualiserKeyStageId(line, stageId) {
+  const safeStageId = String(stageId || "").trim();
+  if (!safeStageId) return "";
+  const stages = line?.stages?.length ? line.stages : [];
+  return stages.some((stage) => String(stage?.id || "") === safeStageId) ? safeStageId : "";
+}
+
 function shiftMatchesSelection(rowShift, selectedShift) {
   return !selectedShift || selectedShift === "Full Day" || rowShift === selectedShift;
 }
@@ -12336,6 +12372,57 @@ function renderSupervisorDayVisualiser(line, selectedDate) {
   );
 }
 
+function renderDayVisualiserKeyStageKpi(
+  line,
+  {
+    stages = [],
+    selectedRunRows = [],
+    selectedCalculationDowntimeRows = [],
+    selectedShift = "Day",
+    shiftMins = 0,
+    netRunRate = 0
+  } = {}
+) {
+  const selectNode = document.getElementById("dayKeyStageSelect");
+  const nameNode = document.getElementById("dayKpiKeyStageName");
+  const crewNode = document.getElementById("dayKpiKeyStageCrew");
+  const rateNode = document.getElementById("dayKpiKeyStageRatePerCrew");
+  if (!selectNode || !nameNode || !crewNode || !rateNode) return;
+  const stageList = Array.isArray(stages) && stages.length ? stages : line?.stages || [];
+  const normalizedKeyStageId = normalizeDayVisualiserKeyStageId(line, line?.dayVisualiserKeyStageId);
+  if (line && normalizedKeyStageId !== String(line?.dayVisualiserKeyStageId || "")) {
+    line.dayVisualiserKeyStageId = normalizedKeyStageId;
+  }
+  selectNode.innerHTML = [
+    `<option value="">Select Key Stage</option>`,
+    ...stageList.map((stage, index) => `<option value="${htmlEscape(stage.id)}">${htmlEscape(stageDisplayName(stage, index))}</option>`)
+  ].join("");
+  selectNode.value = normalizedKeyStageId;
+
+  const selectedStageIndex = stageList.findIndex((stage) => stage.id === normalizedKeyStageId);
+  const selectedStage = selectedStageIndex >= 0 ? stageList[selectedStageIndex] : null;
+  if (!selectedStage) {
+    nameNode.textContent = "Select key stage";
+    crewNode.textContent = "Not set";
+    rateNode.textContent = "-";
+    return;
+  }
+
+  const baseCrewMap = crewMapForLineShift(line, selectedShift, stageList);
+  const selectedRunPattern = latestRunCrewingPatternForRows(line, selectedRunRows, selectedShift);
+  const crewCount = stageCrewCountForVisual(line, selectedStage, baseCrewMap, selectedRunPattern);
+  const stageDowntime = selectedCalculationDowntimeRows
+    .filter((row) => matchesStage(selectedStage, row.equipment))
+    .reduce((sum, row) => sum + downtimeMinutesForCalculations(row, selectedShift), 0);
+  const uptimeRatio = shiftMins > 0 ? Math.max(0, (shiftMins - stageDowntime) / shiftMins) : 0;
+  const stageNetRunRate = netRunRate * uptimeRatio;
+  const perCrewRate = crewCount > 0 ? stageNetRunRate / crewCount : 0;
+
+  nameNode.textContent = stageDisplayName(selectedStage, selectedStageIndex);
+  crewNode.textContent = `${formatNum(crewCount, 0)} crew`;
+  rateNode.textContent = crewCount > 0 ? `${formatNum(perCrewRate, 2)} u/min/crew` : "No crew set";
+}
+
 function renderVisualiser() {
   const data = derivedData();
   const stages = getStages();
@@ -12374,6 +12461,14 @@ function renderVisualiser() {
   map.classList.toggle("flow-static", !isFlowMoving);
   const activeCrew = crewMapForLineShift(state, state.selectedShift, stages);
   const liveRunPattern = liveRunCrewingPatternForLine(state);
+  renderDayVisualiserKeyStageKpi(state, {
+    stages,
+    selectedRunRows,
+    selectedCalculationDowntimeRows,
+    selectedShift,
+    shiftMins,
+    netRunRate
+  });
   const selectedBottleneck = resolveLineBottleneckStage(state, stages, selectedShift, (stageId, selectedShiftValue) =>
     stageTotalMaxThroughput(stageId, selectedShiftValue)
   );

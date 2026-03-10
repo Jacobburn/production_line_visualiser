@@ -401,6 +401,60 @@ button {
   font-weight: 700;
 }
 
+.kpi-grid article.day-key-stage-kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.day-key-stage-select {
+  width: 100%;
+  min-height: 2.5rem;
+  border: 1px solid var(--stroke);
+  border-radius: 0.7rem;
+  background: #f5f8fb;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 600;
+  padding: 0.55rem 0.8rem;
+}
+
+.day-key-stage-name {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #203548;
+}
+
+.day-key-stage-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 0.55rem;
+}
+
+.day-key-stage-metric {
+  border: 1px solid #d8e4ef;
+  border-radius: 0.7rem;
+  background: #f8fbff;
+  padding: 0.6rem 0.7rem;
+}
+
+.day-key-stage-metric span {
+  display: block;
+  margin-bottom: 0.22rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  color: #607589;
+}
+
+.day-key-stage-metric strong {
+  display: block;
+  font-size: 0.94rem;
+  color: #203548;
+}
+
 .line-map {
   position: relative;
   min-height: 760px;
