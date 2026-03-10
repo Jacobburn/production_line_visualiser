@@ -72,7 +72,6 @@ CREATE TABLE IF NOT EXISTS shift_logs (
   line_id UUID NOT NULL REFERENCES production_lines(id) ON DELETE CASCADE,
   date DATE NOT NULL,
   shift TEXT NOT NULL CHECK (shift IN ('Day', 'Night', 'Full Day')),
-  crew_on_shift INTEGER NOT NULL DEFAULT 0 CHECK (crew_on_shift >= 0),
   start_time TIME NOT NULL,
   break1_start TIME,
   break2_start TIME,

@@ -47,7 +47,7 @@ const PERMANENT_STAGE_TEMPLATE = Object.freeze({
   pack: { crew: 2, maxThroughput: 25 }
 });
 
-const SHIFT_COLUMNS = ["Date", "Shift", "Crew On Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Notes", "Submitted By", "Action"];
+const SHIFT_COLUMNS = ["Date", "Shift", "Start Time", "Finish Time", "Break Count", "Break Time (min)", "Total Shift Time", "Notes", "Submitted By", "Action"];
 const RUN_COLUMNS = ["Date", "Assigned Shift", "Product", "Production Start Time", "Finish Time", "Units Produced", "Gross Production Time", "Associated Down Time", "Net Production Time", "Gross Run Rate", "Net Run Rate", "Notes", "Submitted By", "Action"];
 const DOWN_COLUMNS = ["Date", "Assigned Shift", "Downtime Start", "Downtime Finish", "Downtime (mins)", "Equipment", "Reason", "Notes", "Submitted By", "Action"];
 const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
@@ -1609,30 +1609,7 @@ function computeLineMetricsFromData(line, date, shift, data = derivedDataForLine
   const selectedShiftRows = selectedShiftRowsByDate(data.shiftRows, date, shift, { line });
   const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
 
-  let requiredCrew = requiredCrewForLineShift(line, shift);
-  let crewOnShift = 0;
-  let hasCrewLog = false;
-  if (isFullDayShift(shift)) {
-    const latestByShift = {};
-    selectedShiftRows.forEach((row) => {
-      const key = row.shift || "Day";
-      if (!latestByShift[key]) latestByShift[key] = row;
-      const prevAt = Date.parse(latestByShift[key]?.submittedAt || "") || 0;
-      const nextAt = Date.parse(row?.submittedAt || "") || 0;
-      if (nextAt >= prevAt) latestByShift[key] = row;
-    });
-    const dayRow = latestByShift.Day || null;
-    const nightRow = latestByShift.Night || null;
-    requiredCrew = requiredCrewForLineShift(line, "Day") + requiredCrewForLineShift(line, "Night");
-    crewOnShift = Math.max(0, num(dayRow?.crewOnShift)) + Math.max(0, num(nightRow?.crewOnShift));
-    hasCrewLog = Boolean(dayRow || nightRow);
-  } else {
-    const latestShiftRow = selectedShiftRows.length ? selectedShiftRows[selectedShiftRows.length - 1] : null;
-    hasCrewLog = Boolean(latestShiftRow) && latestShiftRow?.crewOnShift !== "" && latestShiftRow?.crewOnShift !== undefined;
-    crewOnShift = hasCrewLog ? Math.max(0, num(latestShiftRow?.crewOnShift)) : 0;
-  }
-  const understaffedBy = hasCrewLog ? Math.max(0, requiredCrew - crewOnShift) : 0;
-  const staffingCallout = !hasCrewLog ? "No shift data" : understaffedBy > 0 ? `Understaffed by ${understaffedBy}` : "Fully staffed";
+  const staffing = staffingSnapshotForSelection(line, selectedRunRows, shift);
   const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, shift), 0);
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
@@ -1665,10 +1642,11 @@ function computeLineMetricsFromData(line, date, shift, data = derivedDataForLine
     lineUtilGross: Math.max(0, bottleneckUtil),
     netRunRate,
     bottleneckStageName,
-    crewOnShift,
-    requiredCrew,
-    understaffedBy,
-    staffingCallout
+    requiredCrew: staffing.requiredCrew,
+    actualCrew: staffing.actualCrew,
+    understaffedBy: staffing.understaffedBy,
+    overstaffedBy: staffing.overstaffedBy,
+    staffingCallout: staffing.staffingCallout
   };
 }
 
@@ -2761,6 +2739,74 @@ function latestRunCrewingPatternForRows(line, runRows = [], fallbackShift = "Day
     || inferShiftForLog(line, latestRunRow.date, latestRunRow.productionStartTime, fallbackShift);
   const pattern = normalizeRunCrewingPattern(latestRunRow.runCrewingPattern, line, rowShift, { fallbackToIdeal: false });
   return Object.keys(pattern).length ? pattern : null;
+}
+
+function latestRunCrewingSnapshotForRows(line, runRows = [], fallbackShift = "Day") {
+  const latestRunRow = (runRows || [])
+    .slice()
+    .sort((a, b) => rowNewestSortValue(b, "productionStartTime") - rowNewestSortValue(a, "productionStartTime"))[0];
+  if (!latestRunRow) return null;
+  const rowShift = normalizeLogAssignableShift(latestRunRow.assignedShift || latestRunRow.shift)
+    || inferShiftForLog(line, latestRunRow.date, latestRunRow.productionStartTime, fallbackShift);
+  const pattern = normalizeRunCrewingPattern(latestRunRow.runCrewingPattern, line, rowShift, { fallbackToIdeal: false });
+  if (!Object.keys(pattern).length) return null;
+  return {
+    shift: rowShift,
+    pattern,
+    totalCrew: runCrewingPatternTotalCrew(pattern)
+  };
+}
+
+function staffingSnapshotForSelection(line, runRows = [], shift = "Day") {
+  const rows = Array.isArray(runRows) ? runRows : [];
+  if (isFullDayShift(shift)) {
+    const snapshots = LOG_ASSIGNABLE_SHIFTS.map((shiftValue) => {
+      const rowsForShift = rows.filter((row) => {
+        const rowShift = normalizeLogAssignableShift(row?.assignedShift || row?.shift)
+          || inferShiftForLog(line, row?.date, row?.productionStartTime, shiftValue);
+        return rowShift === shiftValue;
+      });
+      return latestRunCrewingSnapshotForRows(line, rowsForShift, shiftValue);
+    }).filter(Boolean);
+    const requiredCrew = LOG_ASSIGNABLE_SHIFTS.reduce((sum, shiftValue) => sum + requiredCrewForLineShift(line, shiftValue), 0);
+    const actualCrew = snapshots.reduce((sum, snapshot) => sum + snapshot.totalCrew, 0);
+    const understaffedBy = snapshots.length ? Math.max(0, requiredCrew - actualCrew) : 0;
+    const overstaffedBy = snapshots.length ? Math.max(0, actualCrew - requiredCrew) : 0;
+    return {
+      actualCrew,
+      requiredCrew,
+      understaffedBy,
+      overstaffedBy,
+      hasCrewingData: snapshots.length > 0,
+      staffingCallout: !snapshots.length
+        ? "No run crewing"
+        : understaffedBy > 0
+          ? `Understaffed by ${understaffedBy}`
+          : overstaffedBy > 0
+            ? `Overstaffed by ${overstaffedBy}`
+            : "Matches plan"
+    };
+  }
+
+  const snapshot = latestRunCrewingSnapshotForRows(line, rows, shift);
+  const requiredCrew = requiredCrewForLineShift(line, shift);
+  const actualCrew = snapshot?.totalCrew || 0;
+  const understaffedBy = snapshot ? Math.max(0, requiredCrew - actualCrew) : 0;
+  const overstaffedBy = snapshot ? Math.max(0, actualCrew - requiredCrew) : 0;
+  return {
+    actualCrew,
+    requiredCrew,
+    understaffedBy,
+    overstaffedBy,
+    hasCrewingData: Boolean(snapshot),
+    staffingCallout: !snapshot
+      ? "No run crewing"
+      : understaffedBy > 0
+        ? `Understaffed by ${understaffedBy}`
+        : overstaffedBy > 0
+          ? `Overstaffed by ${overstaffedBy}`
+          : "Matches plan"
+  };
 }
 
 function lineTileLiveFeedbackLevel(snapshot) {
@@ -4908,9 +4954,6 @@ function sampleDataSet(lineModel = state) {
   const nightEquipment = stageIds.filter((_, idx) => idx % 2 === 1);
   const fallbackEquipment = stageIds[0] || "";
   const equipAt = (list, i, offset = 0) => (list.length ? list[(i + offset) % list.length] : fallbackEquipment);
-  const dayRequired = requiredCrewForLineShift(line, "Day");
-  const nightRequired = requiredCrewForLineShift(line, "Night");
-
   for (let i = 0; i < days; i += 1) {
     const d = new Date(start);
     d.setDate(start.getDate() + i);
@@ -4922,14 +4965,12 @@ function sampleDataSet(lineModel = state) {
       {
         date,
         shift: "Day",
-        crewOnShift: Math.max(0, dayRequired - (i % 12 === 0 ? 2 : i % 7 === 0 ? 1 : 0)),
         startTime: "06:00",
         finishTime: "14:00"
       },
       {
         date,
         shift: "Night",
-        crewOnShift: Math.max(0, nightRequired - (i % 10 === 0 ? 1 : 0)),
         startTime: "14:00",
         finishTime: "22:00"
       }
@@ -5116,7 +5157,7 @@ function computeDowntimeRow(row) {
 function computeShiftRow(row) {
   const fallback = num(row.totalShiftTime);
   const calc = diffMinutes(row.startTime, row.finishTime);
-  return { ...row, crewOnShift: Math.max(0, num(row.crewOnShift)), totalShiftTime: calc > 0 ? calc : fallback };
+  return { ...row, totalShiftTime: calc > 0 ? calc : fallback };
 }
 
 function computeBreakRow(row) {
@@ -7485,7 +7526,6 @@ function bindHome() {
     const shift = document.getElementById("superShiftShift").value || "Day";
     const startInput = document.getElementById("superShiftStart").value || "";
     const finishInput = document.getElementById("superShiftFinish").value || "";
-    const crewRaw = document.getElementById("superShiftCrew").value;
     const notesInput = String(document.getElementById("superShiftNotes")?.value || "").trim();
 
     if (!rowIsValidDateShift(date, shift)) {
@@ -7514,9 +7554,6 @@ function bindHome() {
     const existingIsOpen = Boolean(existing && isOpenShiftRow(existing));
     const startTime = startInput || existing?.startTime || nowTimeHHMM();
     const finishTime = finishInput || (complete ? nowTimeHHMM() : (existing?.finishTime || startTime));
-    const crewOnShift = crewRaw === ""
-      ? Math.max(0, Math.floor(num(existing?.crewOnShift)))
-      : Math.max(0, Math.floor(num(crewRaw)));
     const notes = notesInput !== "" ? notesInput : String(existing?.notes || "");
 
     if (!strictTimeValid(startTime) || !strictTimeValid(finishTime)) {
@@ -7532,7 +7569,7 @@ function bindHome() {
       alert("Finalised shift logs require a finish time different from start.");
       return;
     }
-    const payload = { lineId, date, shift, crewOnShift, startTime, finishTime, notes };
+    const payload = { lineId, date, shift, startTime, finishTime, notes };
     try {
       const saved = existing?.id
         ? await patchSupervisorShiftLog(session, existing.id, payload)
@@ -7784,7 +7821,6 @@ function bindHome() {
     suppressSupervisorSelectionReset = true;
     setSupervisorAutoDateValue("superShiftDate", row.date || supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
     document.getElementById("superShiftShift").value = row.shift || "Day";
-    document.getElementById("superShiftCrew").value = String(Math.max(0, Math.floor(num(row.crewOnShift))));
     document.getElementById("superShiftStart").value = row.startTime || "";
     document.getElementById("superShiftFinish").value = isOpenShiftRow(row) ? "" : row.finishTime || "";
     document.getElementById("superShiftNotes").value = String(row.notes || "");
@@ -7794,8 +7830,8 @@ function bindHome() {
     // Refresh the supervisor data entry UI so the selected pending shift shows Save immediately.
     renderHome();
     updateSupervisorProgressButtonLabels();
-    const crewInput = document.getElementById("superShiftCrew");
-    if (crewInput) crewInput.focus();
+    const startInput = document.getElementById("superShiftStart");
+    if (startInput) startInput.focus();
   };
 
   const loadSupervisorRunForEdit = (runId) => {
@@ -7909,7 +7945,6 @@ function bindHome() {
       lineId,
       date: row.date,
       shift,
-      crewOnShift: Math.max(0, Math.floor(num(row.crewOnShift))),
       startTime,
       finishTime,
       notes: String(row.notes || "")
@@ -9536,7 +9571,6 @@ function bindForms() {
     event.preventDefault();
     const form = event.currentTarget;
     const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    data.crewOnShift = Math.max(0, Math.floor(num(data.crewOnShift)));
     data.notes = String(data.notes || "").trim();
     if (!rowIsValidDateShift(data.date, data.shift)) {
       alert("Date and shift are required. Weekend dates are excluded.");
@@ -9546,16 +9580,11 @@ function bindForms() {
       alert("Shift start and finish must be HH:MM (24h).");
       return;
     }
-    if (data.crewOnShift < 0) {
-      alert("Crew on shift cannot be negative.");
-      return;
-    }
     try {
       const payload = {
         lineId: state.id,
         date: data.date,
         shift: data.shift,
-        crewOnShift: data.crewOnShift,
         startTime: data.startTime,
         finishTime: data.finishTime,
         notes: data.notes
@@ -9567,7 +9596,7 @@ function bindForms() {
         submittedBy: "manager",
         submittedAt: saved?.submittedAt || nowIso()
       });
-      addAudit(state, "MANAGER_SHIFT_LOG", `Manager logged ${data.shift} shift for ${data.date} (crew ${data.crewOnShift})`);
+      addAudit(state, "MANAGER_SHIFT_LOG", `Manager logged ${data.shift} shift for ${data.date}`);
       form.reset();
       saveState();
       renderAll();
@@ -9721,7 +9750,6 @@ function bindForms() {
       const previousShift = String(row.shift || "").trim();
       const date = inlineValue(rowNode, "date");
       const shift = inlineValue(rowNode, "shift");
-      const crewOnShift = Math.max(0, Math.floor(num(inlineValue(rowNode, "crewOnShift"))));
       const startTime = inlineValue(rowNode, "startTime");
       const finishTime = inlineValue(rowNode, "finishTime");
       const notes = inlineValue(rowNode, "notes");
@@ -9733,7 +9761,7 @@ function bindForms() {
         alert("Times must be HH:MM (24h).");
         return;
       }
-      const payload = { date, shift, crewOnShift, startTime, finishTime, notes };
+      const payload = { date, shift, startTime, finishTime, notes };
       const canPatchServer = UUID_RE.test(String(logId || ""));
       try {
         if (canPatchServer) {
@@ -10020,7 +10048,6 @@ function bindForms() {
       lineId: state.id,
       date: row.date,
       shift: row.shift || inferShiftForLog(state, row.date, startTime, state.selectedShift || "Day"),
-      crewOnShift: Math.max(0, Math.floor(num(row.crewOnShift))),
       startTime,
       finishTime,
       notes: String(row.notes || "")
@@ -10635,12 +10662,10 @@ function bindDataControls() {
             skipped.shift += 1;
             continue;
           }
-          const crewOnShift = Math.max(0, Math.floor(num(row?.crewOnShift)));
           const payload = {
             lineId: state.id,
             date,
             shift,
-            crewOnShift,
             startTime,
             finishTime,
             notes: trimLogNotes(row?.notes)
@@ -13462,7 +13487,7 @@ function renderTrackingTables() {
     const shiftPending = isPendingShiftLogRow(row);
     const pending = shiftPending;
     const htmlFields = ["action"];
-    if (editing) htmlFields.push("date", "shift", "crewOnShift", "startTime", "finishTime", "notes");
+    if (editing) htmlFields.push("date", "shift", "startTime", "finishTime", "notes");
     return {
       ...row,
       __rowClass: pending ? "table-row-pending" : "",
@@ -13475,7 +13500,6 @@ function renderTrackingTables() {
           SHIFT_OPTIONS.map((shiftOption) => ({ value: shiftOption, label: shiftOption }))
         )
         : row.shift,
-      crewOnShift: editing ? inlineInputHtml("crewOnShift", Math.max(0, num(row.crewOnShift)), { type: "number", min: "0", step: "1" }) : row.crewOnShift,
       startTime: editing ? inlineInputHtml("startTime", String(row.startTime || ""), { placeholder: "HH:MM" }) : row.startTime,
       finishTime: editing ? inlineInputHtml("finishTime", String(row.finishTime || ""), { placeholder: "HH:MM" }) : row.finishTime,
       breakCount,
@@ -13489,7 +13513,6 @@ function renderTrackingTables() {
   renderTable("shiftTable", SHIFT_COLUMNS, displayShiftRows, {
     Date: "date",
     Shift: "shift",
-    "Crew On Shift": "crewOnShift",
     "Start Time": "startTime",
     "Finish Time": "finishTime",
     "Break Count": "breakCount",
@@ -14416,7 +14439,7 @@ function renderHome() {
                     <div class="pending-log-meta">
                       <h5>${htmlEscape(row.shift || "Shift")} Shift</h5>
                       <p>
-                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")} | Crew ${formatNum(Math.max(0, num(row.crewOnShift)), 0)}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
+                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
                       </p>
                     </div>
                     <div class="pending-log-actions">

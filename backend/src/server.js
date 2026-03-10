@@ -157,7 +157,6 @@ const shiftLogSchema = z.object({
   lineId: z.string().uuid(),
   date: z.string().regex(isoDateRegex),
   shift: z.enum(shiftValues),
-  crewOnShift: z.number().int().min(0),
   startTime: z.string().regex(timeRegex),
   finishTime: z.string().regex(timeRegex),
   notes: optionalLogNotes
@@ -225,7 +224,6 @@ const LINE_ORDER_BY_SQL = `
 const shiftLogUpdateSchema = z.object({
   date: z.string().regex(isoDateRegex).optional(),
   shift: z.enum(shiftValues).optional(),
-  crewOnShift: z.number().int().min(0).optional(),
   startTime: optionalTime.optional(),
   finishTime: optionalTime.optional(),
   notes: optionalLogNotes
@@ -976,15 +974,6 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
   const dayEquipment = stageIds.filter((_, index) => index % 2 === 0);
   const nightEquipment = stageIds.filter((_, index) => index % 2 === 1);
   const fallbackEquipment = stageIds[0] || null;
-  const dayRequired = Math.max(
-    1,
-    stages.reduce((sum, stage) => sum + Math.max(0, Number(stage.dayCrew) || 0), 0) || 14
-  );
-  const nightRequired = Math.max(
-    1,
-    stages.reduce((sum, stage) => sum + Math.max(0, Number(stage.nightCrew) || 0), 0) || 12
-  );
-
   for (let i = 0; i < safeDays; i += 1) {
     const dateObj = new Date(start);
     dateObj.setUTCDate(start.getUTCDate() + i);
@@ -996,14 +985,12 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
       {
         date,
         shift: 'Day',
-        crewOnShift: Math.max(0, dayRequired - (i % 12 === 0 ? 2 : i % 7 === 0 ? 1 : 0)),
         startTime: '06:00',
         finishTime: '14:00'
       },
       {
         date,
         shift: 'Night',
-        crewOnShift: Math.max(0, nightRequired - (i % 10 === 0 ? 1 : 0)),
         startTime: '14:00',
         finishTime: '22:00'
       }
@@ -2210,7 +2197,6 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              shift_logs.id,
              date::TEXT AS date,
              shift,
-             crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              COALESCE(shift_logs.notes, '') AS notes,
@@ -2225,7 +2211,6 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
              shift_logs.id,
              date::TEXT AS date,
              shift,
-             crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              COALESCE(shift_logs.notes, '') AS notes,
@@ -2496,7 +2481,6 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       id: row.id,
       date: row.date,
       shift: row.shift,
-      crewOnShift: row.crewOnShift,
       startTime: row.startTime,
       finishTime: row.finishTime,
       submittedBy: row.submittedBy,
@@ -3338,7 +3322,6 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              shift_logs.id,
              date::TEXT AS date,
              shift,
-             crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              COALESCE(shift_logs.notes, '') AS notes,
@@ -3352,7 +3335,6 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
              shift_logs.id,
              date::TEXT AS date,
              shift,
-             crew_on_shift AS "crewOnShift",
              to_char(start_time, 'HH24:MI') AS "startTime",
              to_char(finish_time, 'HH24:MI') AS "finishTime",
              COALESCE(shift_logs.notes, '') AS notes,
@@ -3862,7 +3844,6 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
   const shiftPayload = sample.shiftRows.map((row) => ({
     date: row.date,
     shift: row.shift,
-    crew_on_shift: row.crewOnShift,
     start_time: row.startTime,
     finish_time: row.finishTime
   }));
@@ -3910,20 +3891,18 @@ app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('man
          SELECT
            s.date::date AS date,
            s.shift::text AS shift,
-           GREATEST(0, COALESCE(s.crew_on_shift, 0)) AS crew_on_shift,
            s.start_time::time AS start_time,
            s.finish_time::time AS finish_time
          FROM jsonb_to_recordset($2::jsonb) AS s(
            date text,
            shift text,
-           crew_on_shift integer,
            start_time text,
            finish_time text
          )
        ),
        inserted_shifts AS (
-         INSERT INTO shift_logs(line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id)
-         SELECT $1, date, shift, crew_on_shift, start_time, finish_time, $3
+         INSERT INTO shift_logs(line_id, date, shift, start_time, finish_time, submitted_by_user_id)
+         SELECT $1, date, shift, start_time, finish_time, $3
          FROM shift_data
          RETURNING id, date, shift
        ),
@@ -4082,14 +4061,13 @@ app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
   if (!(await hasLineShiftAccess(req.user, parsed.data.lineId, parsed.data.shift))) return res.status(403).json({ error: 'Forbidden' });
 
   const result = await dbQuery(
-    `INSERT INTO shift_logs(line_id, date, shift, crew_on_shift, start_time, finish_time, notes, submitted_by_user_id)
-     VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, ''), $8)
+    `INSERT INTO shift_logs(line_id, date, shift, start_time, finish_time, notes, submitted_by_user_id)
+     VALUES ($1, $2, $3, $4, $5, COALESCE($6, ''), $7)
      RETURNING
        id,
        line_id AS "lineId",
        date,
        shift,
-       crew_on_shift AS "crewOnShift",
        start_time AS "startTime",
        finish_time AS "finishTime",
        COALESCE(notes, '') AS notes,
@@ -4098,7 +4076,6 @@ app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
       parsed.data.lineId,
       parsed.data.date,
       parsed.data.shift,
-      parsed.data.crewOnShift,
       parsed.data.startTime,
       parsed.data.finishTime,
       String(parsed.data.notes ?? '').trim(),
@@ -4112,7 +4089,7 @@ app.post('/api/logs/shifts', authMiddleware, asyncRoute(async (req, res) => {
     actorName: req.user.name,
     actorRole: req.user.role,
     action: 'CREATE_SHIFT_LOG',
-    details: `${parsed.data.shift} ${parsed.data.date}, crew ${parsed.data.crewOnShift}`
+    details: `${parsed.data.shift} ${parsed.data.date}`
   });
 
   return res.status(201).json({ shiftLog: result.rows[0] });
@@ -4459,12 +4436,11 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
        SET
          date = COALESCE($2::date, date),
          shift = COALESCE($3, shift),
-         crew_on_shift = COALESCE($4, crew_on_shift),
-         start_time = COALESCE(NULLIF($5, '')::time, start_time),
-         finish_time = COALESCE(NULLIF($6, '')::time, finish_time),
+         start_time = COALESCE(NULLIF($4, '')::time, start_time),
+         finish_time = COALESCE(NULLIF($5, '')::time, finish_time),
          notes = CASE
-           WHEN $7::boolean IS FALSE THEN notes
-           ELSE $8
+           WHEN $6::boolean IS FALSE THEN notes
+           ELSE $7
          END,
          submitted_at = NOW()
        WHERE id = $1
@@ -4473,7 +4449,6 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
          line_id AS "lineId",
          date,
          shift,
-         crew_on_shift AS "crewOnShift",
          to_char(start_time, 'HH24:MI') AS "startTime",
          to_char(finish_time, 'HH24:MI') AS "finishTime",
          COALESCE(notes, '') AS notes,
@@ -4492,7 +4467,6 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
        "lineId",
        date::TEXT AS date,
        shift,
-       "crewOnShift",
        "startTime",
        "finishTime",
        notes,
@@ -4502,7 +4476,6 @@ app.patch('/api/logs/shifts/:logId', authMiddleware, asyncRoute(async (req, res)
       logId,
       data.date ?? null,
       data.shift ?? null,
-      data.crewOnShift,
       data.startTime ?? null,
       data.finishTime ?? null,
       notesProvided,

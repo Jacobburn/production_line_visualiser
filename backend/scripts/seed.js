@@ -136,26 +136,22 @@ async function run() {
     const d = new Date(start);
     d.setDate(start.getDate() + i);
     const date = d.toISOString().slice(0, 10);
-    const isWeekend = d.getDay() === 0 || d.getDay() === 6;
-
-    const dayCrew = isWeekend ? 16 : 18;
-    const nightCrew = isWeekend ? 14 : 16;
 
     const dayShiftInsert = await dbQuery(
       `INSERT INTO shift_logs(
-         line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id
-       ) VALUES ($1,$2,'Day',$3,'06:00','14:00',$4)
+         line_id, date, shift, start_time, finish_time, submitted_by_user_id
+       ) VALUES ($1,$2,'Day','06:00','14:00',$3)
        RETURNING id`,
-      [demoLine.id, date, dayCrew, supervisor.id]
+      [demoLine.id, date, supervisor.id]
     );
     const dayShiftLogId = dayShiftInsert.rows[0].id;
 
     const nightShiftInsert = await dbQuery(
       `INSERT INTO shift_logs(
-         line_id, date, shift, crew_on_shift, start_time, finish_time, submitted_by_user_id
-       ) VALUES ($1,$2,'Night',$3,'14:00','22:00',$4)
+         line_id, date, shift, start_time, finish_time, submitted_by_user_id
+       ) VALUES ($1,$2,'Night','14:00','22:00',$3)
        RETURNING id`,
-      [demoLine.id, date, nightCrew, supervisor.id]
+      [demoLine.id, date, supervisor.id]
     );
     const nightShiftLogId = nightShiftInsert.rows[0].id;
 
