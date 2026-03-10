@@ -13079,9 +13079,6 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
   const avgCalloutX = pad.left + chartW - avgCalloutWidth - 10;
   const avgCalloutY = Math.max(pad.top + 6, Math.min(avgY - avgCalloutHeight / 2, pad.top + chartH - avgCalloutHeight - 6));
   const barWidth = Math.max(12, Math.min(28, stepX * 0.46));
-  const linePath = points.map((point, index) => `${index === 0 ? "M" : "L"}${x(index)},${yValue(point.value)}`).join(" ");
-  const lineStyle = config.lineColor ? ` style="stroke:${config.lineColor};"` : "";
-  const dotStyle = config.lineColor ? ` style="fill:${config.lineColor};"` : "";
   const bars = points
     .map((point, index) => {
       const y = yValue(point.value);
@@ -13093,13 +13090,6 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
         `${point.label}: ${config.formatValue(point.value)}`
       )}</title></rect>`;
     })
-    .join("");
-  const dots = points
-    .map(
-      (point, index) => `<circle cx="${x(index)}" cy="${yValue(point.value)}" r="4" class="${htmlEscape(config.dotClass)}"${dotStyle}>
-        <title>${htmlEscape(`${point.label}: ${config.formatValue(point.value)}`)}</title>
-      </circle>`
-    )
     .join("");
   const ticks = [0, 0.25, 0.5, 0.75, 1]
     .map((fraction) => maxValue * fraction)
@@ -13125,7 +13115,6 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
       <line x1="${pad.left}" y1="${pad.top + chartH}" x2="${pad.left + chartW}" y2="${pad.top + chartH}" class="axis-line" />
       <line x1="${pad.left}" y1="${pad.top}" x2="${pad.left}" y2="${pad.top + chartH}" class="axis-line" />
       ${bars}
-      <path d="${linePath}" class="${htmlEscape(config.lineClass)}"${lineStyle} />
       <line x1="${pad.left}" y1="${avgY}" x2="${pad.left + chartW}" y2="${avgY}" class="line-down-avg"><title>${htmlEscape(avgLabel)}</title></line>
       <g transform="translate(${avgCalloutX},${avgCalloutY})">
         <rect width="${avgCalloutWidth}" height="${avgCalloutHeight}" rx="${avgCalloutHeight / 2}" class="trend-avg-callout-bg ${htmlEscape(
@@ -13135,9 +13124,8 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
           config.avgTheme
         )}">${htmlEscape(avgLabel)}</text>
       </g>
-      ${dots}
       ${labels}
-      <text x="${pad.left}" y="${16}" class="legend units">${htmlEscape(config.legend)} (bars + trend line)</text>
+      <text x="${pad.left}" y="${16}" class="legend units">${htmlEscape(config.legend)} (bars)</text>
       <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Scale max ${htmlEscape(config.formatValue(maxValue))}</text>
     </svg>
   `;
