@@ -2260,6 +2260,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   }
 
   const snapshotScopedParams = isManager ? [lineIds] : [req.user.id, lineIds];
+  const snapshotTimedLogParams = [lineIds];
   const [stagesResult, guidesResult, shiftLogsResult, breakLogsResult, runLogsResult, downtimeLogsResult] = await Promise.all([
     dbQuery(
       `SELECT
@@ -2421,9 +2422,9 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          submitted_at AS "submittedAt"
        FROM run_logs
        LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-       WHERE line_id = ANY($${isManager ? 1 : 2}::UUID[])
+       WHERE line_id = ANY($1::UUID[])
        ORDER BY line_id, date ASC, submitted_at ASC`,
-      snapshotScopedParams
+      snapshotTimedLogParams
     ),
     dbQuery(
       `SELECT
@@ -2440,9 +2441,9 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          submitted_at AS "submittedAt"
        FROM downtime_logs
        LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-       WHERE line_id = ANY($${isManager ? 1 : 2}::UUID[])
+       WHERE line_id = ANY($1::UUID[])
        ORDER BY line_id, date ASC, submitted_at ASC`,
-      snapshotScopedParams
+      snapshotTimedLogParams
     )
   ]);
 
@@ -3337,6 +3338,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
 
   const isManager = req.user.role === 'manager';
   const lineLogsParams = isManager ? [lineId] : [req.user.id, lineId];
+  const timedLineLogsParams = [lineId];
   const [shiftRows, breakRows, runRows, downtimeRows] = await Promise.all([
     dbQuery(
       isManager
@@ -3465,9 +3467,9 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          submitted_at AS "submittedAt"
        FROM run_logs
        LEFT JOIN users u ON u.id = run_logs.submitted_by_user_id
-       WHERE line_id = $${isManager ? 1 : 2}
+       WHERE line_id = $1
        ORDER BY date ASC, submitted_at ASC`,
-      lineLogsParams
+      timedLineLogsParams
     ),
     dbQuery(
       `SELECT
@@ -3483,9 +3485,9 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          submitted_at AS "submittedAt"
        FROM downtime_logs
        LEFT JOIN users u ON u.id = downtime_logs.submitted_by_user_id
-       WHERE line_id = $${isManager ? 1 : 2}
+       WHERE line_id = $1
        ORDER BY date ASC, submitted_at ASC`,
-      lineLogsParams
+      timedLineLogsParams
     )
   ]);
 
