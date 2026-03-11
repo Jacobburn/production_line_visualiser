@@ -149,6 +149,14 @@
                 <p class="muted">Assign lines, update access, and remove supervisor accounts.</p>
               </section>
 
+              <section class="dash-card manager-settings-card">
+                <h2>Manager Accounts</h2>
+                <div class="action-row">
+                  <button id="addManagerBtn" type="button">Add Manager</button>
+                </div>
+                <p class="muted">Create additional manager logins for the dashboard and settings area.</p>
+              </section>
+
               <section class="dash-card add-line-card manager-settings-card">
                 <h2>Manage Production Lines</h2>
                 <div class="action-row">
@@ -612,6 +620,41 @@
 
           <div class="add-supervisor-actions">
             <button type="submit">Create Supervisor</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div id="addManagerModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card" role="dialog" aria-modal="true" aria-labelledby="addManagerTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="addManagerTitle">Add Manager</h2>
+            <p class="muted">Create another manager account that can log in to the manager app.</p>
+          </div>
+          <button id="closeAddManagerModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="addManagerForm" class="form-grid add-supervisor-form">
+          <section class="add-supervisor-section">
+            <h3 class="supervisor-assignment-title">Account Details</h3>
+            <div class="add-supervisor-fields">
+              <label class="add-supervisor-field" for="newManagerName">
+                <span>Name</span>
+                <input id="newManagerName" placeholder="e.g. Priya" required />
+              </label>
+              <label class="add-supervisor-field" for="newManagerUsername">
+                <span>Username</span>
+                <input id="newManagerUsername" placeholder="e.g. priya" required />
+              </label>
+              <label class="add-supervisor-field" for="newManagerPassword">
+                <span>Password</span>
+                <input id="newManagerPassword" type="password" placeholder="Create password" required />
+              </label>
+            </div>
+          </section>
+
+          <div class="add-supervisor-actions">
+            <button type="submit">Create Manager</button>
           </div>
         </form>
       </div>

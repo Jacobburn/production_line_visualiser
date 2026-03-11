@@ -142,6 +142,12 @@ const supervisorCreateSchema = z.object({
   assignedLineShifts: z.record(z.array(z.enum(supervisorShiftValues))).optional().default({})
 });
 
+const managerCreateSchema = z.object({
+  name: z.string().min(1).max(120),
+  username: z.string().min(3).max(60),
+  password: z.string().min(6).max(120)
+});
+
 const supervisorAssignmentsSchema = z.object({
   assignedLineIds: z.array(z.string().uuid()).optional().default([]),
   assignedLineShifts: z.record(z.array(z.enum(supervisorShiftValues))).optional().default({})
@@ -2424,6 +2430,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
          units_produced AS "unitsProduced",
          COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
          COALESCE(run_logs.notes, '') AS notes,
+         COALESCE(run_logs.submitted_by_user_id::TEXT, '') AS "submittedByUserId",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM run_logs
@@ -2521,25 +2528,8 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     breakByLine.set(row.lineId, list);
   });
 
-  const timedShiftIndex = buildTimedLogShiftIndex(shiftLogsResult.rows, { includeLineId: true });
-  const visibleRunRows = isManager
-    ? runLogsResult.rows
-    : filterTimedLogRowsByShiftIndex(runLogsResult.rows, timedShiftIndex, {
-      startField: 'productionStartTime',
-      finishField: 'finishTime',
-      includeLineId: true
-    });
-  const visibleDowntimeRows = isManager
-    ? downtimeLogsResult.rows
-    : filterTimedLogRowsByShiftIndex(downtimeLogsResult.rows, timedShiftIndex, {
-      startField: 'downtimeStart',
-      finishField: 'downtimeFinish',
-      includeLineId: true,
-      allowRow: (row) => String(row?.submittedByUserId || '').trim() === String(req.user.id || '').trim()
-    });
-
   const runByLine = new Map();
-  visibleRunRows.forEach((row) => {
+  runLogsResult.rows.forEach((row) => {
     const list = runByLine.get(row.lineId) || [];
     list.push({
       id: row.id,
@@ -2550,6 +2540,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       finishTime: row.finishTime,
       unitsProduced: row.unitsProduced,
       runCrewingPattern: row.runCrewingPattern || {},
+      submittedByUserId: row.submittedByUserId,
       submittedBy: row.submittedBy,
       submittedAt: row.submittedAt
     });
@@ -2557,7 +2548,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
   });
 
   const downtimeByLine = new Map();
-  visibleDowntimeRows.forEach((row) => {
+  downtimeLogsResult.rows.forEach((row) => {
     const list = downtimeByLine.get(row.lineId) || [];
     list.push({
       id: row.id,
@@ -2567,6 +2558,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
       excludeFromCalculation: row.excludeFromCalculation,
       equipment: row.equipment,
       reason: row.reason,
+      submittedByUserId: row.submittedByUserId,
       submittedBy: row.submittedBy,
       submittedAt: row.submittedAt
     });
@@ -2652,6 +2644,68 @@ app.post('/api/lines', authMiddleware, requireRole('manager'), asyncRoute(async 
 
 app.get('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(async (_req, res) => {
   res.json({ supervisors: await fetchSupervisorsWithAssignments() });
+}));
+
+app.post('/api/managers', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  const parsed = managerCreateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid manager payload' });
+
+  const username = parsed.data.username.trim().toLowerCase();
+  const name = parsed.data.name.trim();
+  const passwordHash = await hashPassword(parsed.data.password);
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existingUserResult = await client.query(
+      `SELECT id, role, is_active AS "isActive"
+       FROM users
+       WHERE username = $1
+       FOR UPDATE`,
+      [username]
+    );
+    const existingUser = existingUserResult.rows[0] || null;
+    let manager = null;
+
+    if (existingUser) {
+      if (existingUser.role !== 'manager' || existingUser.isActive) {
+        await client.query('ROLLBACK');
+        return res.status(409).json({ error: 'Manager username already exists' });
+      }
+      const reactivated = await client.query(
+        `UPDATE users
+         SET name = $2,
+             username = $3,
+             password_hash = $4,
+             role = 'manager',
+             is_active = TRUE,
+             updated_at = NOW()
+         WHERE id = $1
+         RETURNING id, name, username, is_active AS "isActive"`,
+        [existingUser.id, name, username, passwordHash]
+      );
+      manager = reactivated.rows[0];
+    } else {
+      const insertUser = await client.query(
+        `INSERT INTO users(name, username, password_hash, role, is_active)
+         VALUES ($1, $2, $3, 'manager', TRUE)
+         RETURNING id, name, username, is_active AS "isActive"`,
+        [name, username, passwordHash]
+      );
+      manager = insertUser.rows[0];
+    }
+
+    await client.query('COMMIT');
+    return res.status(201).json({ manager });
+  } catch (error) {
+    await client.query('ROLLBACK');
+    if (String(error?.message || '').includes('duplicate key')) {
+      return res.status(409).json({ error: 'Manager username already exists' });
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
 }));
 
 app.post('/api/supervisors', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
@@ -3471,6 +3525,7 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
          units_produced AS "unitsProduced",
          COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
          COALESCE(run_logs.notes, '') AS notes,
+         COALESCE(run_logs.submitted_by_user_id::TEXT, '') AS "submittedByUserId",
          COALESCE(u.name, u.username, '') AS "submittedBy",
          submitted_at AS "submittedAt"
        FROM run_logs
@@ -3500,26 +3555,11 @@ app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) =
     )
   ]);
 
-  const timedShiftIndex = buildTimedLogShiftIndex(shiftRows.rows);
-  const visibleRunRows = isManager
-    ? runRows.rows
-    : filterTimedLogRowsByShiftIndex(runRows.rows, timedShiftIndex, {
-      startField: 'productionStartTime',
-      finishField: 'finishTime'
-    });
-  const visibleDowntimeRows = isManager
-    ? downtimeRows.rows
-    : filterTimedLogRowsByShiftIndex(downtimeRows.rows, timedShiftIndex, {
-      startField: 'downtimeStart',
-      finishField: 'downtimeFinish',
-      allowRow: (row) => String(row?.submittedByUserId || '').trim() === String(req.user.id || '').trim()
-    });
-
   return res.json({
     shiftRows: shiftRows.rows,
     breakRows: breakRows.rows,
-    runRows: visibleRunRows,
-    downtimeRows: visibleDowntimeRows
+    runRows: runRows.rows,
+    downtimeRows: downtimeRows.rows
   });
 }));
 
@@ -4243,8 +4283,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
   const parsed = runLogSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid run log payload' });
   if (!(await isActiveLine(parsed.data.lineId))) return res.status(404).json({ error: 'Line not found' });
-  const runFinishForAccess = String(parsed.data.finishTime || parsed.data.productionStartTime || '').trim() || parsed.data.productionStartTime;
-  if (!(await hasLineTimedLogAccess(req.user, parsed.data.lineId, parsed.data.date, parsed.data.productionStartTime, runFinishForAccess))) {
+  if (!(await hasLineAccess(req.user, parsed.data.lineId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
 
@@ -4264,6 +4303,7 @@ app.post('/api/logs/runs', authMiddleware, asyncRoute(async (req, res) => {
        units_produced AS "unitsProduced",
        COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
        COALESCE(notes, '') AS notes,
+       COALESCE(submitted_by_user_id::TEXT, '') AS "submittedByUserId",
        submitted_at AS "submittedAt"`,
     [
       parsed.data.lineId,
@@ -4469,12 +4509,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
   const existing = existingResult.rows[0];
 
   const data = parsed.data;
-  const nextDate = String(data.date || existing.date || '').trim();
-  const nextProductionStart = String(data.productionStartTime || existing.productionStartTime || '').trim();
-  const nextFinish = Object.prototype.hasOwnProperty.call(data, 'finishTime')
-    ? (String(data.finishTime || '').trim() || nextProductionStart)
-    : (String(existing.finishTime || '').trim() || nextProductionStart);
-  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, nextDate, nextProductionStart, nextFinish))) {
+  if (!(await hasLineAccess(req.user, existing.lineId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {
@@ -4510,6 +4545,7 @@ app.patch('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) =
        units_produced AS "unitsProduced",
        COALESCE(run_crewing_pattern, '{}'::jsonb) AS "runCrewingPattern",
        COALESCE(notes, '') AS notes,
+       COALESCE(submitted_by_user_id::TEXT, '') AS "submittedByUserId",
        submitted_at AS "submittedAt"`,
     [
       logId,
@@ -4697,8 +4733,7 @@ app.delete('/api/logs/runs/:logId', authMiddleware, asyncRoute(async (req, res) 
   if (!existingResult.rowCount) return res.status(404).json({ error: 'Run log not found' });
   const existing = existingResult.rows[0];
 
-  const finishForAccess = String(existing.finishTime || existing.productionStartTime || '').trim() || existing.productionStartTime;
-  if (!(await hasLineTimedLogAccess(req.user, existing.lineId, existing.date, existing.productionStartTime, finishForAccess))) {
+  if (!(await hasLineAccess(req.user, existing.lineId))) {
     return res.status(403).json({ error: 'Forbidden' });
   }
   if (!canMutateSubmittedLog(req.user, existing.submittedByUserId)) {

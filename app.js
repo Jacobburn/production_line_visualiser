@@ -3455,6 +3455,18 @@ function shiftIntervalsForDate(line, date) {
   return byShift;
 }
 
+function lineHasLoggedShiftRowsForDate(line, date) {
+  const safeDate = String(date || "").trim();
+  if (!line || !/^\d{4}-\d{2}-\d{2}$/.test(safeDate)) return false;
+  return (line.shiftRows || []).some(
+    (row) =>
+      String(row?.date || "").trim() === safeDate
+      && LOG_ASSIGNABLE_SHIFTS.includes(String(row?.shift || "").trim())
+      && strictTimeValid(row?.startTime)
+      && strictTimeValid(row?.finishTime)
+  );
+}
+
 function timedLogShiftLabelFromCoverage(coverage) {
   const matches = Array.isArray(coverage?.shiftMatches) ? coverage.shiftMatches.filter((shift) => LOG_ASSIGNABLE_SHIFTS.includes(shift)) : [];
   const unassignedMinutes = Math.max(0, num(coverage?.unassignedMinutes));
@@ -4799,8 +4811,8 @@ function buildDowntimeReasonText(line, category, detail, note) {
 function normalizeRunLogRow(row) {
   return {
     ...(row || {}),
-    assignedShift: "",
-    shift: "",
+    assignedShift: String(row?.assignedShift || ""),
+    shift: String(row?.shift || ""),
     notes: String(row?.notes || ""),
     runCrewingPattern: parseRunCrewingPattern(row?.runCrewingPattern)
   };
@@ -4851,8 +4863,8 @@ function normalizeDowntimeLogRow(row) {
   const parsedReason = parseDowntimeReasonParts(row?.reason, row?.equipment);
   return {
     ...(row || {}),
-    assignedShift: "",
-    shift: "",
+    assignedShift: String(row?.assignedShift || ""),
+    shift: String(row?.shift || ""),
     notes: String(row?.notes || ""),
     reasonCategory: row?.reasonCategory || parsedReason.reasonCategory,
     reasonDetail: row?.reasonDetail || parsedReason.reasonDetail,
@@ -7600,6 +7612,7 @@ function bindHome() {
         ...payload,
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
+        submittedByUserId: String(saved?.submittedByUserId || session?.userId || existing?.submittedByUserId || "").trim(),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.shiftRows, savedRow);
@@ -7727,10 +7740,6 @@ function bindHome() {
         return;
       }
     }
-    if (!supervisorCanAccessTimedLog(session, lineId, line, date, productionStartTime, timingFinish)) {
-      alert("This run must fall within one of your logged shift windows.");
-      return;
-    }
 
     const inputPattern = runCrewingPatternFromInput(superRunCrewingPatternInput, line, patternShift, { fallbackToIdeal: false });
     const existingPattern = normalizeRunCrewingPattern(existing?.runCrewingPattern, line, patternShift, { fallbackToIdeal: false });
@@ -7767,11 +7776,12 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
-        assignedShift: "",
+        assignedShift: patternShift || String(existing?.assignedShift || ""),
         shift: "",
         runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, line, patternShift, { fallbackToIdeal: false }),
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
+        submittedByUserId: String(saved?.submittedByUserId || session?.userId || existing?.submittedByUserId || "").trim(),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.runRows, savedRow);
@@ -7982,6 +7992,7 @@ function bindHome() {
         ...payload,
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
+        submittedByUserId: String(saved?.submittedByUserId || session?.userId || row?.submittedByUserId || "").trim(),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.shiftRows, savedRow);
@@ -8040,10 +8051,13 @@ function bindHome() {
     const unitsPrompt = window.prompt("Units produced", String(Math.max(0, num(row.unitsProduced))));
     if (unitsPrompt === null) return;
     const unitsProduced = Math.max(0, num(unitsPrompt));
-    if (!supervisorCanAccessTimedLog(session, lineId, line, row.date, productionStartTime, finishTime)) {
-      alert("This run must fall within one of your logged shift windows.");
-      return;
-    }
+    const assignedShift = preferredTimedLogShift(
+      line,
+      row.date,
+      productionStartTime,
+      finishTime,
+      appState.supervisorSelectedShift || "Day"
+    );
     const payload = {
       lineId,
       date: row.date,
@@ -8059,10 +8073,11 @@ function bindHome() {
       const savedRow = {
         ...row,
         ...payload,
-        assignedShift: "",
+        assignedShift: assignedShift || String(row?.assignedShift || ""),
         shift: "",
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
+        submittedByUserId: String(saved?.submittedByUserId || session?.userId || row?.submittedByUserId || "").trim(),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.runRows, savedRow);
@@ -8142,15 +8157,23 @@ function bindHome() {
       notes: String(row.notes || ""),
       reason: buildDowntimeReasonText(line, reasonCategory, reasonDetail, reasonNote)
     };
+    const assignedShift = preferredTimedLogShift(
+      line,
+      row.date,
+      downtimeStart,
+      downtimeFinish,
+      appState.supervisorSelectedShift || "Day"
+    );
     try {
       const saved = await patchSupervisorDowntimeLog(session, row.id, payload);
       const savedRow = {
         ...row,
         ...payload,
-        assignedShift: "",
+        assignedShift: assignedShift || String(row?.assignedShift || ""),
         shift: "",
         id: saved?.id || row.id || "",
         submittedBy: supervisorActorName(session),
+        submittedByUserId: String(saved?.submittedByUserId || session?.userId || row?.submittedByUserId || "").trim(),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.downtimeRows, savedRow);
@@ -8212,6 +8235,13 @@ function bindHome() {
     const notes = notesInput !== "" ? notesInput : String(existing?.notes || "");
     const equipment = reasonCategory === "Equipment" ? (reasonDetail || existing?.equipment || "") : "";
     const reason = buildDowntimeReasonText(line, reasonCategory, reasonDetail, reasonNote);
+    const assignedShift = preferredTimedLogShift(
+      line,
+      date,
+      downtimeStart,
+      downtimeFinish,
+      appState.supervisorSelectedShift || "Day"
+    );
 
     if (!strictTimeValid(downtimeStart) || !strictTimeValid(downtimeFinish)) {
       alert("Downtime start and finish must be HH:MM (24h).");
@@ -8249,13 +8279,14 @@ function bindHome() {
       const savedRow = {
         ...(existing || {}),
         ...payload,
-        assignedShift: "",
+        assignedShift: assignedShift || String(existing?.assignedShift || ""),
         shift: "",
         excludeFromCalculation: normalizeDowntimeCalculationFlag(
           saved?.excludeFromCalculation ?? existing?.excludeFromCalculation
         ),
         id: saved?.id || existing?.id || "",
         submittedBy: supervisorActorName(session),
+        submittedByUserId: String(saved?.submittedByUserId || session?.userId || existing?.submittedByUserId || "").trim(),
         submittedAt: saved?.submittedAt || nowIso()
       };
       upsertRowById(line.downtimeRows, savedRow);
@@ -9461,6 +9492,24 @@ function openDayKpiTrend(metricKey) {
   trendModalContext = { type: "dayKpi", metricKey: safeMetricKey };
   renderTrendModalContent();
   openTrendModal();
+}
+
+function trendPointTargetDate(point) {
+  const targetDate = String(point?.targetDate || point?.date || "").trim();
+  if (!isIsoDateValue(targetDate)) return "";
+  return normalizeWeekdayIsoDate(targetDate, { direction: -1 });
+}
+
+function openDayVisualiserForTrendPoint(point) {
+  if (!state) return;
+  const targetDate = trendPointTargetDate(point);
+  if (!targetDate) return;
+  state.selectedDate = targetDate;
+  state.trendDateCursor = targetDate;
+  appState.managerLineTab = "dayVisualiser";
+  closeTrendModal();
+  saveState();
+  renderAll();
 }
 
 function bindLineTrendDetailModal() {
@@ -13025,6 +13074,7 @@ function buildDayKpiTrendSeries(metricKey) {
 
   const dailyPoints = allDates.map((date) => ({
     date,
+    targetDate: date,
     label: date.slice(5),
     value: dayKpiTrendValue(metricKey, date, state.selectedShift, data)
   }));
@@ -13033,6 +13083,7 @@ function buildDayKpiTrendSeries(metricKey) {
     const values = monthDates.map((date) => dayKpiTrendValue(metricKey, date, state.selectedShift, data));
     return {
       date: month,
+      targetDate: monthDates[monthDates.length - 1] || "",
       label: trendMonthPointLabel(month),
       value: aggregateTrendMetricValues(values, config.aggregate)
     };
@@ -13074,11 +13125,19 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
     .map((point, index) => {
       const y = yValue(point.value);
       const h = pad.top + chartH - y;
+      const targetDate = trendPointTargetDate(point);
+      const targetDateLabel = targetDate ? formatIsoDateLabel(targetDate, { month: "short", day: "numeric", year: "numeric" }) : "";
+      const clickableClass = targetDate ? " line-trend-clickable" : "";
+      const interactiveAttrs = targetDate
+        ? ` data-day-kpi-point-index="${index}" tabindex="0" role="button" aria-label="${htmlEscape(
+            `${point.label}: ${config.formatValue(point.value)}. Open ${targetDateLabel} in Day visualiser.`
+          )}"`
+        : "";
       return `<rect x="${x(index) - barWidth / 2}" y="${y}" width="${barWidth}" height="${Math.max(
         1,
         h
-      )}" rx="3" class="${htmlEscape(config.barClass)}"><title>${htmlEscape(
-        `${point.label}: ${config.formatValue(point.value)}`
+      )}" rx="3" class="${htmlEscape(config.barClass)}${clickableClass}"${interactiveAttrs}><title>${htmlEscape(
+        `${point.label}: ${config.formatValue(point.value)}${targetDateLabel ? ` | Open ${targetDateLabel}` : ""}`
       )}</title></rect>`;
     })
     .join("");
@@ -13122,6 +13181,21 @@ function renderDayKpiTrendChart(container, points, config, { scalePoints = point
       <text x="${width - 8}" y="${pad.top + 12}" text-anchor="end" class="axis">Scale max ${htmlEscape(config.formatValue(maxValue))}</text>
     </svg>
   `;
+
+  container.querySelectorAll("[data-day-kpi-point-index]").forEach((bar) => {
+    const activate = () => {
+      const pointIndex = Math.max(0, Math.floor(num(bar.getAttribute("data-day-kpi-point-index"))));
+      const point = points[pointIndex];
+      if (!point) return;
+      openDayVisualiserForTrendPoint(point);
+    };
+    bar.addEventListener("click", activate);
+    bar.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      activate();
+    });
+  });
 }
 
 function renderDayKpiTrend() {
@@ -14462,12 +14536,18 @@ function renderHome() {
     const runEditableRows = (activeLine.runRows || [])
       .filter(
         (row) =>
-          supervisorAutoListIncludesRow(row, runKeyDate, appState.supervisorSelectedShift, {
-            line: activeLine,
-            startField: "productionStartTime",
-            finishField: "finishTime",
-            openPredicate: isRunOpen
-          }) &&
+          (
+            supervisorAutoListIncludesRow(row, runKeyDate, appState.supervisorSelectedShift, {
+              line: activeLine,
+              startField: "productionStartTime",
+              finishField: "finishTime",
+              openPredicate: isRunOpen
+            })
+            || (
+              String(row?.date || "").trim() === String(runKeyDate || "").trim()
+              && !lineHasLoggedShiftRowsForDate(activeLine, row?.date)
+            )
+          ) &&
           supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
@@ -14515,12 +14595,18 @@ function renderHome() {
     const downEditableRows = (activeLine.downtimeRows || [])
       .filter(
         (row) =>
-          supervisorAutoListIncludesRow(row, downKeyDate, appState.supervisorSelectedShift, {
-            line: activeLine,
-            startField: "downtimeStart",
-            finishField: "downtimeFinish",
-            openPredicate: isDownOpen
-          }) &&
+          (
+            supervisorAutoListIncludesRow(row, downKeyDate, appState.supervisorSelectedShift, {
+              line: activeLine,
+              startField: "downtimeStart",
+              finishField: "downtimeFinish",
+              openPredicate: isDownOpen
+            })
+            || (
+              String(row?.date || "").trim() === String(downKeyDate || "").trim()
+              && !lineHasLoggedShiftRowsForDate(activeLine, row?.date)
+            )
+          ) &&
           supervisorOwnsPendingLogRow(row, session)
       )
       .slice()
