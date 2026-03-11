@@ -11035,7 +11035,7 @@ function renderThroughputInputs() {
   syncLineSettingsSaveUI();
 }
 
-function renderTable(tableId, columns, rows, fieldMap) {
+function renderTable(tableId, columns, rows, fieldMap, options = {}) {
   const formatTableCellValue = (value) => {
     if (value === null || value === undefined || value === "") return "";
     if (typeof value === "number" && Number.isFinite(value)) {
@@ -11050,23 +11050,40 @@ function renderTable(tableId, columns, rows, fieldMap) {
     }
     return value;
   };
+  const groupByField = String(options?.groupByField || "").trim();
+  const hideGroupedFieldCells = Boolean(options?.hideGroupedFieldCells);
+  const groupLabelFormatter = typeof options?.groupLabelFormatter === "function"
+    ? options.groupLabelFormatter
+    : (value) => String(value ?? "");
 
   const table = document.getElementById(tableId);
   const header = `<thead><tr>${columns.map((col) => `<th>${col}</th>`).join("")}</tr></thead>`;
+  const renderRow = (row) => {
+    const rowClass = String(row?.__rowClass || "").trim();
+    const rowClassAttr = rowClass ? ` class="${htmlEscape(rowClass)}"` : "";
+    const htmlFields = new Set(Array.isArray(row?.__htmlFields) ? row.__htmlFields.map((field) => String(field || "")) : []);
+    const cells = columns
+      .map((col) => {
+        const field = String(fieldMap[col] || "");
+        const value = row?.[field];
+        if (field && htmlFields.has(field)) return `<td>${String(value ?? "")}</td>`;
+        if (groupByField && hideGroupedFieldCells && field === groupByField) return `<td></td>`;
+        return `<td>${htmlEscape(formatTableCellValue(value))}</td>`;
+      })
+      .join("");
+    return `<tr${rowClassAttr}>${cells}</tr>`;
+  };
+  let lastGroupValue = "";
   const body = rows
-    .map((row) => {
-      const rowClass = String(row?.__rowClass || "").trim();
-      const rowClassAttr = rowClass ? ` class="${htmlEscape(rowClass)}"` : "";
-      const htmlFields = new Set(Array.isArray(row?.__htmlFields) ? row.__htmlFields.map((field) => String(field || "")) : []);
-      const cells = columns
-        .map((col) => {
-          const field = String(fieldMap[col] || "");
-          const value = row?.[field];
-          if (field && htmlFields.has(field)) return `<td>${String(value ?? "")}</td>`;
-          return `<td>${htmlEscape(formatTableCellValue(value))}</td>`;
-        })
-        .join("");
-      return `<tr${rowClassAttr}>${cells}</tr>`;
+    .map((row, index) => {
+      const rowHtml = renderRow(row);
+      if (!groupByField) return rowHtml;
+      const groupValue = String(row?.[groupByField] ?? "").trim();
+      const needsDivider = index === 0 || groupValue !== lastGroupValue;
+      lastGroupValue = groupValue;
+      if (!needsDivider) return rowHtml;
+      const groupLabel = htmlEscape(groupLabelFormatter(groupValue));
+      return `<tr class="entry-date-divider"><td colspan="${columns.length}">${groupLabel}</td></tr>${rowHtml}`;
     })
     .join("");
 
@@ -13637,6 +13654,15 @@ function renderTrackingTables() {
         if (submittedCmp !== 0) return submittedCmp;
         return String(b?.id || "").localeCompare(String(a?.id || ""));
       });
+  const groupedLogTableOptions = {
+    groupByField: "date",
+    hideGroupedFieldCells: true,
+    groupLabelFormatter: (value) => (
+      isIsoDateValue(value)
+        ? formatIsoDateLabel(value, { weekday: "long", day: "numeric", month: "long", year: "numeric" })
+        : (String(value || "").trim() || "Unknown Date")
+    )
+  };
 
   const derivedBreakContext = { breakRows: data.breakRows };
   const displayShiftRows = sortNewestFirst(data.shiftRows, "startTime").map((row) => {
@@ -13681,7 +13707,7 @@ function renderTrackingTables() {
     Notes: "notes",
     "Submitted By": "submittedBy",
     Action: "action"
-  });
+  }, groupedLogTableOptions);
 
   const displayRunRows = sortNewestFirst(data.runRows, "productionStartTime").map((row) => {
     const editing = isInlineEditing("run", String(row.id || ""));
@@ -13741,7 +13767,7 @@ function renderTrackingTables() {
     Notes: "notes",
     "Submitted By": "submittedBy",
     Action: "action"
-  });
+  }, groupedLogTableOptions);
 
   const downtimeRowsForTable = Array.isArray(data.downtimeRowsLogged) ? data.downtimeRowsLogged : data.downtimeRows;
   const displayDowntimeRows = sortNewestFirst(downtimeRowsForTable, "downtimeStart").map((row) => {
@@ -13803,7 +13829,7 @@ function renderTrackingTables() {
     Notes: "notes",
     "Submitted By": "submittedBy",
     Action: "action"
-  });
+  }, groupedLogTableOptions);
 }
 
 function renderAuditTrail() {
