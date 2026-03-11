@@ -3580,19 +3580,6 @@ function rowMatchesDateShift(row, date, shift, { line = null, startField = "", f
   return shiftKeysForSelection(shift).includes(row.shift);
 }
 
-function supervisorAutoListIncludesRow(
-  row,
-  date,
-  shift,
-  { line = null, startField = "", finishField = "", openPredicate = null } = {}
-) {
-  if (rowMatchesDateShift(row, date, shift, { line, startField, finishField })) return true;
-  if (typeof openPredicate !== "function" || !openPredicate(row)) return false;
-  const rowDate = String(row?.date || "").trim();
-  if (!isOperationalDate(rowDate)) return false;
-  return rowMatchesDateShift(row, rowDate, shift, { line, startField, finishField });
-}
-
 function fallbackShiftValue(shift) {
   return shift === "Night" ? "Night" : "Day";
 }
@@ -5437,13 +5424,12 @@ function bindHome() {
   const superRunCrewingPatternSummary = document.getElementById("superRunCrewingPatternSummary");
   const superDownLogIdInput = document.getElementById("superDownLogId");
   const superShiftSaveProgressBtn = document.getElementById("superShiftSaveProgress");
-  const superShiftOpenList = document.getElementById("superShiftOpenList");
   const superRunSaveProgressBtn = document.getElementById("superRunSaveProgress");
-  const superRunOpenList = document.getElementById("superRunOpenList");
   const superDownSaveProgressBtn = document.getElementById("superDownSaveProgress");
-  const superDownOpenList = document.getElementById("superDownOpenList");
   const supervisorDownReasonCategory = document.getElementById("superDownReasonCategory");
   const supervisorDownReasonDetail = document.getElementById("superDownReasonDetail");
+  const supervisorEntryList = document.getElementById("supervisorEntryList");
+  const supervisorEntryCards = document.getElementById("supervisorEntryCards");
   const managerActionList = document.getElementById("managerActionList");
   const manageSupervisorsBtn = document.getElementById("manageSupervisorsBtn");
   const manageLineGroupsBtn = document.getElementById("manageLineGroupsBtn");
@@ -5536,6 +5522,60 @@ function bindHome() {
   let suppressSupervisorSelectionReset = false;
   const PRODUCT_CATALOG_EDITABLE_COLUMN_COUNT = 12;
   const PRODUCT_CATALOG_NUMERIC_COLUMNS = new Set([6, 7, 9, 10, 11, 12]);
+
+  const resetSupervisorShiftFormSelection = () => {
+    if (superShiftLogIdInput) superShiftLogIdInput.value = "";
+    supervisorShiftTileEditId = "";
+    supervisorShiftForm?.reset();
+    setSupervisorAutoDateValue("superShiftDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
+    const lineShiftMap = normalizeSupervisorLineShifts(
+      appState.supervisorSession?.assignedLineShifts,
+      appState.lines,
+      appState.supervisorSession?.assignedLineIds || []
+    );
+    const allowedShifts = expandedSupervisorShiftAccess(lineShiftMap[selectedSupervisorLineId()]);
+    const shiftInput = document.getElementById("superShiftShift");
+    if (shiftInput) shiftInput.value = allowedShifts[0] || "Day";
+    syncAllNowInputPrefixStates(supervisorShiftForm);
+  };
+
+  const resetSupervisorRunFormSelection = () => {
+    if (superRunLogIdInput) superRunLogIdInput.value = "";
+    supervisorRunForm?.reset();
+    setSupervisorAutoDateValue("superRunDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
+    setRunCrewingPatternField(
+      superRunCrewingPatternInput,
+      superRunCrewingPatternSummary,
+      selectedSupervisorLine(),
+      appState.supervisorSelectedShift || "Day",
+      {},
+      { fallbackToIdeal: false }
+    );
+    syncAllNowInputPrefixStates(supervisorRunForm);
+  };
+
+  const resetSupervisorDowntimeFormSelection = () => {
+    if (superDownLogIdInput) superDownLogIdInput.value = "";
+    supervisorDownForm?.reset();
+    if (supervisorDownReasonCategory) supervisorDownReasonCategory.value = "";
+    setSupervisorAutoDateValue("superDownDate", supervisorAutoEntryDate(), { fallbackIso: supervisorAutoEntryDate() });
+    refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
+    syncAllNowInputPrefixStates(supervisorDownForm);
+  };
+
+  const clearSupervisorEditingSelection = ({ resetForms = false } = {}) => {
+    if (resetForms) {
+      resetSupervisorShiftFormSelection();
+      resetSupervisorRunFormSelection();
+      resetSupervisorDowntimeFormSelection();
+    } else {
+      if (superShiftLogIdInput) superShiftLogIdInput.value = "";
+      supervisorShiftTileEditId = "";
+      if (superRunLogIdInput) superRunLogIdInput.value = "";
+      if (superDownLogIdInput) superDownLogIdInput.value = "";
+    }
+    updateSupervisorProgressButtonLabels();
+  };
 
   const setProductRowEditingState = (rowNode, editing) => {
     if (!rowNode) return;
@@ -6541,11 +6581,9 @@ function bindHome() {
     el.addEventListener("change", () => {
       if (suppressSupervisorSelectionReset) return;
       if (selectedSupervisorShiftLogId()) {
-        updateSupervisorProgressButtonLabels();
-        return;
+        if (superShiftLogIdInput) superShiftLogIdInput.value = "";
+        supervisorShiftTileEditId = "";
       }
-      if (superShiftLogIdInput) superShiftLogIdInput.value = "";
-      supervisorShiftTileEditId = "";
       updateSupervisorProgressButtonLabels();
     });
   });
@@ -6585,6 +6623,7 @@ function bindHome() {
   document.querySelectorAll("[data-supervisor-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       appState.supervisorTab = btn.dataset.supervisorTab || "superShift";
+      clearSupervisorEditingSelection({ resetForms: true });
       saveState();
       renderHome();
     });
@@ -6596,6 +6635,7 @@ function bindHome() {
     if (!visualAllowedShifts.includes(appState.supervisorSelectedShift)) {
       appState.supervisorSelectedShift = visualAllowedShifts.includes("Full Day") ? "Full Day" : visualAllowedShifts[0] || "Day";
     }
+    clearSupervisorEditingSelection({ resetForms: true });
     syncRunProductInputsFromCatalog();
     refreshSupervisorDowntimeDetailOptions(selectedSupervisorLine());
     saveState();
@@ -6623,6 +6663,7 @@ function bindHome() {
       svDateInputs.forEach((input) => {
         input.value = appState.supervisorSelectedDate;
       });
+      clearSupervisorEditingSelection({ resetForms: true });
       saveState();
       renderHome();
     });
@@ -6634,6 +6675,7 @@ function bindHome() {
       const shift = btn.dataset.svShift;
       if (!shift) return;
       appState.supervisorSelectedShift = SHIFT_OPTIONS.includes(shift) ? shift : "Day";
+      clearSupervisorEditingSelection({ resetForms: true });
       saveState();
       renderHome();
     });
@@ -6649,6 +6691,7 @@ function bindHome() {
   svPrevBtns.forEach((svPrevBtn) => {
     svPrevBtn.addEventListener("click", () => {
       appState.supervisorSelectedDate = shiftWeekdayIsoDate(appState.supervisorSelectedDate || todayISO(), -1);
+      clearSupervisorEditingSelection({ resetForms: true });
       saveState();
       renderHome();
     });
@@ -6657,6 +6700,7 @@ function bindHome() {
   svNextBtns.forEach((svNextBtn) => {
     svNextBtn.addEventListener("click", () => {
       appState.supervisorSelectedDate = shiftWeekdayIsoDate(appState.supervisorSelectedDate || todayISO(), 1);
+      clearSupervisorEditingSelection({ resetForms: true });
       saveState();
       renderHome();
     });
@@ -6665,6 +6709,7 @@ function bindHome() {
   document.querySelectorAll("[data-super-main-tab]").forEach((btn) => {
     btn.addEventListener("click", () => {
       appState.supervisorMainTab = btn.dataset.superMainTab || "supervisorDay";
+      clearSupervisorEditingSelection({ resetForms: true });
       saveState();
       renderHome();
     });
@@ -7897,10 +7942,11 @@ function bindHome() {
     return `${hh}:${mm}`;
   };
 
-  const loadSupervisorShiftForEdit = (shiftId) => {
+  const loadSupervisorShiftForEdit = (shiftId, { lineId: lineIdOverride = "" } = {}) => {
     const session = appState.supervisorSession;
     if (!session) return;
-    const lineId = selectedSupervisorLineId();
+    const lineId = String(lineIdOverride || selectedSupervisorLineId() || "");
+    if (lineId && lineId !== appState.supervisorSelectedLineId) appState.supervisorSelectedLineId = lineId;
     const line = appState.lines[lineId];
     if (!line || !session.assignedLineIds.includes(lineId)) return;
     const targetShiftId = String(shiftId || "");
@@ -7927,10 +7973,11 @@ function bindHome() {
     if (startInput) startInput.focus();
   };
 
-  const loadSupervisorRunForEdit = (runId) => {
+  const loadSupervisorRunForEdit = (runId, { lineId: lineIdOverride = "" } = {}) => {
     const session = appState.supervisorSession;
     if (!session) return;
-    const lineId = selectedSupervisorLineId();
+    const lineId = String(lineIdOverride || selectedSupervisorLineId() || "");
+    if (lineId && lineId !== appState.supervisorSelectedLineId) appState.supervisorSelectedLineId = lineId;
     const line = appState.lines[lineId];
     if (!line || !session.assignedLineIds.includes(lineId)) return;
     const row = (line.runRows || []).find((item) => item.id === runId);
@@ -7966,10 +8013,11 @@ function bindHome() {
     if (productInput) productInput.focus();
   };
 
-  const loadSupervisorDowntimeForEdit = (downtimeId) => {
+  const loadSupervisorDowntimeForEdit = (downtimeId, { lineId: lineIdOverride = "" } = {}) => {
     const session = appState.supervisorSession;
     if (!session) return;
-    const lineId = selectedSupervisorLineId();
+    const lineId = String(lineIdOverride || selectedSupervisorLineId() || "");
+    if (lineId && lineId !== appState.supervisorSelectedLineId) appState.supervisorSelectedLineId = lineId;
     const line = appState.lines[lineId];
     if (!line || !session.assignedLineIds.includes(lineId)) return;
     const row = (line.downtimeRows || []).find((item) => item.id === downtimeId);
@@ -7994,6 +8042,52 @@ function bindHome() {
     updateSupervisorProgressButtonLabels();
     const startInput = document.getElementById("superDownStart");
     if (startInput) startInput.focus();
+  };
+
+  const openSupervisorSubmittedLogForEdit = (type, logId, lineId = "") => {
+    const safeType = type === "run" || type === "downtime" ? type : "shift";
+    const safeLineId = String(lineId || selectedSupervisorLineId() || "").trim();
+    if (safeLineId) appState.supervisorSelectedLineId = safeLineId;
+    appState.supervisorMainTab = "supervisorData";
+    appState.supervisorTab =
+      safeType === "run"
+        ? "superRun"
+        : safeType === "downtime"
+          ? "superDown"
+          : "superShift";
+    saveState();
+    renderHome();
+    if (safeType === "run") {
+      loadSupervisorRunForEdit(logId, { lineId: safeLineId });
+      return;
+    }
+    if (safeType === "downtime") {
+      loadSupervisorDowntimeForEdit(logId, { lineId: safeLineId });
+      return;
+    }
+    loadSupervisorShiftForEdit(logId, { lineId: safeLineId });
+  };
+
+  const handleSupervisorSubmittedLogAction = async (action, type, logId, lineId = "") => {
+    const safeAction = String(action || "").trim().toLowerCase();
+    const safeType = type === "run" || type === "downtime" ? type : "shift";
+    const safeLogId = String(logId || "").trim();
+    const safeLineId = String(lineId || "").trim();
+    if (!safeAction || !safeLogId) return;
+    if (safeAction === "edit") {
+      openSupervisorSubmittedLogForEdit(safeType, safeLogId, safeLineId);
+      return;
+    }
+    if (safeAction !== "finalise") return;
+    if (safeType === "run") {
+      await completeSupervisorRunById(safeLogId, { lineId: safeLineId });
+      return;
+    }
+    if (safeType === "downtime") {
+      await completeSupervisorDowntimeById(safeLogId, { lineId: safeLineId });
+      return;
+    }
+    await completeSupervisorShiftById(safeLogId, { lineId: safeLineId });
   };
 
   const completeSupervisorShiftById = async (shiftId, { lineId: lineIdOverride } = {}) => {
@@ -8383,64 +8477,19 @@ function bindHome() {
   };
 
   superShiftSaveProgressBtn.addEventListener("click", () => submitSupervisorShift({ complete: false }));
-  if (superShiftOpenList) {
-    superShiftOpenList.addEventListener("click", (event) => {
-      const editBtn = event.target.closest("[data-super-shift-edit]");
-      if (editBtn) {
-        const shiftId = editBtn.getAttribute("data-super-shift-edit");
-        if (shiftId) {
-          if (superShiftLogIdInput) superShiftLogIdInput.value = shiftId;
-          supervisorShiftTileEditId = shiftId;
-          appState.supervisorMainTab = "supervisorData";
-          appState.supervisorTab = "superShift";
-          // Force the tile expansion immediately so Edit behaves deterministically.
-          renderHome();
-          updateSupervisorProgressButtonLabels();
-          loadSupervisorShiftForEdit(shiftId);
-        }
-        return;
-      }
-      const completeBtn = event.target.closest("[data-super-shift-complete]");
-      if (completeBtn) {
-        const shiftId = completeBtn.getAttribute("data-super-shift-complete");
-        if (shiftId) {
-          completeSupervisorShiftById(shiftId);
-        }
-      }
-    });
-  }
   superRunSaveProgressBtn.addEventListener("click", () => submitSupervisorRun({ complete: false }));
-  if (superRunOpenList) {
-    superRunOpenList.addEventListener("click", (event) => {
-      const editBtn = event.target.closest("[data-super-run-edit]");
-      if (editBtn) {
-        const runId = editBtn.getAttribute("data-super-run-edit");
-        if (runId) loadSupervisorRunForEdit(runId);
-        return;
-      }
-      const completeBtn = event.target.closest("[data-super-run-complete]");
-      if (completeBtn) {
-        const runId = completeBtn.getAttribute("data-super-run-complete");
-        if (runId) completeSupervisorRunById(runId);
-      }
-    });
-  }
   superDownSaveProgressBtn.addEventListener("click", () => submitSupervisorDowntime({ complete: false }));
-  if (superDownOpenList) {
-    superDownOpenList.addEventListener("click", (event) => {
-      const editBtn = event.target.closest("[data-super-down-edit]");
-      if (editBtn) {
-        const downtimeId = editBtn.getAttribute("data-super-down-edit");
-        if (downtimeId) loadSupervisorDowntimeForEdit(downtimeId);
-        return;
-      }
-      const completeBtn = event.target.closest("[data-super-down-complete]");
-      if (completeBtn) {
-        const downtimeId = completeBtn.getAttribute("data-super-down-complete");
-        if (downtimeId) completeSupervisorDowntimeById(downtimeId);
-      }
+  [supervisorEntryList, supervisorEntryCards].filter(Boolean).forEach((container) => {
+    container.addEventListener("click", async (event) => {
+      const actionBtn = event.target.closest("[data-super-entry-action]");
+      if (!actionBtn) return;
+      const action = actionBtn.getAttribute("data-super-entry-action");
+      const type = actionBtn.getAttribute("data-super-entry-type");
+      const logId = actionBtn.getAttribute("data-super-entry-id");
+      const lineId = actionBtn.getAttribute("data-super-entry-line-id");
+      await handleSupervisorSubmittedLogAction(action, type, logId, lineId);
     });
-  }
+  });
 
   openBuilderBtn.addEventListener("click", openBuilderModal);
   if (openBuilderSecondaryBtn) openBuilderSecondaryBtn.addEventListener("click", openBuilderModal);
@@ -14006,15 +14055,12 @@ function renderHome() {
   const shiftDateInput = document.getElementById("superShiftDate");
   const shiftShiftInput = document.getElementById("superShiftShift");
   const shiftLogIdInput = document.getElementById("superShiftLogId");
-  const shiftOpenList = document.getElementById("superShiftOpenList");
   const runDateInput = document.getElementById("superRunDate");
   const runLogIdInput = document.getElementById("superRunLogId");
-  const runOpenList = document.getElementById("superRunOpenList");
   const downDateInput = document.getElementById("superDownDate");
   const downReasonCategoryInput = document.getElementById("superDownReasonCategory");
   const downReasonDetailInput = document.getElementById("superDownReasonDetail");
   const downLogIdInput = document.getElementById("superDownLogId");
-  const downOpenList = document.getElementById("superDownOpenList");
   const entryList = document.getElementById("supervisorEntryList");
   const entryCards = document.getElementById("supervisorEntryCards");
   const actionLineInput = document.getElementById("supervisorActionLine");
@@ -14525,235 +14571,6 @@ function renderHome() {
   supervisorAutoDateValue(shiftDateInput, supervisorAutoEntryDate());
   supervisorAutoDateValue(runDateInput, supervisorAutoEntryDate());
   supervisorAutoDateValue(downDateInput, supervisorAutoEntryDate());
-
-  const pickLatest = (rows = []) =>
-    rows.reduce((latest, row) => {
-      if (!latest) return row;
-      const a = Date.parse(row?.submittedAt || "") || 0;
-      const b = Date.parse(latest?.submittedAt || "") || 0;
-      return a >= b ? row : latest;
-    }, null);
-  const isRunOpen = (row) =>
-    strictTimeValid(String(row?.productionStartTime || "").trim()) &&
-    (
-      String(row?.finishTime || "").trim() === ""
-      || (
-        strictTimeValid(String(row?.finishTime || "").trim())
-        && String(row?.productionStartTime || "").trim() === String(row?.finishTime || "").trim()
-      )
-    );
-  const isDownOpen = (row) =>
-    strictTimeValid(row?.downtimeStart) &&
-    strictTimeValid(row?.downtimeFinish) &&
-    row.downtimeStart === row.downtimeFinish;
-  const isShiftOpen = (row) =>
-    strictTimeValid(row?.startTime) &&
-    strictTimeValid(row?.finishTime) &&
-    row.startTime === row.finishTime;
-
-  const activeLine = selectedSupervisorLine();
-  if (activeLine) {
-    const shiftKeyDate = shiftDateInput.value || appState.supervisorSelectedDate;
-    const shiftKeyShift = shiftShiftInput?.value || appState.supervisorSelectedShift;
-    const shiftEditableRows = (activeLine.shiftRows || [])
-      .filter(
-        (row) =>
-          supervisorAutoListIncludesRow(row, shiftKeyDate, shiftKeyShift, { openPredicate: isShiftOpen }) &&
-          supervisorOwnsPendingLogRow(row, session)
-      )
-      .slice()
-      .sort((a, b) => {
-        const aOpen = isShiftOpen(a);
-        const bOpen = isShiftOpen(b);
-        if (aOpen !== bOpen) return aOpen ? -1 : 1;
-        const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
-        if (submittedCmp !== 0) return submittedCmp;
-        return String(a.startTime || "").localeCompare(String(b.startTime || ""));
-      });
-    const hasShiftRow = (rowId) => shiftEditableRows.some((row) => String(row.id || "") === String(rowId || ""));
-    if (supervisorShiftTileEditId && !hasShiftRow(supervisorShiftTileEditId)) {
-      supervisorShiftTileEditId = "";
-    }
-    if (shiftLogIdInput && shiftLogIdInput.value && !hasShiftRow(shiftLogIdInput.value)) {
-      shiftLogIdInput.value = "";
-    }
-    const selectedShiftId = hasShiftRow(shiftLogIdInput?.value)
-      ? String(shiftLogIdInput?.value || "")
-      : hasShiftRow(supervisorShiftTileEditId)
-        ? String(supervisorShiftTileEditId || "")
-        : "";
-    if (selectedShiftId) {
-      if (shiftLogIdInput) shiftLogIdInput.value = selectedShiftId;
-      supervisorShiftTileEditId = selectedShiftId;
-    }
-    if (shiftOpenList) {
-      shiftOpenList.innerHTML = shiftEditableRows.length
-        ? `
-          <div class="pending-log-list">
-            ${shiftEditableRows
-              .map((row) => {
-                const selectedClass = supervisorShiftTileEditId && String(supervisorShiftTileEditId) === String(row.id || "") ? " active" : "";
-                const rowIsOpen = isShiftOpen(row);
-                return `
-                  <article class="pending-log-item${selectedClass}">
-                    <div class="pending-log-meta">
-                      <h5>${htmlEscape(row.shift || "Shift")} Shift</h5>
-                      <p>
-                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.startTime || "-")}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
-                      </p>
-                    </div>
-                    <div class="pending-log-actions">
-                      <button type="button" class="table-edit-pill ghost-btn" data-super-shift-edit="${row.id}">Edit</button>
-                      ${rowIsOpen
-                        ? `
-                          <button type="button" class="table-edit-pill finalise-pill" data-super-shift-complete="${row.id}">Finalise</button>
-                        `
-                        : ""
-                      }
-                    </div>
-                  </article>
-                `;
-              })
-              .join("")}
-          </div>
-        `
-        : `<p class="muted pending-log-empty">No shift logs for the current day or open logs for this shift.</p>`;
-    }
-
-    const runKeyDate = runDateInput.value || appState.supervisorSelectedDate;
-    const runEditableRows = (activeLine.runRows || [])
-      .filter(
-        (row) =>
-          (
-            supervisorAutoListIncludesRow(row, runKeyDate, appState.supervisorSelectedShift, {
-              line: activeLine,
-              startField: "productionStartTime",
-              finishField: "finishTime",
-              openPredicate: isRunOpen
-            })
-            || (
-              String(row?.date || "").trim() === String(runKeyDate || "").trim()
-              && !lineHasLoggedShiftRowsForDate(activeLine, row?.date)
-            )
-          ) &&
-          supervisorOwnsPendingLogRow(row, session)
-      )
-      .slice()
-      .sort((a, b) => {
-        const aOpen = isRunOpen(a);
-        const bOpen = isRunOpen(b);
-        if (aOpen !== bOpen) return aOpen ? -1 : 1;
-        const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
-        if (submittedCmp !== 0) return submittedCmp;
-        return String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || ""));
-      });
-    if (runLogIdInput && !runEditableRows.some((row) => row.id === runLogIdInput.value)) {
-      runLogIdInput.value = "";
-    }
-    if (runOpenList) {
-      runOpenList.innerHTML = runEditableRows.length
-        ? `
-          <div class="pending-log-list">
-            ${runEditableRows
-              .map((row) => {
-                const selectedClass = runLogIdInput?.value && runLogIdInput.value === row.id ? " active" : "";
-                const rowIsOpen = isRunOpen(row);
-                return `
-                  <article class="pending-log-item${selectedClass}">
-                    <div class="pending-log-meta">
-                      <h5>${htmlEscape(row.product || "Run")}</h5>
-                      <p>
-                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.productionStartTime || "-")} | Units ${formatNum(Math.max(0, num(row.unitsProduced)), 0)}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
-                      </p>
-                    </div>
-                    <div class="pending-log-actions">
-                      <button type="button" class="table-edit-pill ghost-btn" data-super-run-edit="${row.id}">Edit</button>
-                      ${rowIsOpen ? `<button type="button" class="table-edit-pill finalise-pill" data-super-run-complete="${row.id}">Finalise</button>` : ""}
-                    </div>
-                  </article>
-                `;
-              })
-              .join("")}
-          </div>
-        `
-        : `<p class="muted pending-log-empty">No production runs for the current day or open runs for this shift.</p>`;
-    }
-
-    const downKeyDate = downDateInput.value || appState.supervisorSelectedDate;
-    const downEditableRows = (activeLine.downtimeRows || [])
-      .filter(
-        (row) =>
-          (
-            supervisorAutoListIncludesRow(row, downKeyDate, appState.supervisorSelectedShift, {
-              line: activeLine,
-              startField: "downtimeStart",
-              finishField: "downtimeFinish",
-              openPredicate: isDownOpen
-            })
-            || (
-              String(row?.date || "").trim() === String(downKeyDate || "").trim()
-              && !lineHasLoggedShiftRowsForDate(activeLine, row?.date)
-            )
-          ) &&
-          supervisorOwnsPendingLogRow(row, session)
-      )
-      .slice()
-      .sort((a, b) => {
-        const aOpen = isDownOpen(a);
-        const bOpen = isDownOpen(b);
-        if (aOpen !== bOpen) return aOpen ? -1 : 1;
-        const submittedCmp = String(b.submittedAt || "").localeCompare(String(a.submittedAt || ""));
-        if (submittedCmp !== 0) return submittedCmp;
-        return String(a.downtimeStart || "").localeCompare(String(b.downtimeStart || ""));
-      });
-    if (downLogIdInput && !downEditableRows.some((row) => row.id === downLogIdInput.value)) {
-      downLogIdInput.value = "";
-    }
-    if (downOpenList) {
-      downOpenList.innerHTML = downEditableRows.length
-        ? `
-          <div class="pending-log-list">
-            ${downEditableRows
-              .map((row) => {
-                const selectedClass = downLogIdInput?.value && downLogIdInput.value === row.id ? " active" : "";
-                const rowIsOpen = isDownOpen(row);
-                const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
-                const rowCategory = row.reasonCategory || parsedReason.reasonCategory || "Downtime";
-                const rowDetail = row.reasonDetail || parsedReason.reasonDetail || "";
-                const detailLabel = rowCategory === "Equipment"
-                  ? stageNameByIdForLine(activeLine, row.equipment || rowDetail) || "Equipment"
-                  : rowDetail;
-                return `
-                  <article class="pending-log-item${selectedClass}">
-                    <div class="pending-log-meta">
-                      <h5>${htmlEscape(rowCategory)}${detailLabel ? ` > ${htmlEscape(detailLabel)}` : ""}</h5>
-                      <p>
-                        ${htmlEscape(row.date || "-")} | Start ${htmlEscape(row.downtimeStart || "-")}${!rowIsOpen ? ' <span class="pending-complete-pill">Finalised</span>' : ""}
-                      </p>
-                    </div>
-                    <div class="pending-log-actions">
-                      <button type="button" class="table-edit-pill ghost-btn" data-super-down-edit="${row.id}">Edit</button>
-                      ${rowIsOpen ? `<button type="button" class="table-edit-pill finalise-pill" data-super-down-complete="${row.id}">Finalise</button>` : ""}
-                    </div>
-                  </article>
-                `;
-              })
-              .join("")}
-          </div>
-        `
-        : `<p class="muted pending-log-empty">No downtime logs for the current day or open logs for this shift.</p>`;
-    }
-  } else {
-    supervisorShiftTileEditId = "";
-    if (shiftLogIdInput) shiftLogIdInput.value = "";
-    if (runLogIdInput) runLogIdInput.value = "";
-    if (downLogIdInput) downLogIdInput.value = "";
-    if (shiftOpenList) shiftOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
-    if (runOpenList) runOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
-    if (downOpenList) downOpenList.innerHTML = `<p class="muted pending-log-empty">No assigned line selected.</p>`;
-  }
-  updateSupervisorProgressButtonLabels();
-
   const activeTab = ["superShift", "superRun", "superDown"].includes(appState.supervisorTab) ? appState.supervisorTab : "superShift";
   document.querySelectorAll("[data-supervisor-tab]").forEach((btn) => {
     const active = btn.dataset.supervisorTab === activeTab;
@@ -14763,7 +14580,70 @@ function renderHome() {
   document.querySelectorAll("#supervisorAppSection .data-section").forEach((section) => {
     section.classList.toggle("active", section.id === activeTab);
   });
+  assignedIds.forEach((id) => ensureManagerLogRowIds(appState.lines[id]));
+  const rowExistsOnAssignedLines = (type, logId) => {
+    const safeLogId = String(logId || "").trim();
+    if (!safeLogId) return false;
+    const rowsKey = type === "run" ? "runRows" : type === "downtime" ? "downtimeRows" : "shiftRows";
+    return assignedIds.some((id) =>
+      (appState.lines[id]?.[rowsKey] || []).some((row) => String(row?.id || "").trim() === safeLogId)
+    );
+  };
+  if (supervisorShiftTileEditId && !rowExistsOnAssignedLines("shift", supervisorShiftTileEditId)) {
+    supervisorShiftTileEditId = "";
+  }
+  if (shiftLogIdInput?.value && !rowExistsOnAssignedLines("shift", shiftLogIdInput.value)) {
+    shiftLogIdInput.value = "";
+  }
+  if (runLogIdInput?.value && !rowExistsOnAssignedLines("run", runLogIdInput.value)) {
+    runLogIdInput.value = "";
+  }
+  if (downLogIdInput?.value && !rowExistsOnAssignedLines("downtime", downLogIdInput.value)) {
+    downLogIdInput.value = "";
+  }
+  updateSupervisorProgressButtonLabels();
 
+  const currentSelectedLogId =
+    activeTab === "superRun"
+      ? String(runLogIdInput?.value || "").trim()
+      : activeTab === "superDown"
+        ? String(downLogIdInput?.value || "").trim()
+        : String(selectedSupervisorShiftLogId() || "").trim();
+  const isShiftOpen = (row) => isPendingShiftLogRow(row);
+  const isRunOpen = (row) => isPendingRunLogRow(row);
+  const isDownOpen = (row) => isPendingDowntimeLogRow(row);
+  const entryStatusHtml = (open) =>
+    `<span class="entry-status-pill ${open ? "is-open" : "is-finalised"}">${open ? "In Progress" : "Finalised"}</span>`;
+  const entryActionHtml = (log) => `
+    <div class="table-action-stack">
+      <button
+        type="button"
+        class="table-edit-pill"
+        data-super-entry-action="edit"
+        data-super-entry-type="${htmlEscape(log.entryType)}"
+        data-super-entry-id="${htmlEscape(log.logId)}"
+        data-super-entry-line-id="${htmlEscape(log.lineId)}"
+      >Edit</button>
+      ${log.isOpen
+        ? `
+          <button
+            type="button"
+            class="table-edit-pill finalise-pill"
+            data-super-entry-action="finalise"
+            data-super-entry-type="${htmlEscape(log.entryType)}"
+            data-super-entry-id="${htmlEscape(log.logId)}"
+            data-super-entry-line-id="${htmlEscape(log.lineId)}"
+          >Finalise</button>
+        `
+        : ""}
+    </div>
+  `;
+  const emptyLogLabel =
+    activeTab === "superRun"
+      ? "No production run submissions yet."
+      : activeTab === "superDown"
+        ? "No downtime submissions yet."
+        : "No shift submissions yet.";
   const logs = assignedIds
     .flatMap((id) => {
       const line = appState.lines[id];
@@ -14772,46 +14652,73 @@ function renderHome() {
         return (line.runRows || [])
           .filter((row) => row.submittedAt && isOperationalDate(String(row?.date || "")) && supervisorOwnsPendingLogRow(row, session))
           .map((row) => ({
+            entryType: "run",
+            logId: String(row.id || ""),
+            lineId: id,
             lineName: line.name,
             date: row.date,
             shift: resolveTimedLogShiftLabel(row, line, "productionStartTime", "finishTime"),
             type: "Run",
             summary: `${row.product || "-"} (${formatNum(row.unitsProduced, 0)} units)`,
-            supervisor: row.submittedBy || "-",
-            createdAt: row.submittedAt
+            supervisor: row.submittedBy || session?.name || session?.username || "-",
+            createdAt: row.submittedAt,
+            isOpen: isRunOpen(row),
+            sortValue: rowNewestSortValue(row, "productionStartTime")
           }));
       }
       if (activeTab === "superDown") {
         return (line.downtimeRows || [])
           .filter((row) => row.submittedAt && isOperationalDate(String(row?.date || "")) && supervisorOwnsPendingLogRow(row, session))
-          .map((row) => ({
-            lineName: line.name,
-            date: row.date,
-            shift: resolveTimedLogShiftLabel(row, line, "downtimeStart", "downtimeFinish"),
-            type: "Downtime",
-            summary: `${stageNameByIdForLine(line, row.equipment) || row.reasonCategory || "Downtime"}: ${row.reason || "-"}`,
-            supervisor: row.submittedBy || "-",
-            createdAt: row.submittedAt
-          }));
+          .map((row) => {
+            const parsedReason = parseDowntimeReasonParts(row.reason, row.equipment);
+            const reasonCategory = row.reasonCategory || parsedReason.reasonCategory || "Downtime";
+            const reasonDetail = row.reasonDetail || parsedReason.reasonDetail || "";
+            const detailLabel = reasonCategory === "Equipment"
+              ? stageNameByIdForLine(line, row.equipment || reasonDetail) || "Equipment"
+              : reasonDetail;
+            return {
+              entryType: "downtime",
+              logId: String(row.id || ""),
+              lineId: id,
+              lineName: line.name,
+              date: row.date,
+              shift: resolveTimedLogShiftLabel(row, line, "downtimeStart", "downtimeFinish"),
+              type: "Downtime",
+              summary: `${reasonCategory}${detailLabel ? ` > ${detailLabel}` : ""}${row.reason ? `: ${row.reason}` : ""}`,
+              supervisor: row.submittedBy || session?.name || session?.username || "-",
+              createdAt: row.submittedAt,
+              isOpen: isDownOpen(row),
+              sortValue: rowNewestSortValue(row, "downtimeStart")
+            };
+          });
       }
       return (line.shiftRows || [])
         .filter((row) => row.submittedAt && isOperationalDate(String(row?.date || "")) && supervisorOwnsPendingLogRow(row, session))
         .map((row) => ({
+          entryType: "shift",
+          logId: String(row.id || ""),
+          lineId: id,
           lineName: line.name,
           date: row.date,
           shift: row.shift,
           type: "Shift",
           summary: `${row.startTime || "-"} to ${row.finishTime || "-"}`,
-          supervisor: row.submittedBy || "-",
-          createdAt: row.submittedAt
+          supervisor: row.submittedBy || session?.name || session?.username || "-",
+          createdAt: row.submittedAt,
+          isOpen: isShiftOpen(row),
+          sortValue: rowNewestSortValue(row, "startTime")
         }));
     })
-    .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
-    .slice(0, 20)
     .sort((a, b) => {
       const dateCmp = String(b.date || "").localeCompare(String(a.date || ""));
       if (dateCmp !== 0) return dateCmp;
-      return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+      const sortDiff = num(b.sortValue) - num(a.sortValue);
+      if (sortDiff !== 0) return sortDiff;
+      const createdCmp = String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+      if (createdCmp !== 0) return createdCmp;
+      const lineCmp = String(a.lineName || "").localeCompare(String(b.lineName || ""), undefined, { sensitivity: "base" });
+      if (lineCmp !== 0) return lineCmp;
+      return String(b.logId || "").localeCompare(String(a.logId || ""));
     });
 
   const groupedLogs = logs.reduce((groups, log) => {
@@ -14835,23 +14742,25 @@ function renderHome() {
   entryList.innerHTML = logs.length
     ? `
       <table>
-        <thead><tr><th>Line</th><th>Shift</th><th>Type</th><th>Details</th><th>By</th></tr></thead>
+        <thead><tr><th>Line</th><th>Shift</th><th>Type</th><th>Details</th><th>Status</th><th>By</th><th></th></tr></thead>
         <tbody>
           ${groupedLogs
             .map(
               (group) => `
                 <tr class="entry-date-divider">
-                  <td colspan="5">${htmlEscape(group.label)}</td>
+                  <td colspan="7">${htmlEscape(group.label)}</td>
                 </tr>
                 ${group.logs
                   .map(
                     (log) => `
-                      <tr>
+                      <tr${currentSelectedLogId && currentSelectedLogId === log.logId ? ' class="entry-log-row-active"' : ""}>
                         <td>${htmlEscape(log.lineName)}</td>
                         <td>${htmlEscape(log.shift)}</td>
                         <td>${htmlEscape(log.type)}</td>
                         <td>${htmlEscape(log.summary)}</td>
+                        <td>${entryStatusHtml(log.isOpen)}</td>
                         <td>${htmlEscape(log.supervisor)}</td>
+                        <td class="entry-actions-cell">${entryActionHtml(log)}</td>
                       </tr>
                     `
                   )
@@ -14862,7 +14771,7 @@ function renderHome() {
         </tbody>
       </table>
     `
-    : `<p class="muted">No supervisor submissions yet.</p>`;
+    : `<p class="muted">${htmlEscape(emptyLogLabel)}</p>`;
 
   entryCards.innerHTML = logs.length
     ? groupedLogs
@@ -14874,10 +14783,15 @@ function renderHome() {
               ${group.logs
                 .map(
                   (log) => `
-                    <article class="entry-card">
-                      <h4>${htmlEscape(log.type)} | ${htmlEscape(log.lineName)}</h4>
-                      <p>${htmlEscape(log.shift)} | ${htmlEscape(log.summary)}</p>
-                      <p>By ${htmlEscape(log.supervisor)}</p>
+                    <article class="entry-card${currentSelectedLogId && currentSelectedLogId === log.logId ? " entry-log-row-active" : ""}">
+                      <div class="entry-card-meta">
+                        <h4>${htmlEscape(log.type)} | ${htmlEscape(log.lineName)}</h4>
+                        <p>${htmlEscape(log.shift)} | ${htmlEscape(log.summary)}</p>
+                        <p>${entryStatusHtml(log.isOpen)} By ${htmlEscape(log.supervisor)}</p>
+                      </div>
+                      <div class="entry-card-actions">
+                        ${entryActionHtml(log)}
+                      </div>
                     </article>
                   `
                 )
@@ -14887,7 +14801,7 @@ function renderHome() {
         `
         )
         .join("")
-    : `<p class="muted">No supervisor submissions yet.</p>`;
+    : `<p class="muted">${htmlEscape(emptyLogLabel)}</p>`;
 
   const supervisorActions = supervisorActionsForUsername(session?.username).slice(0, 50);
   const supervisorActionTicketsHtml = renderSupervisorActionTickets(supervisorActions);

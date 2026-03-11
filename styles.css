@@ -2098,6 +2098,12 @@ button {
   background: #f8fbfd;
 }
 
+.entry-card.entry-log-row-active {
+  border-color: #9ecf9a;
+  box-shadow: 0 0 0 1px #9ecf9a inset;
+  background: #f2f8f0;
+}
+
 .entry-card h4 {
   margin: 0 0 0.2rem;
   font-size: 0.9rem;
@@ -2107,6 +2113,50 @@ button {
   margin: 0;
   font-size: 0.82rem;
   color: #415263;
+}
+
+.entry-card-meta {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.entry-card-actions {
+  margin-top: 0.5rem;
+}
+
+.entry-actions-cell {
+  width: 1%;
+  white-space: nowrap;
+}
+
+.entry-log-row-active td {
+  background: #f2f8f0;
+}
+
+.entry-status-pill {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 0.12rem 0.45rem;
+  border: 1px solid #d1dbe5;
+  background: #f2f6f9;
+  color: #496071;
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
+}
+
+.entry-status-pill.is-open {
+  border-color: #efc27a;
+  background: #fff1d7;
+  color: #8d5f18;
+}
+
+.entry-status-pill.is-finalised {
+  border-color: #1f7f6b;
+  background: #eaf9f5;
+  color: #0f6b56;
 }
 
 .entry-date-divider td {
