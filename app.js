@@ -5451,6 +5451,7 @@ function bindHome() {
   const connectDataSourceBtn = document.getElementById("connectDataSourceBtn");
   const dataSourcesList = document.getElementById("dataSourcesList");
   const incomingDataSourcesStatus = document.getElementById("incomingDataSourcesStatus");
+  const addManagerBtn = document.getElementById("addManagerBtn");
   const addSupervisorBtn = document.getElementById("addSupervisorBtn");
   const manageSupervisorsModal = document.getElementById("manageSupervisorsModal");
   const closeManageSupervisorsModalBtn = document.getElementById("closeManageSupervisorsModal");
@@ -5463,6 +5464,12 @@ function bindHome() {
   const lineGroupManagerList = document.getElementById("lineGroupManagerList");
   const lineGroupCreateForm = document.getElementById("lineGroupCreateForm");
   const newLineGroupNameInput = document.getElementById("newLineGroupName");
+  const addManagerModal = document.getElementById("addManagerModal");
+  const closeAddManagerModalBtn = document.getElementById("closeAddManagerModal");
+  const addManagerForm = document.getElementById("addManagerForm");
+  const newManagerNameInput = document.getElementById("newManagerName");
+  const newManagerUsernameInput = document.getElementById("newManagerUsername");
+  const newManagerPasswordInput = document.getElementById("newManagerPassword");
   const addSupervisorModal = document.getElementById("addSupervisorModal");
   const closeAddSupervisorModalBtn = document.getElementById("closeAddSupervisorModal");
   const addSupervisorForm = document.getElementById("addSupervisorForm");
@@ -6042,6 +6049,20 @@ function bindHome() {
     manageProductCatalogModal.classList.remove("open");
     manageProductCatalogModal.setAttribute("aria-hidden", "true");
     closeProductLineAssignModal();
+  };
+
+  const openAddManagerModal = () => {
+    if (!addManagerModal || !addManagerForm) return;
+    addManagerForm.reset();
+    addManagerModal.classList.add("open");
+    addManagerModal.setAttribute("aria-hidden", "false");
+    newManagerNameInput?.focus();
+  };
+
+  const closeAddManagerModal = () => {
+    if (!addManagerModal) return;
+    addManagerModal.classList.remove("open");
+    addManagerModal.setAttribute("aria-hidden", "true");
   };
 
   const setConnectDataSourceTestFeedback = (message = "", tone = "") => {
@@ -7144,6 +7165,14 @@ function bindHome() {
     });
   }
 
+  if (addManagerBtn) addManagerBtn.addEventListener("click", openAddManagerModal);
+  if (closeAddManagerModalBtn) closeAddManagerModalBtn.addEventListener("click", closeAddManagerModal);
+  if (addManagerModal) {
+    addManagerModal.addEventListener("click", (event) => {
+      if (event.target === addManagerModal) closeAddManagerModal();
+    });
+  }
+
   addSupervisorBtn.addEventListener("click", openAddSupervisorModal);
   closeAddSupervisorModalBtn.addEventListener("click", closeAddSupervisorModal);
   addSupervisorModal.addEventListener("click", (event) => {
@@ -7315,6 +7344,39 @@ function bindHome() {
       alert(`Could not update supervisor.\n${error?.message || "Please try again."}`);
     }
   });
+
+  if (addManagerForm) {
+    addManagerForm.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const name = String(newManagerNameInput?.value || "").trim();
+      const username = String(newManagerUsernameInput?.value || "").trim().toLowerCase();
+      const password = String(newManagerPasswordInput?.value || "").trim();
+      if (!name || !username || !password) {
+        alert("Name, username and password are required.");
+        return;
+      }
+      if (password.length < 6) {
+        alert("Password must be at least 6 characters.");
+        return;
+      }
+      try {
+        const session = await ensureManagerBackendSession();
+        await apiRequest("/api/managers", {
+          method: "POST",
+          token: session.backendToken,
+          body: {
+            name,
+            username,
+            password
+          }
+        });
+        closeAddManagerModal();
+      } catch (error) {
+        console.warn("Manager create sync failed:", error);
+        alert(`Could not create manager.\n${error?.message || "Please try again."}`);
+      }
+    });
+  }
 
   addSupervisorForm.addEventListener("submit", async (event) => {
     event.preventDefault();

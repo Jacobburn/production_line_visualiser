@@ -2787,26 +2787,30 @@ button {
   border-bottom: 1px solid #d8e1eb;
 }
 
-#addSupervisorModal .modal-head h2 {
+#addSupervisorModal .modal-head h2,
+#addManagerModal .modal-head h2 {
   font-size: clamp(1.85rem, 2.5vw, 2.3rem);
   line-height: 1.04;
 }
 
-#addSupervisorModal .modal-title-block .muted {
+#addSupervisorModal .modal-title-block .muted,
+#addManagerModal .modal-title-block .muted {
   margin-top: 0.35rem;
   max-width: 58ch;
   font-size: 1rem;
   line-height: 1.33;
 }
 
-#addSupervisorModal .add-supervisor-form {
+#addSupervisorModal .add-supervisor-form,
+#addManagerModal .add-supervisor-form {
   display: grid;
   grid-template-columns: 1fr;
   gap: 0.85rem;
   margin-bottom: 0;
 }
 
-#addSupervisorModal .add-supervisor-section {
+#addSupervisorModal .add-supervisor-section,
+#addManagerModal .add-supervisor-section {
   border: 1px solid #d7e1ec;
   border-radius: 0.86rem;
   background: linear-gradient(180deg, #fdfefe 0%, #f8fbfd 100%);
@@ -2815,18 +2819,21 @@ button {
   gap: 0.45rem;
 }
 
-#addSupervisorModal .add-supervisor-fields {
+#addSupervisorModal .add-supervisor-fields,
+#addManagerModal .add-supervisor-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 0.55rem;
 }
 
-#addSupervisorModal .add-supervisor-field {
+#addSupervisorModal .add-supervisor-field,
+#addManagerModal .add-supervisor-field {
   display: grid;
   gap: 0.22rem;
 }
 
-#addSupervisorModal .add-supervisor-field > span {
+#addSupervisorModal .add-supervisor-field > span,
+#addManagerModal .add-supervisor-field > span {
   margin: 0 0 0.05rem;
   font-size: 0.74rem;
   font-weight: 700;
@@ -2835,7 +2842,8 @@ button {
   color: #607387;
 }
 
-#addSupervisorModal .add-supervisor-field input {
+#addSupervisorModal .add-supervisor-field input,
+#addManagerModal .add-supervisor-field input {
   height: 48px;
   border-radius: 0.72rem;
   padding: 0.55rem 0.68rem;
@@ -2843,11 +2851,13 @@ button {
   background: #ffffff;
 }
 
-#addSupervisorModal .add-supervisor-access {
+#addSupervisorModal .add-supervisor-access,
+#addManagerModal .add-supervisor-access {
   gap: 0;
 }
 
-#addSupervisorModal .add-supervisor-access .supervisor-assignment-group {
+#addSupervisorModal .add-supervisor-access .supervisor-assignment-group,
+#addManagerModal .add-supervisor-access .supervisor-assignment-group {
   gap: 0.45rem;
   padding: 0.62rem;
   border: 1px solid #d7e1ec;
@@ -2855,17 +2865,20 @@ button {
   background: #ffffff;
 }
 
-#addSupervisorModal .add-supervisor-section-head {
+#addSupervisorModal .add-supervisor-section-head,
+#addManagerModal .add-supervisor-section-head {
   display: grid;
   gap: 0.2rem;
 }
 
-#addSupervisorModal .add-supervisor-section-head .muted {
+#addSupervisorModal .add-supervisor-section-head .muted,
+#addManagerModal .add-supervisor-section-head .muted {
   margin: 0;
   font-size: 0.85rem;
 }
 
-#addSupervisorModal .supervisor-access-grid {
+#addSupervisorModal .supervisor-access-grid,
+#addManagerModal .supervisor-access-grid {
   border: 0;
   border-radius: 0;
   padding: 0;
@@ -2873,18 +2886,21 @@ button {
   background: transparent;
 }
 
-#addSupervisorModal .supervisor-access-row {
+#addSupervisorModal .supervisor-access-row,
+#addManagerModal .supervisor-access-row {
   padding: 0.52rem 0.6rem;
   border-radius: 0.7rem;
   border: 1px solid #dbe5ef;
   background: #f9fcfe;
 }
 
-#addSupervisorModal .supervisor-access-shifts {
+#addSupervisorModal .supervisor-access-shifts,
+#addManagerModal .supervisor-access-shifts {
   gap: 0.32rem;
 }
 
-#addSupervisorModal .supervisor-shift-pill {
+#addSupervisorModal .supervisor-shift-pill,
+#addManagerModal .supervisor-shift-pill {
   padding: 0.24rem 0.68rem;
   border-color: #cedae6;
   background: #edf3f8;
@@ -2892,23 +2908,29 @@ button {
 }
 
 #addSupervisorModal .supervisor-shift-pill.is-selected,
-#addSupervisorModal .supervisor-shift-pill:has(input[type="checkbox"]:checked) {
+#addSupervisorModal .supervisor-shift-pill:has(input[type="checkbox"]:checked),
+#addManagerModal .supervisor-shift-pill.is-selected,
+#addManagerModal .supervisor-shift-pill:has(input[type="checkbox"]:checked) {
   border-color: var(--accent-strong);
   background: var(--accent);
   color: var(--brand-dark);
 }
 
 #addSupervisorModal .supervisor-shift-pill.is-selected span,
-#addSupervisorModal .supervisor-shift-pill:has(input[type="checkbox"]:checked) span {
+#addSupervisorModal .supervisor-shift-pill:has(input[type="checkbox"]:checked) span,
+#addManagerModal .supervisor-shift-pill.is-selected span,
+#addManagerModal .supervisor-shift-pill:has(input[type="checkbox"]:checked) span {
   color: var(--brand-dark);
 }
 
-#addSupervisorModal .add-supervisor-actions {
+#addSupervisorModal .add-supervisor-actions,
+#addManagerModal .add-supervisor-actions {
   display: flex;
   align-items: center;
 }
 
-#addSupervisorModal .add-supervisor-actions button {
+#addSupervisorModal .add-supervisor-actions button,
+#addManagerModal .add-supervisor-actions button {
   min-width: 232px;
   padding: 0.64rem 1.05rem;
 }
@@ -3866,19 +3888,23 @@ th {
     width: 100%;
   }
 
-  #addSupervisorModal .modal-card {
+  #addSupervisorModal .modal-card,
+  #addManagerModal .modal-card {
     padding: 0.85rem;
   }
 
-  #addSupervisorModal .modal-head {
+  #addSupervisorModal .modal-head,
+  #addManagerModal .modal-head {
     align-items: flex-start;
   }
 
-  #addSupervisorModal .add-supervisor-fields {
+  #addSupervisorModal .add-supervisor-fields,
+  #addManagerModal .add-supervisor-fields {
     grid-template-columns: 1fr;
   }
 
-  #addSupervisorModal .add-supervisor-actions button {
+  #addSupervisorModal .add-supervisor-actions button,
+  #addManagerModal .add-supervisor-actions button {
     width: 100%;
     min-width: 0;
   }
