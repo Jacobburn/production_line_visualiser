@@ -848,11 +848,16 @@ async function findMissingActiveLineGroupIds(groupIds) {
 }
 
 async function writeAudit({ lineId = null, actorUserId = null, actorName = null, actorRole = null, action, details = '' }) {
-  await dbQuery(
-    `INSERT INTO audit_events(line_id, actor_user_id, actor_name, actor_role, action, details)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [lineId, actorUserId, actorName, actorRole, action, details]
-  );
+  try {
+    await ensureAuditSchema();
+    await dbQuery(
+      `INSERT INTO audit_events(line_id, actor_user_id, actor_name, actor_role, action, details)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [lineId, actorUserId, actorName, actorRole, action, details]
+    );
+  } catch (error) {
+    console.warn('[audit] Audit write skipped:', error?.message || error);
+  }
 }
 
 function normalizeIsoDate(value) {
@@ -1225,6 +1230,46 @@ function buildPermanentSampleData(stageRows = [], { days = 84 } = {}) {
   }
 
   return { shiftRows, breakRows, runRows, downtimeRows };
+}
+
+let auditSchemaReady = false;
+let auditSchemaPromise = null;
+
+async function ensureAuditSchema() {
+  if (auditSchemaReady) return;
+  if (auditSchemaPromise) return auditSchemaPromise;
+  auditSchemaPromise = (async () => {
+    await dbQuery(
+      `CREATE TABLE IF NOT EXISTS audit_events (
+         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+         line_id UUID REFERENCES production_lines(id) ON DELETE CASCADE,
+         actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+         actor_name TEXT,
+         actor_role TEXT,
+         action TEXT NOT NULL,
+         details TEXT,
+         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+       )`
+    );
+    await dbQuery(
+      `ALTER TABLE audit_events
+       ADD COLUMN IF NOT EXISTS actor_role TEXT`
+    );
+    await dbQuery(
+      `ALTER TABLE audit_events
+       ADD COLUMN IF NOT EXISTS details TEXT`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_audit_events_line_created
+       ON audit_events(line_id, created_at DESC)`
+    );
+    auditSchemaReady = true;
+  })()
+    .catch((error) => {
+      auditSchemaPromise = null;
+      throw error;
+    });
+  return auditSchemaPromise;
 }
 
 let lineGroupSchemaReady = false;
