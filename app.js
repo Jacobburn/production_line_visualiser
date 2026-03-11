@@ -14781,24 +14781,56 @@ function renderHome() {
         }));
     })
     .sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")))
-    .slice(0, 20);
+    .slice(0, 20)
+    .sort((a, b) => {
+      const dateCmp = String(b.date || "").localeCompare(String(a.date || ""));
+      if (dateCmp !== 0) return dateCmp;
+      return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+    });
+
+  const groupedLogs = logs.reduce((groups, log) => {
+    const logDate = String(log?.date || "").trim();
+    const label = isIsoDateValue(logDate)
+      ? formatIsoDateLabel(logDate, { weekday: "long", day: "numeric", month: "long", year: "numeric" })
+      : (logDate || "Unknown Date");
+    const currentGroup = groups[groups.length - 1];
+    if (currentGroup && currentGroup.date === logDate) {
+      currentGroup.logs.push(log);
+      return groups;
+    }
+    groups.push({
+      date: logDate,
+      label,
+      logs: [log]
+    });
+    return groups;
+  }, []);
 
   entryList.innerHTML = logs.length
     ? `
       <table>
-        <thead><tr><th>Line</th><th>Date</th><th>Shift</th><th>Type</th><th>Details</th><th>By</th></tr></thead>
+        <thead><tr><th>Line</th><th>Shift</th><th>Type</th><th>Details</th><th>By</th></tr></thead>
         <tbody>
-          ${logs
+          ${groupedLogs
             .map(
-              (log) =>
-                `<tr>
-                  <td>${htmlEscape(log.lineName)}</td>
-                  <td>${htmlEscape(log.date)}</td>
-                  <td>${htmlEscape(log.shift)}</td>
-                  <td>${htmlEscape(log.type)}</td>
-                  <td>${htmlEscape(log.summary)}</td>
-                  <td>${htmlEscape(log.supervisor)}</td>
-                </tr>`
+              (group) => `
+                <tr class="entry-date-divider">
+                  <td colspan="5">${htmlEscape(group.label)}</td>
+                </tr>
+                ${group.logs
+                  .map(
+                    (log) => `
+                      <tr>
+                        <td>${htmlEscape(log.lineName)}</td>
+                        <td>${htmlEscape(log.shift)}</td>
+                        <td>${htmlEscape(log.type)}</td>
+                        <td>${htmlEscape(log.summary)}</td>
+                        <td>${htmlEscape(log.supervisor)}</td>
+                      </tr>
+                    `
+                  )
+                  .join("")}
+              `
             )
             .join("")}
         </tbody>
@@ -14807,14 +14839,25 @@ function renderHome() {
     : `<p class="muted">No supervisor submissions yet.</p>`;
 
   entryCards.innerHTML = logs.length
-    ? logs
+    ? groupedLogs
         .map(
-          (log) => `
-          <article class="entry-card">
-            <h4>${htmlEscape(log.type)} | ${htmlEscape(log.lineName)}</h4>
-            <p>${htmlEscape(log.date)} ${htmlEscape(log.shift)} | ${htmlEscape(log.summary)}</p>
-            <p>By ${htmlEscape(log.supervisor)}</p>
-          </article>
+          (group) => `
+          <section class="entry-card-group">
+            <h4 class="entry-group-title">${htmlEscape(group.label)}</h4>
+            <div class="entry-card-group-list">
+              ${group.logs
+                .map(
+                  (log) => `
+                    <article class="entry-card">
+                      <h4>${htmlEscape(log.type)} | ${htmlEscape(log.lineName)}</h4>
+                      <p>${htmlEscape(log.shift)} | ${htmlEscape(log.summary)}</p>
+                      <p>By ${htmlEscape(log.supervisor)}</p>
+                    </article>
+                  `
+                )
+                .join("")}
+            </div>
+          </section>
         `
         )
         .join("")
