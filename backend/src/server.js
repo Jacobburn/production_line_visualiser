@@ -1475,6 +1475,37 @@ async function ensureLogSchema() {
   if (logSchemaReady) return;
   if (logSchemaPromise) return logSchemaPromise;
   logSchemaPromise = (async () => {
+    // Older staging databases can still have legacy shift columns on timed logs.
+    await dbQuery(
+      `ALTER TABLE run_logs
+       DROP CONSTRAINT IF EXISTS run_logs_shift_check`
+    );
+    await dbQuery(
+      `ALTER TABLE downtime_logs
+       DROP CONSTRAINT IF EXISTS downtime_logs_shift_check`
+    );
+    await dbQuery(
+      `DROP INDEX IF EXISTS idx_run_logs_line_date_shift`
+    );
+    await dbQuery(
+      `DROP INDEX IF EXISTS idx_down_logs_line_date_shift`
+    );
+    await dbQuery(
+      `ALTER TABLE run_logs
+       DROP COLUMN IF EXISTS shift`
+    );
+    await dbQuery(
+      `ALTER TABLE downtime_logs
+       DROP COLUMN IF EXISTS shift`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_run_logs_line_date
+       ON run_logs(line_id, date)`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_down_logs_line_date
+       ON downtime_logs(line_id, date)`
+    );
     await dbQuery(
       `ALTER TABLE shift_logs
        ADD COLUMN IF NOT EXISTS notes TEXT NOT NULL DEFAULT ''`
@@ -3857,6 +3888,7 @@ app.post('/api/lines/:lineId/clear-data', authMiddleware, requireRole('manager')
 }));
 
 app.post('/api/lines/:lineId/load-sample-data', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLogSchema();
   const lineId = req.params.lineId;
   if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
   const parsed = loadPermanentSampleDataSchema.safeParse(req.body || {});
