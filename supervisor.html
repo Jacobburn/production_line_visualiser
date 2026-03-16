@@ -1094,6 +1094,25 @@
       </div>
     </div>
 
+    <div id="dayVizAddRecordModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card day-viz-add-record-modal-card" role="dialog" aria-modal="true" aria-labelledby="dayVizAddRecordTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="dayVizAddRecordTitle">Add Record</h2>
+            <p id="dayVizAddRecordMeta" class="muted">Add a log for the selected day visualiser lane.</p>
+          </div>
+          <button id="closeDayVizAddRecordModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="dayVizAddRecordForm" class="form-grid day-viz-add-record-form">
+          <div id="dayVizAddRecordFields" class="day-viz-add-record-fields"></div>
+          <div class="form-submit-actions day-viz-add-record-actions">
+            <p id="dayVizAddRecordStatus" class="muted day-viz-add-record-status" aria-live="polite"></p>
+            <button id="dayVizAddRecordSubmit" type="submit">Add Record</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
     <div id="builderModal" class="modal-overlay" aria-hidden="true">
       <div class="modal-card builder-modal-card" role="dialog" aria-modal="true" aria-labelledby="builderTitle">
         <div class="modal-head">

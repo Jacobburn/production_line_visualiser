@@ -143,6 +143,7 @@ let supervisorShiftTileEditId = "";
 let runCrewingPatternModalState = null;
 let dayVizBlockModalState = null;
 let dayVizBlockModalBusy = false;
+let dayVizAddRecordModalState = null;
 let trendModalContext = { type: "stage", metricKey: "" };
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 appState.lineGroups = normalizeLineGroups(appState.lineGroups);
@@ -4397,6 +4398,253 @@ async function deleteManagerDowntimeLog(logId) {
     method: "DELETE",
     token: session.backendToken
   });
+}
+
+function managerDowntimeAuditLabel(line, {
+  equipment = "",
+  reasonCategory = "",
+  reasonDetail = ""
+} = {}) {
+  return (
+    stageNameByIdForLine(line || state, equipment) ||
+    downtimeDetailLabel(line || state, reasonCategory, reasonDetail) ||
+    reasonCategory ||
+    "line"
+  );
+}
+
+async function createManagerShiftLogEntry(data = {}, { line = state } = {}) {
+  const activeLine = line || state;
+  const lineId = String(activeLine?.id || "").trim();
+  if (!lineId) throw new Error("No production line selected.");
+  const next = {
+    date: String(data.date || "").trim(),
+    shift: String(data.shift || "").trim(),
+    startTime: String(data.startTime || "").trim(),
+    finishTime: String(data.finishTime || "").trim(),
+    notes: String(data.notes || "").trim()
+  };
+  if (!rowIsValidDateShift(next.date, next.shift)) {
+    throw new Error("Date and shift are required. Weekend dates are excluded.");
+  }
+  if (!strictTimeValid(next.startTime) || !strictTimeValid(next.finishTime)) {
+    throw new Error("Shift start and finish must be HH:MM (24h).");
+  }
+  const saved = await syncManagerShiftLog({
+    lineId,
+    date: next.date,
+    shift: next.shift,
+    startTime: next.startTime,
+    finishTime: next.finishTime,
+    notes: next.notes
+  });
+  if (!Array.isArray(activeLine.shiftRows)) activeLine.shiftRows = [];
+  const row = {
+    ...next,
+    id: saved?.id || data.id || makeLocalLogId("shift"),
+    submittedBy: "manager",
+    submittedAt: saved?.submittedAt || nowIso()
+  };
+  activeLine.shiftRows.push(row);
+  addAudit(activeLine, "MANAGER_SHIFT_LOG", `Manager logged ${next.shift} shift for ${next.date}`);
+  saveState();
+  return row;
+}
+
+function managerBreakShiftChoices(line, date) {
+  return (Array.isArray(line?.shiftRows) ? line.shiftRows : [])
+    .filter((row) => String(row?.date || "").trim() === String(date || "").trim())
+    .filter((row) => SHIFT_OPTIONS.includes(String(row?.shift || "").trim()))
+    .filter((row) => strictTimeValid(String(row?.startTime || "").trim()) && strictTimeValid(String(row?.finishTime || "").trim()))
+    .filter((row) => UUID_RE.test(String(row?.id || "").trim()))
+    .slice()
+    .sort((a, b) => {
+      const startCmp = String(a?.startTime || "").localeCompare(String(b?.startTime || ""));
+      if (startCmp !== 0) return startCmp;
+      return rowNewestSortValue(b, "startTime") - rowNewestSortValue(a, "startTime");
+    })
+    .map((row) => ({
+      id: String(row.id || "").trim(),
+      shift: String(row.shift || "").trim(),
+      label: `${row.shift} | ${formatTime12h(row.startTime)} - ${formatTime12h(row.finishTime)}`
+    }));
+}
+
+async function createManagerBreakLogEntry(data = {}, { line = state } = {}) {
+  const activeLine = line || state;
+  const shiftLogId = String(data.shiftLogId || "").trim();
+  const breakStart = String(data.breakStart || "").trim();
+  const breakFinish = String(data.breakFinish || "").trim();
+  if (!UUID_RE.test(shiftLogId)) {
+    throw new Error("Select a saved shift record before adding a break.");
+  }
+  if (!strictTimeValid(breakStart) || !strictTimeValid(breakFinish)) {
+    throw new Error("Break start and finish must be HH:MM (24h).");
+  }
+  const parentShift = (Array.isArray(activeLine?.shiftRows) ? activeLine.shiftRows : [])
+    .find((row) => String(row?.id || "").trim() === shiftLogId);
+  if (!parentShift) {
+    throw new Error("The selected shift record could not be found.");
+  }
+  const saved = await startManagerShiftBreak(shiftLogId, breakStart, breakFinish);
+  if (!Array.isArray(activeLine.breakRows)) activeLine.breakRows = [];
+  const row = {
+    id: saved?.id || makeLocalLogId("break"),
+    shiftLogId: saved?.shiftLogId || shiftLogId,
+    date: String(saved?.date || parentShift.date || data.date || "").trim(),
+    shift: String(saved?.shift || parentShift.shift || "").trim(),
+    breakStart,
+    breakFinish,
+    submittedBy: "manager",
+    submittedAt: saved?.submittedAt || nowIso()
+  };
+  activeLine.breakRows.push(row);
+  addAudit(activeLine, "MANAGER_BREAK_LOG", `Manager logged ${row.shift} break for ${row.date}`);
+  saveState();
+  return row;
+}
+
+async function createManagerRunLogEntry(
+  data = {},
+  {
+    line = state,
+    runCrewingPatternInput = null,
+    runCrewingPatternSummary = null,
+    selectedShift = state?.selectedShift || "Day"
+  } = {}
+) {
+  const activeLine = line || state;
+  const lineId = String(activeLine?.id || "").trim();
+  if (!lineId) throw new Error("No production line selected.");
+  const next = {
+    date: String(data.date || "").trim(),
+    product: catalogProductCanonicalName(String(data.product || "").trim()),
+    productionStartTime: String(data.productionStartTime || "").trim(),
+    finishTime: String(data.finishTime || "").trim(),
+    unitsProduced: num(data.unitsProduced),
+    notes: String(data.notes || "").trim()
+  };
+  if (!isOperationalDate(next.date)) {
+    throw new Error("Date is required. Weekend dates are excluded.");
+  }
+  if (!next.product) {
+    throw new Error("Product is required.");
+  }
+  if (!isCatalogProductName(next.product)) {
+    throw new Error("Select a product from Manage Products before starting a run.");
+  }
+  if (!strictTimeValid(next.productionStartTime) || !strictTimeValid(next.finishTime)) {
+    throw new Error("Production start and finish must be HH:MM (24h).");
+  }
+  if (next.unitsProduced < 0) {
+    throw new Error("Units produced cannot be negative.");
+  }
+  const patternShift = preferredTimedLogShift(
+    activeLine,
+    next.date,
+    next.productionStartTime,
+    next.finishTime,
+    fallbackShiftValue(selectedShift)
+  );
+  const rawPattern = Object.prototype.hasOwnProperty.call(data, "runCrewingPattern")
+    ? data.runCrewingPattern
+    : runCrewingPatternInput?.value || "";
+  const runCrewingPattern = normalizeRunCrewingPattern(rawPattern, activeLine, patternShift, { fallbackToIdeal: false });
+  if (!Object.keys(runCrewingPattern).length) {
+    throw new Error("Set crewing pattern for this run before saving.");
+  }
+  if (runCrewingPatternInput || runCrewingPatternSummary) {
+    setRunCrewingPatternField(
+      runCrewingPatternInput,
+      runCrewingPatternSummary,
+      activeLine,
+      patternShift,
+      runCrewingPattern,
+      { fallbackToIdeal: false }
+    );
+  }
+  const saved = await syncManagerRunLog({
+    lineId,
+    date: next.date,
+    product: next.product,
+    setUpStartTime: "",
+    productionStartTime: next.productionStartTime,
+    finishTime: next.finishTime,
+    unitsProduced: next.unitsProduced,
+    notes: next.notes,
+    runCrewingPattern
+  });
+  if (!Array.isArray(activeLine.runRows)) activeLine.runRows = [];
+  const row = {
+    ...next,
+    setUpStartTime: "",
+    assignedShift: "",
+    shift: "",
+    runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || runCrewingPattern, activeLine, patternShift, { fallbackToIdeal: false }),
+    id: saved?.id || data.id || makeLocalLogId("run"),
+    submittedBy: "manager",
+    submittedAt: saved?.submittedAt || nowIso()
+  };
+  activeLine.runRows.push(row);
+  addAudit(activeLine, "MANAGER_RUN_LOG", `Manager logged run ${next.product} (${next.unitsProduced} units)`);
+  saveState();
+  return row;
+}
+
+async function createManagerDowntimeLogEntry(data = {}, { line = state } = {}) {
+  const activeLine = line || state;
+  const lineId = String(activeLine?.id || "").trim();
+  if (!lineId) throw new Error("No production line selected.");
+  const next = {
+    date: String(data.date || "").trim(),
+    downtimeStart: String(data.downtimeStart || "").trim(),
+    downtimeFinish: String(data.downtimeFinish || "").trim(),
+    reasonCategory: String(data.reasonCategory || "").trim(),
+    reasonDetail: String(data.reasonDetail || "").trim(),
+    reasonNote: String(data.reasonNote || "").trim(),
+    notes: String(data.notes || "").trim()
+  };
+  if (!isOperationalDate(next.date)) {
+    throw new Error("Date is required. Weekend dates are excluded.");
+  }
+  if (!strictTimeValid(next.downtimeStart) || !strictTimeValid(next.downtimeFinish)) {
+    throw new Error("Downtime start and finish must be HH:MM (24h).");
+  }
+  if (!next.reasonCategory) {
+    throw new Error("Reason group is required.");
+  }
+  if (!next.reasonDetail) {
+    throw new Error("Reason detail is required.");
+  }
+  next.equipment = next.reasonCategory === "Equipment" ? next.reasonDetail : "";
+  next.reason = buildDowntimeReasonText(activeLine, next.reasonCategory, next.reasonDetail, next.reasonNote);
+  const saved = await syncManagerDowntimeLog({
+    lineId,
+    date: next.date,
+    downtimeStart: next.downtimeStart,
+    downtimeFinish: next.downtimeFinish,
+    equipment: next.equipment,
+    reason: next.reason || "",
+    notes: next.notes
+  });
+  if (!Array.isArray(activeLine.downtimeRows)) activeLine.downtimeRows = [];
+  const row = {
+    ...next,
+    assignedShift: "",
+    shift: "",
+    excludeFromCalculation: normalizeDowntimeCalculationFlag(saved?.excludeFromCalculation),
+    id: saved?.id || data.id || makeLocalLogId("down"),
+    submittedBy: "manager",
+    submittedAt: saved?.submittedAt || nowIso()
+  };
+  activeLine.downtimeRows.push(row);
+  addAudit(
+    activeLine,
+    "MANAGER_DOWNTIME_LOG",
+    `Manager logged downtime on ${managerDowntimeAuditLabel(activeLine, next)}`
+  );
+  saveState();
+  return row;
 }
 
 async function saveLineModelToBackend(lineId) {
@@ -9748,35 +9996,10 @@ function bindForms() {
   shiftForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    data.notes = String(data.notes || "").trim();
-    if (!rowIsValidDateShift(data.date, data.shift)) {
-      alert("Date and shift are required. Weekend dates are excluded.");
-      return;
-    }
-    if (!strictTimeValid(data.startTime) || !strictTimeValid(data.finishTime)) {
-      alert("Shift start and finish must be HH:MM (24h).");
-      return;
-    }
     try {
-      const payload = {
-        lineId: state.id,
-        date: data.date,
-        shift: data.shift,
-        startTime: data.startTime,
-        finishTime: data.finishTime,
-        notes: data.notes
-      };
-      const saved = await syncManagerShiftLog(payload);
-      state.shiftRows.push({
-        ...data,
-        id: saved?.id || data.id || makeLocalLogId("shift"),
-        submittedBy: "manager",
-        submittedAt: saved?.submittedAt || nowIso()
-      });
-      addAudit(state, "MANAGER_SHIFT_LOG", `Manager logged ${data.shift} shift for ${data.date}`);
+      const data = Object.fromEntries(new FormData(form).entries());
+      await createManagerShiftLogEntry(data);
       form.reset();
-      saveState();
       renderAll();
     } catch (error) {
       alert(`Could not save shift log.\n${error?.message || "Please try again."}`);
@@ -9786,71 +10009,15 @@ function bindForms() {
   runForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    data.notes = String(data.notes || "").trim();
-    data.product = catalogProductCanonicalName(String(data.product || "").trim());
-    if (!isOperationalDate(data.date)) {
-      alert("Date is required. Weekend dates are excluded.");
-      return;
-    }
-    if (!data.product) {
-      alert("Product is required.");
-      return;
-    }
-    if (!isCatalogProductName(data.product)) {
-      alert("Select a product from Manage Products before starting a run.");
-      return;
-    }
-    if (!strictTimeValid(data.productionStartTime) || !strictTimeValid(data.finishTime)) {
-      alert("Production start and finish must be HH:MM (24h).");
-      return;
-    }
-    if (num(data.unitsProduced) < 0) {
-      alert("Units produced cannot be negative.");
-      return;
-    }
-    const patternShift = preferredTimedLogShift(
-      state,
-      data.date,
-      data.productionStartTime,
-      data.finishTime,
-      state.selectedShift || "Day"
-    );
-    const runCrewingPattern = runCrewingPatternFromInput(runCrewingPatternInput, state, patternShift, { fallbackToIdeal: false });
-    if (!Object.keys(runCrewingPattern).length) {
-      alert("Set crewing pattern for this run before saving.");
-      return;
-    }
-    setRunCrewingPatternField(runCrewingPatternInput, runCrewingPatternSummary, state, patternShift, runCrewingPattern, { fallbackToIdeal: false });
-    data.setUpStartTime = "";
-    data.unitsProduced = num(data.unitsProduced);
-    data.runCrewingPattern = runCrewingPattern;
     try {
-      const payload = {
-        lineId: state.id,
-        date: data.date,
-        product: data.product,
-        setUpStartTime: "",
-        productionStartTime: data.productionStartTime,
-        finishTime: data.finishTime,
-        unitsProduced: data.unitsProduced,
-        notes: data.notes,
-        runCrewingPattern
-      };
-      const saved = await syncManagerRunLog(payload);
-      state.runRows.push({
-        ...data,
-        assignedShift: "",
-        shift: "",
-        runCrewingPattern: normalizeRunCrewingPattern(saved?.runCrewingPattern || data.runCrewingPattern, state, patternShift, { fallbackToIdeal: false }),
-        id: saved?.id || data.id || makeLocalLogId("run"),
-        submittedBy: "manager",
-        submittedAt: saved?.submittedAt || nowIso()
+      const data = Object.fromEntries(new FormData(form).entries());
+      await createManagerRunLogEntry(data, {
+        runCrewingPatternInput,
+        runCrewingPatternSummary,
+        selectedShift: state.selectedShift || "Day"
       });
-      addAudit(state, "MANAGER_RUN_LOG", `Manager logged run ${data.product} (${data.unitsProduced} units)`);
       form.reset();
       setRunCrewingPatternField(runCrewingPatternInput, runCrewingPatternSummary, state, state.selectedShift || "Day", {}, { fallbackToIdeal: false });
-      saveState();
       renderAll();
     } catch (error) {
       alert(`Could not save production run.\n${error?.message || "Please try again."}`);
@@ -9860,53 +10027,11 @@ function bindForms() {
   downtimeForm.addEventListener("submit", async (event) => {
     event.preventDefault();
     const form = event.currentTarget;
-    const data = Object.fromEntries(new FormData(event.currentTarget).entries());
-    if (!isOperationalDate(data.date)) {
-      alert("Date is required. Weekend dates are excluded.");
-      return;
-    }
-    if (!strictTimeValid(data.downtimeStart) || !strictTimeValid(data.downtimeFinish)) {
-      alert("Downtime start and finish must be HH:MM (24h).");
-      return;
-    }
-    data.reasonCategory = String(data.reasonCategory || "").trim();
-    data.reasonDetail = String(data.reasonDetail || "").trim();
-    data.reasonNote = String(data.reasonNote || "").trim();
-    data.notes = String(data.notes || "").trim();
-    if (!data.reasonCategory) {
-      alert("Reason group is required.");
-      return;
-    }
-    if (!data.reasonDetail) {
-      alert("Reason detail is required.");
-      return;
-    }
-    data.equipment = data.reasonCategory === "Equipment" ? data.reasonDetail : "";
-    data.reason = buildDowntimeReasonText(state, data.reasonCategory, data.reasonDetail, data.reasonNote);
     try {
-      const payload = {
-        lineId: state.id,
-        date: data.date,
-        downtimeStart: data.downtimeStart,
-        downtimeFinish: data.downtimeFinish,
-        equipment: data.equipment,
-        reason: data.reason || "",
-        notes: data.notes
-      };
-      const saved = await syncManagerDowntimeLog(payload);
-      state.downtimeRows.push({
-        ...data,
-        assignedShift: "",
-        shift: "",
-        excludeFromCalculation: normalizeDowntimeCalculationFlag(saved?.excludeFromCalculation),
-        id: saved?.id || data.id || makeLocalLogId("down"),
-        submittedBy: "manager",
-        submittedAt: saved?.submittedAt || nowIso()
-      });
-      addAudit(state, "MANAGER_DOWNTIME_LOG", `Manager logged downtime on ${stageNameById(data.equipment)}`);
+      const data = Object.fromEntries(new FormData(form).entries());
+      await createManagerDowntimeLogEntry(data);
       form.reset();
       refreshManagerDowntimeDetailOptions();
-      saveState();
       renderAll();
     } catch (error) {
       alert(`Could not save downtime log.\n${error?.message || "Please try again."}`);
@@ -11420,6 +11545,427 @@ function bindDayVizBlockModal() {
   });
 }
 
+function dayVizAddRecordTypeConfig(recordType) {
+  const key = String(recordType || "").trim().toLowerCase();
+  if (key === "shift") {
+    return {
+      key,
+      laneLabel: "Shift",
+      modalTitle: "Add Shift Record",
+      submitLabel: "Add Shift Record",
+      failureLabel: "shift log"
+    };
+  }
+  if (key === "break") {
+    return {
+      key,
+      laneLabel: "Break",
+      modalTitle: "Add Break Record",
+      submitLabel: "Add Break Record",
+      failureLabel: "break log"
+    };
+  }
+  if (key === "run") {
+    return {
+      key,
+      laneLabel: "Production",
+      modalTitle: "Add Production Record",
+      submitLabel: "Add Production Record",
+      failureLabel: "production run"
+    };
+  }
+  if (key === "downtime") {
+    return {
+      key,
+      laneLabel: "Downtime",
+      modalTitle: "Add Downtime Record",
+      submitLabel: "Add Downtime Record",
+      failureLabel: "downtime log"
+    };
+  }
+  return null;
+}
+
+function dayVizAddRecordModalLine() {
+  const lineId = String(dayVizAddRecordModalState?.lineId || "").trim();
+  if (!lineId) return state || null;
+  return appState.lines?.[lineId] || (state?.id === lineId ? state : null);
+}
+
+function dayVizAddRecordDateLabel(isoDate) {
+  return parseDateLocal(isoDate || todayISO()).toLocaleDateString(undefined, {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  });
+}
+
+function dayVizAddRecordSummaryHtml(line, selectedDate, selectedShift) {
+  const viewLabel = selectedShift === "Full Day" ? "Full Day" : `${selectedShift} Shift`;
+  return `
+    <div class="day-viz-add-record-summary">
+      <div class="day-viz-add-record-context-card">
+        <span>Line</span>
+        <strong>${htmlEscape(String(line?.name || "Production Line"))}</strong>
+      </div>
+      <div class="day-viz-add-record-context-card">
+        <span>Date</span>
+        <strong>${htmlEscape(dayVizAddRecordDateLabel(selectedDate))}</strong>
+      </div>
+      <div class="day-viz-add-record-context-card">
+        <span>View</span>
+        <strong>${htmlEscape(viewLabel)}</strong>
+      </div>
+    </div>
+  `;
+}
+
+function dayVizAddRecordDefaultShift(selectedShift, { allowFullDay = false } = {}) {
+  const safeShift = String(selectedShift || "").trim();
+  if (allowFullDay && SHIFT_OPTIONS.includes(safeShift)) return safeShift;
+  return fallbackShiftValue(safeShift);
+}
+
+function dayVizAddRecordPreferredBreakShiftId(choices, selectedShift = "") {
+  const safeShift = String(selectedShift || "").trim();
+  const exact = choices.find((choice) => choice.shift === safeShift);
+  if (exact?.id) return exact.id;
+  const fallback = choices.find((choice) => choice.shift === fallbackShiftValue(safeShift));
+  if (fallback?.id) return fallback.id;
+  return choices[0]?.id || "";
+}
+
+function closeDayVizAddRecordModal() {
+  const overlay = document.getElementById("dayVizAddRecordModal");
+  const fieldsNode = document.getElementById("dayVizAddRecordFields");
+  const statusNode = document.getElementById("dayVizAddRecordStatus");
+  if (fieldsNode) fieldsNode.innerHTML = "";
+  if (statusNode) statusNode.textContent = "";
+  if (overlay) {
+    overlay.classList.remove("open");
+    overlay.setAttribute("aria-hidden", "true");
+  }
+  dayVizAddRecordModalState = null;
+}
+
+function refreshDayVizAddRecordDowntimeDetailOptions() {
+  const line = dayVizAddRecordModalLine();
+  const categorySelect = document.getElementById("dayVizAddRecordReasonCategory");
+  const detailSelect = document.getElementById("dayVizAddRecordReasonDetail");
+  if (!line || !categorySelect || !detailSelect) return;
+  setDowntimeDetailOptions(detailSelect, line, String(categorySelect.value || ""), detailSelect.value || "");
+}
+
+function openDayVizAddRecordRunCrewingModal() {
+  const line = dayVizAddRecordModalLine();
+  const form = document.getElementById("dayVizAddRecordForm");
+  const patternInput = document.getElementById("dayVizAddRecordRunCrewingPattern");
+  const patternSummary = document.getElementById("dayVizAddRecordRunCrewingSummary");
+  if (!line || !form || !patternInput || !patternSummary) return;
+  const date = String(form.querySelector('[name="date"]')?.value || dayVizAddRecordModalState?.date || line.selectedDate || todayISO());
+  const startTime = String(form.querySelector('[name="productionStartTime"]')?.value || nowTimeHHMM());
+  const finishTime = String(form.querySelector('[name="finishTime"]')?.value || startTime);
+  const shift = preferredTimedLogShift(
+    line,
+    date,
+    startTime,
+    finishTime,
+    fallbackShiftValue(dayVizAddRecordModalState?.selectedShift)
+  );
+  openRunCrewingPatternModal({
+    line,
+    shift,
+    inputEl: patternInput,
+    summaryEl: patternSummary
+  });
+}
+
+function renderDayVizAddRecordModal() {
+  const overlay = document.getElementById("dayVizAddRecordModal");
+  const titleNode = document.getElementById("dayVizAddRecordTitle");
+  const metaNode = document.getElementById("dayVizAddRecordMeta");
+  const fieldsNode = document.getElementById("dayVizAddRecordFields");
+  const statusNode = document.getElementById("dayVizAddRecordStatus");
+  const submitBtn = document.getElementById("dayVizAddRecordSubmit");
+  const form = document.getElementById("dayVizAddRecordForm");
+  if (!overlay || !titleNode || !metaNode || !fieldsNode || !statusNode || !submitBtn || !form) return;
+
+  const config = dayVizAddRecordTypeConfig(dayVizAddRecordModalState?.type);
+  const line = dayVizAddRecordModalLine();
+  if (!config || !line || appState.appMode !== "manager") {
+    closeDayVizAddRecordModal();
+    return;
+  }
+
+  const selectedDate = normalizeWeekdayIsoDate(dayVizAddRecordModalState?.date || line.selectedDate || todayISO(), { direction: -1 });
+  const requestedShift = String(dayVizAddRecordModalState?.selectedShift || line.selectedShift || "Day").trim();
+  const selectedShift = SHIFT_OPTIONS.includes(requestedShift) ? requestedShift : fallbackShiftValue(requestedShift);
+  const breakChoices = config.key === "break" ? managerBreakShiftChoices(line, selectedDate) : [];
+  const defaultBreakShiftId = dayVizAddRecordPreferredBreakShiftId(breakChoices, selectedShift);
+  const productOptionsHtml = listProductCatalogOptions()
+    .map((item) => `<option value="${htmlEscape(item.value)}">${htmlEscape(item.label || item.value)}</option>`)
+    .join("");
+  const reasonCategoryOptionsHtml = [
+    `<option value="">Reason Group</option>`,
+    ...ACTION_REASON_CATEGORIES.map((category) => `<option value="${htmlEscape(category)}">${htmlEscape(category)}</option>`)
+  ].join("");
+  const summaryHtml = dayVizAddRecordSummaryHtml(line, selectedDate, selectedShift);
+  let fieldsHtml = "";
+  let statusText = "";
+  let disableSubmit = false;
+
+  if (config.key === "shift") {
+    const defaultShift = dayVizAddRecordDefaultShift(selectedShift, { allowFullDay: true });
+    fieldsHtml = `
+      <input type="hidden" name="date" value="${htmlEscape(selectedDate)}" />
+      ${summaryHtml}
+      <label>
+        Shift
+        <select name="shift" required>
+          ${SHIFT_OPTIONS.map((shift) => `<option value="${htmlEscape(shift)}"${shift === defaultShift ? " selected" : ""}>${htmlEscape(shift)}</option>`).join("")}
+        </select>
+      </label>
+      <label>
+        Start Time
+        <input name="startTime" type="time" step="60" required />
+      </label>
+      <label>
+        Finish Time
+        <input name="finishTime" type="time" step="60" required />
+      </label>
+      <label class="day-viz-add-record-span-2">
+        Notes
+        <input name="notes" maxlength="${BACKEND_LOG_NOTES_MAX_LENGTH}" placeholder="Notes (optional)" />
+      </label>
+    `;
+  } else if (config.key === "break") {
+    disableSubmit = !breakChoices.length;
+    statusText = breakChoices.length ? "Breaks are attached to a saved shift record for this day." : `Add a shift record for ${selectedDate} before logging a break.`;
+    fieldsHtml = `
+      <input type="hidden" name="date" value="${htmlEscape(selectedDate)}" />
+      ${summaryHtml}
+      <p class="day-viz-add-record-note">Breaks are stored against an existing shift record, so the shift must already be logged for this date.</p>
+      ${
+        breakChoices.length
+          ? `
+            <label class="day-viz-add-record-span-2">
+              Shift Record
+              <select name="shiftLogId" required>
+                ${breakChoices.map((choice) => `<option value="${htmlEscape(choice.id)}"${choice.id === defaultBreakShiftId ? " selected" : ""}>${htmlEscape(choice.label)}</option>`).join("")}
+              </select>
+            </label>
+            <label>
+              Break Start
+              <input name="breakStart" type="time" step="60" required />
+            </label>
+            <label>
+              Break Finish
+              <input name="breakFinish" type="time" step="60" required />
+            </label>
+          `
+          : `
+            <div class="day-viz-add-record-empty">
+              <strong>No saved shift records available for this day.</strong>
+              <p>Log the shift first, then come back to add its break.</p>
+            </div>
+          `
+      }
+    `;
+  } else if (config.key === "run") {
+    fieldsHtml = `
+      <input type="hidden" name="date" value="${htmlEscape(selectedDate)}" />
+      <input id="dayVizAddRecordRunCrewingPattern" name="runCrewingPattern" type="hidden" />
+      ${summaryHtml}
+      <label class="day-viz-add-record-span-2">
+        Product
+        <input name="product" list="dayVizAddRecordProductList" autocomplete="off" placeholder="Select Product" required />
+      </label>
+      <datalist id="dayVizAddRecordProductList">${productOptionsHtml}</datalist>
+      <label>
+        Production Start
+        <input name="productionStartTime" type="time" step="60" required />
+      </label>
+      <label>
+        Finish Time
+        <input name="finishTime" type="time" step="60" required />
+      </label>
+      <label>
+        Units Produced
+        <input name="unitsProduced" type="number" min="0" step="1" placeholder="0" />
+      </label>
+      <button id="dayVizAddRecordRunCrewingBtn" class="ghost-btn day-viz-add-record-crewing-btn" type="button">Set Crewing Pattern</button>
+      <p id="dayVizAddRecordRunCrewingSummary" class="run-crewing-summary day-viz-add-record-crewing-summary">No crewing pattern set.</p>
+      <label class="day-viz-add-record-span-2">
+        Notes
+        <input name="notes" maxlength="${BACKEND_LOG_NOTES_MAX_LENGTH}" placeholder="Notes (optional)" />
+      </label>
+    `;
+  } else if (config.key === "downtime") {
+    fieldsHtml = `
+      <input type="hidden" name="date" value="${htmlEscape(selectedDate)}" />
+      ${summaryHtml}
+      <label>
+        Downtime Start
+        <input name="downtimeStart" type="time" step="60" required />
+      </label>
+      <label>
+        Downtime Finish
+        <input name="downtimeFinish" type="time" step="60" required />
+      </label>
+      <label>
+        Reason Group
+        <select id="dayVizAddRecordReasonCategory" name="reasonCategory" required>
+          ${reasonCategoryOptionsHtml}
+        </select>
+      </label>
+      <label>
+        Reason Detail
+        <select id="dayVizAddRecordReasonDetail" name="reasonDetail" required>
+          <option value="">Select Reason</option>
+        </select>
+      </label>
+      <label>
+        Reason Notes
+        <input name="reasonNote" maxlength="160" placeholder="Reason Notes (optional)" />
+      </label>
+      <label class="day-viz-add-record-span-2">
+        Notes
+        <input name="notes" maxlength="${BACKEND_LOG_NOTES_MAX_LENGTH}" placeholder="Notes (optional)" />
+      </label>
+    `;
+  }
+
+  dayVizAddRecordModalState = {
+    ...dayVizAddRecordModalState,
+    type: config.key,
+    lineId: String(line.id || ""),
+    date: selectedDate,
+    selectedShift
+  };
+  titleNode.textContent = config.modalTitle;
+  metaNode.textContent = `${line.name || "Production Line"} | ${selectedDate} | ${config.laneLabel}`;
+  fieldsNode.innerHTML = fieldsHtml;
+  statusNode.textContent = statusText;
+  submitBtn.textContent = config.submitLabel;
+  submitBtn.disabled = disableSubmit;
+  overlay.classList.add("open");
+  overlay.setAttribute("aria-hidden", "false");
+
+  if (config.key === "downtime") {
+    refreshDayVizAddRecordDowntimeDetailOptions();
+  }
+
+  if (config.key === "run") {
+    const patternInput = document.getElementById("dayVizAddRecordRunCrewingPattern");
+    const patternSummary = document.getElementById("dayVizAddRecordRunCrewingSummary");
+    if (patternInput && patternSummary) {
+      const startTime = String(form.querySelector('[name="productionStartTime"]')?.value || nowTimeHHMM());
+      const finishTime = String(form.querySelector('[name="finishTime"]')?.value || startTime);
+      const shift = preferredTimedLogShift(line, selectedDate, startTime, finishTime, fallbackShiftValue(selectedShift));
+      setRunCrewingPatternField(patternInput, patternSummary, line, shift, patternInput.value || "", { fallbackToIdeal: false });
+    }
+  }
+
+  const focusTarget = fieldsNode.querySelector('select:not(:disabled), input:not([type="hidden"]):not(:disabled), button:not(:disabled)');
+  if (focusTarget instanceof HTMLElement) {
+    window.setTimeout(() => focusTarget.focus(), 0);
+  }
+}
+
+function openDayVizAddRecordModal(recordType, { lineId = state?.id, date = state?.selectedDate || todayISO(), selectedShift = state?.selectedShift || "Day" } = {}) {
+  const config = dayVizAddRecordTypeConfig(recordType);
+  const safeLineId = String(lineId || "").trim();
+  if (!config || !safeLineId || appState.appMode !== "manager") return;
+  dayVizAddRecordModalState = {
+    type: config.key,
+    lineId: safeLineId,
+    date: normalizeWeekdayIsoDate(date || todayISO(), { direction: -1 }),
+    selectedShift: SHIFT_OPTIONS.includes(String(selectedShift || "").trim()) ? String(selectedShift).trim() : fallbackShiftValue(selectedShift)
+  };
+  renderDayVizAddRecordModal();
+}
+
+async function submitDayVizAddRecordModal(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const config = dayVizAddRecordTypeConfig(dayVizAddRecordModalState?.type);
+  const line = dayVizAddRecordModalLine();
+  const submitBtn = document.getElementById("dayVizAddRecordSubmit");
+  const statusNode = document.getElementById("dayVizAddRecordStatus");
+  if (!form || !config || !line || !submitBtn || !statusNode) return;
+  const data = Object.fromEntries(new FormData(form).entries());
+  submitBtn.disabled = true;
+  statusNode.textContent = "Saving...";
+  try {
+    if (config.key === "shift") {
+      await createManagerShiftLogEntry(data, { line });
+    } else if (config.key === "break") {
+      await createManagerBreakLogEntry(data, { line });
+    } else if (config.key === "run") {
+      const patternInput = document.getElementById("dayVizAddRecordRunCrewingPattern");
+      const patternSummary = document.getElementById("dayVizAddRecordRunCrewingSummary");
+      await createManagerRunLogEntry(data, {
+        line,
+        runCrewingPatternInput: patternInput,
+        runCrewingPatternSummary: patternSummary,
+        selectedShift: dayVizAddRecordModalState?.selectedShift || line.selectedShift || "Day"
+      });
+    } else if (config.key === "downtime") {
+      await createManagerDowntimeLogEntry(data, { line });
+    }
+    closeDayVizAddRecordModal();
+    renderAll();
+  } catch (error) {
+    statusNode.textContent = String(error?.message || "").trim();
+    submitBtn.disabled = false;
+    alert(`Could not save ${config.failureLabel}.\n${error?.message || "Please try again."}`);
+  }
+}
+
+function bindDayVizAddRecordModal() {
+  const overlay = document.getElementById("dayVizAddRecordModal");
+  const closeBtn = document.getElementById("closeDayVizAddRecordModal");
+  const form = document.getElementById("dayVizAddRecordForm");
+  if (!overlay || !closeBtn || !form) return;
+
+  closeBtn.addEventListener("click", closeDayVizAddRecordModal);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeDayVizAddRecordModal();
+  });
+  form.addEventListener("submit", submitDayVizAddRecordModal);
+  form.addEventListener("change", (event) => {
+    if (!(event.target instanceof Element)) return;
+    if (event.target.id === "dayVizAddRecordReasonCategory") {
+      refreshDayVizAddRecordDowntimeDetailOptions();
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const addBtn = event.target.closest("[data-day-viz-add-record]");
+    if (addBtn) {
+      event.preventDefault();
+      openDayVizAddRecordModal(String(addBtn.getAttribute("data-day-viz-add-record") || ""), {
+        lineId: addBtn.getAttribute("data-day-viz-line-id") || state?.id,
+        date: addBtn.getAttribute("data-day-viz-date") || state?.selectedDate || todayISO(),
+        selectedShift: addBtn.getAttribute("data-day-viz-shift") || state?.selectedShift || "Day"
+      });
+      return;
+    }
+    if (event.target.closest("#dayVizAddRecordRunCrewingBtn")) {
+      event.preventDefault();
+      openDayVizAddRecordRunCrewingModal();
+    }
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && overlay.classList.contains("open")) {
+      closeDayVizAddRecordModal();
+    }
+  });
+}
+
 function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver) {
   const blocks = { shifts: [], breaks: [], runs: [], downtime: [], source: {} };
   const allShiftRowsForDate = data.shiftRows.filter((row) => row.date === selectedDate);
@@ -11602,14 +12148,6 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   const root = document.getElementById(rootId);
   if (!root) return;
   const blocks = buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver);
-  const all = [...blocks.shifts, ...blocks.breaks, ...blocks.runs, ...blocks.downtime].filter(
-    (item) => Number.isFinite(item.start) && Number.isFinite(item.end)
-  );
-  if (!all.length) {
-    root.__dayVizBlockDetails = {};
-    root.innerHTML = `<div class="day-viz-empty">No shift/run/downtime records for ${selectedDate}.</div>`;
-    return;
-  }
 
   const dayStartHour = 5;
   const startMins = dayStartHour * 60;
@@ -11618,6 +12156,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   const hourMarks = Array.from({ length: 25 }, (_, offset) => dayStartHour + offset);
   const glance = buildDayAtGlance(blocks, stageNameResolver, selectedShift);
   const selectedShiftLabel = selectedShift === "Day" || selectedShift === "Night" ? selectedShift : "All shifts";
+  const canAddRecords = rootId === "dayVisualiserCanvas" && appState.appMode === "manager" && Boolean(lineContext?.id);
 
   const toWindowSegment = (start, end) => {
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
@@ -11759,13 +12298,28 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   const blockDetailsById = {};
   let blockDetailCounter = 0;
 
-  const renderLane = (label, totalLabel, items) => {
+  const renderLane = (label, totalLabel, items, recordType = "") => {
     const laneLines = hourMarks
       .map((hour) => {
         const left = ((hour - dayStartHour) / 24) * 100;
         return `<div class="day-viz-hour-line ${hour % 2 === 0 ? "major" : ""}" style="left:${left}%"></div>`;
       })
       .join("");
+    const addButton = canAddRecords && recordType
+      ? `
+        <button
+          type="button"
+          class="ghost-btn day-viz-add-record-btn"
+          data-day-viz-add-record="${htmlEscape(recordType)}"
+          data-day-viz-line-id="${htmlEscape(String(lineContext?.id || ""))}"
+          data-day-viz-date="${htmlEscape(selectedDate)}"
+          data-day-viz-shift="${htmlEscape(selectedShift)}"
+          aria-label="${htmlEscape(`Add ${label.toLowerCase()} record for ${selectedDate}`)}"
+        >
+          Add record
+        </button>
+      `
+      : "";
 
     const cards = items
       .map((item) => {
@@ -11810,7 +12364,10 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     return `
       <div class="day-viz-swimlane">
         <div class="day-viz-lane-label">
-          <span class="day-viz-lane-title">${htmlEscape(label)}</span>
+          <div class="day-viz-lane-head">
+            <span class="day-viz-lane-title">${htmlEscape(label)}</span>
+            ${addButton}
+          </div>
           <span class="day-viz-lane-total">${htmlEscape(totalLabel)}</span>
         </div>
         <div class="day-viz-lane-track">
@@ -11862,10 +12419,10 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
             ${axisTicks}
           </div>
         </div>
-        ${renderLane("Shift", laneTotals.shift, blocks.shifts)}
-        ${renderLane("Break", laneTotals.break, blocks.breaks)}
-        ${renderLane("Production", laneTotals.production, blocks.runs)}
-        ${renderLane("Downtime", laneTotals.downtime, blocks.downtime)}
+        ${renderLane("Shift", laneTotals.shift, blocks.shifts, "shift")}
+        ${renderLane("Break", laneTotals.break, blocks.breaks, "break")}
+        ${renderLane("Production", laneTotals.production, blocks.runs, "run")}
+        ${renderLane("Downtime", laneTotals.downtime, blocks.downtime, "downtime")}
       </div>
     </div>
     <section class="day-glance">
@@ -14842,7 +15399,13 @@ function renderAll() {
   renderHome();
   refreshRunCrewingPatternSummaries();
 
-  if (appState.activeView !== "line" || !state) return;
+  if (appState.activeView !== "line" || !state) {
+    closeDayVizAddRecordModal();
+    return;
+  }
+  if (dayVizAddRecordModalState && String(dayVizAddRecordModalState.lineId || "") !== String(state.id || "")) {
+    closeDayVizAddRecordModal();
+  }
   document.getElementById("appTitle").textContent = state.name || "Production Line";
   const editBtn = document.getElementById("toggleLayoutEdit");
   const addLineBtn = document.getElementById("addFlowLine");
@@ -14966,6 +15529,7 @@ async function bootstrapApp() {
     bindStep("bindTabs", bindTabs);
     bindStep("bindRunCrewingPatternModal", bindRunCrewingPatternModal);
     bindStep("bindDayVizBlockModal", bindDayVizBlockModal);
+    bindStep("bindDayVizAddRecordModal", bindDayVizAddRecordModal);
     bindStep("bindHome", bindHome);
     bindStep("bindDataSubtabs", bindDataSubtabs);
     bindStep("bindVisualiserControls", bindVisualiserControls);

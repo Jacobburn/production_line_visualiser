@@ -560,7 +560,7 @@ button {
 .day-viz-axis-row,
 .day-viz-swimlane {
   display: grid;
-  grid-template-columns: 130px minmax(820px, 1fr);
+  grid-template-columns: 168px minmax(820px, 1fr);
   gap: 0.45rem;
   align-items: stretch;
 }
@@ -589,11 +589,29 @@ button {
   padding: 0.46rem 0.56rem;
 }
 
+.day-viz-lane-head {
+  width: 100%;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.4rem;
+}
+
 .day-viz-lane-title {
   font-size: 0.74rem;
   font-weight: 800;
   color: #314456;
   line-height: 1.1;
+}
+
+.day-viz-add-record-btn {
+  flex-shrink: 0;
+  padding: 0.18rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.64rem;
+  font-weight: 700;
+  line-height: 1.1;
+  white-space: nowrap;
 }
 
 .day-viz-lane-total {
@@ -760,6 +778,114 @@ button {
 
 .day-viz-block-modal-card {
   width: min(560px, 95vw);
+}
+
+.day-viz-add-record-modal-card {
+  width: min(720px, 95vw);
+}
+
+.day-viz-add-record-form {
+  margin-bottom: 0;
+}
+
+.day-viz-add-record-fields {
+  display: contents;
+}
+
+.day-viz-add-record-summary {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 0.5rem;
+}
+
+.day-viz-add-record-context-card {
+  border: 1px solid #dce7f0;
+  border-radius: 0.65rem;
+  background: #f8fbff;
+  padding: 0.65rem 0.72rem;
+}
+
+.day-viz-add-record-context-card span {
+  display: block;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: #688094;
+}
+
+.day-viz-add-record-context-card strong {
+  display: block;
+  margin-top: 0.18rem;
+  color: #243d52;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.day-viz-add-record-form label {
+  display: grid;
+  gap: 0.3rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #33495d;
+}
+
+.day-viz-add-record-form :is(input, select) {
+  width: 100%;
+}
+
+.day-viz-add-record-span-2 {
+  grid-column: span 2;
+}
+
+.day-viz-add-record-note,
+.day-viz-add-record-empty {
+  grid-column: 1 / -1;
+}
+
+.day-viz-add-record-note {
+  margin: 0;
+  color: #60778a;
+  font-size: 0.78rem;
+}
+
+.day-viz-add-record-empty {
+  border: 1px dashed #cddbe7;
+  border-radius: 0.7rem;
+  background: #f8fbff;
+  padding: 0.9rem;
+}
+
+.day-viz-add-record-empty strong {
+  display: block;
+  color: #274055;
+}
+
+.day-viz-add-record-empty p {
+  margin: 0.3rem 0 0;
+  color: #5d7488;
+  font-size: 0.8rem;
+}
+
+.day-viz-add-record-actions {
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 0.2rem;
+}
+
+.day-viz-add-record-status {
+  margin: 0;
+  min-height: 1.2em;
+}
+
+.day-viz-add-record-crewing-btn {
+  justify-self: start;
+  align-self: end;
+}
+
+.day-viz-add-record-crewing-summary {
+  margin-top: -0.1rem;
 }
 
 .day-viz-block-modal-body {
@@ -1079,7 +1205,7 @@ button {
 
   .day-viz-axis-row,
   .day-viz-swimlane {
-    grid-template-columns: 108px minmax(620px, 1fr);
+    grid-template-columns: 144px minmax(620px, 1fr);
   }
 
   .day-glance-grid {
@@ -1094,12 +1220,25 @@ button {
     padding: 0.4rem 0.3rem;
   }
 
+  .day-viz-lane-head {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .day-viz-add-record-btn {
+    padding-inline: 0.44rem;
+  }
+
   .day-viz-inner {
     min-width: 760px;
   }
 
   .day-glance-grid {
     grid-template-columns: 1fr;
+  }
+
+  .day-viz-add-record-span-2 {
+    grid-column: 1 / -1;
   }
 
   .day-glance-run-tile {

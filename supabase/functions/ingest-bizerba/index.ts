@@ -9,6 +9,15 @@ type BizerbaPayload = {
   ArticleNumber: unknown;
 };
 
+type BizerbaInsertRow = {
+  id: string;
+  ActualNetWeightValue: number;
+  DeviceName: string;
+  Date: string;
+  Timestamp: string;
+  ArticleNumber: string;
+};
+
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`Missing or invalid field: ${field}`);
@@ -46,15 +55,63 @@ function requiredId(value: unknown, field: string): string {
     throw new Error(`Missing or invalid field: ${field}`);
   }
   const raw = typeof value === "string" ? value.trim() : String(value).trim();
-  if (!raw) {
-    throw new Error(`Missing or invalid field: ${field}`);
+  if (!/^\d+$/.test(raw)) {
+    throw new Error(`Missing or invalid field: ${field}; expected integer id`);
   }
   return raw;
+}
+
+function requireObject(value: unknown, field: string): BizerbaPayload {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`Missing or invalid row: ${field}`);
+  }
+  return value as BizerbaPayload;
+}
+
+function parseBatchSize(raw: string | undefined): number {
+  const parsed = Number(raw ?? "100000");
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return 100000;
+  }
+  return parsed;
+}
+
+function extractPayloads(body: unknown): BizerbaPayload[] {
+  if (Array.isArray(body)) {
+    return body.map((entry, index) => requireObject(entry, `rows[${index}]`));
+  }
+
+  const payload = requireObject(body, "body");
+  const maybeRows = (payload as { rows?: unknown }).rows;
+  if (Array.isArray(maybeRows)) {
+    return maybeRows.map((entry, index) => requireObject(entry, `rows[${index}]`));
+  }
+
+  return [payload];
+}
+
+function buildRow(payload: BizerbaPayload, index: number): BizerbaInsertRow {
+  const prefix = `rows[${index}]`;
+  return {
+    id: requiredId(payload.id, `${prefix}.id`),
+    ActualNetWeightValue: requiredNumeric(
+      payload.ActualNetWeightValue,
+      `${prefix}.ActualNetWeightValue`,
+    ),
+    DeviceName: requiredString(payload.DeviceName, `${prefix}.DeviceName`),
+    Date: requiredDate(payload.Date, `${prefix}.Date`),
+    Timestamp: requiredTimestamp(payload.Timestamp, `${prefix}.Timestamp`),
+    ArticleNumber: requiredString(
+      payload.ArticleNumber,
+      `${prefix}.ArticleNumber`,
+    ),
+  };
 }
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const deviceKey = Deno.env.get("BIZERBA_DEVICE_KEY") ?? "";
+const maxBatchSize = parseBatchSize(Deno.env.get("BIZERBA_MAX_BATCH_SIZE"));
 
 if (!supabaseUrl || !serviceRoleKey || !deviceKey) {
   throw new Error("Missing required function environment variables.");
@@ -73,27 +130,27 @@ Deno.serve(async (req) => {
     return new Response("Unauthorized", { status: 401 });
   }
 
-  let payload: BizerbaPayload;
+  let requestBody: unknown;
   try {
-    payload = await req.json();
+    requestBody = await req.json();
   } catch {
     return new Response("Invalid JSON body", { status: 400 });
   }
 
   try {
-    const row = {
-      id: requiredId(payload.id, "id"),
-      ActualNetWeightValue: requiredNumeric(
-        payload.ActualNetWeightValue,
-        "ActualNetWeightValue",
-      ),
-      DeviceName: requiredString(payload.DeviceName, "DeviceName"),
-      Date: requiredDate(payload.Date, "Date"),
-      Timestamp: requiredTimestamp(payload.Timestamp, "Timestamp"),
-      ArticleNumber: requiredString(payload.ArticleNumber, "ArticleNumber"),
-    };
+    const payloads = extractPayloads(requestBody);
+    if (payloads.length === 0) {
+      throw new Error("Payload must contain at least one row.");
+    }
+    if (payloads.length > maxBatchSize) {
+      throw new Error(`Payload exceeds max batch size of ${maxBatchSize}.`);
+    }
 
-    const { error } = await supabase.from("Bizerba_ID").insert(row);
+    const rows = payloads.map((payload, index) => buildRow(payload, index));
+    const { error } = await supabase.from("Bizerba_ID").upsert(rows, {
+      onConflict: "id",
+      ignoreDuplicates: true,
+    });
     if (error) {
       return new Response(JSON.stringify({ error: error.message }), {
         status: 400,
@@ -101,7 +158,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    return new Response(JSON.stringify({ ok: true }), {
+    return new Response(JSON.stringify({ ok: true, received: rows.length }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
