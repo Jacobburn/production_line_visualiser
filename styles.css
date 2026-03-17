@@ -1003,6 +1003,10 @@ button {
   background: #ffffff;
 }
 
+.day-glance-card-runs {
+  grid-column: 1 / -1;
+}
+
 .day-glance-card h4 {
   margin: 0;
   font-size: 0.82rem;
@@ -1108,18 +1112,16 @@ button {
 .day-glance-run-tile {
   border: 1px solid #d9e4ee;
   border-radius: 0.66rem;
-  padding: 0.34rem 0.42rem;
+  padding: 0.48rem 0.52rem;
   background: #f8fbfe;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(172px, 36%);
-  align-items: center;
-  gap: 0.4rem;
+  gap: 0.46rem;
 }
 
 .day-glance-run-main {
   display: grid;
   grid-template-columns: auto 1fr;
-  align-items: center;
+  align-items: start;
   gap: 0.38rem;
 }
 
@@ -1147,7 +1149,7 @@ button {
 
 .day-glance-run-copy {
   display: grid;
-  gap: 0.08rem;
+  gap: 0.14rem;
   min-width: 0;
 }
 
@@ -1156,46 +1158,43 @@ button {
   font-size: 0.8rem;
   line-height: 1.1;
   color: #2b4054;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  overflow-wrap: anywhere;
 }
 
-.day-glance-run-rate {
-  font-size: 0.78rem;
-  line-height: 1.1;
+.day-glance-run-summary {
+  font-size: 0.73rem;
+  line-height: 1.2;
   color: #60778c;
   font-variant-numeric: tabular-nums;
 }
 
-.day-glance-run-callouts {
+.day-glance-run-metrics {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.18rem;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.22rem;
 }
 
 .day-glance-run-callout {
   border: 1px solid #e2ebf4;
   border-radius: 0.42rem;
-  padding: 0.22rem 0.3rem;
+  padding: 0.3rem 0.34rem;
   display: grid;
   gap: 0.06rem;
   background: #ffffff;
-  text-align: right;
+  align-content: start;
 }
 
 .day-glance-run-callout span {
-  font-size: 0.58rem;
+  font-size: 0.57rem;
   color: #51687c;
-  line-height: 1;
+  line-height: 1.05;
 }
 
 .day-glance-run-callout strong {
-  font-size: 0.67rem;
+  font-size: 0.69rem;
   color: #2f4559;
   font-variant-numeric: tabular-nums;
-  line-height: 1.05;
-  white-space: nowrap;
+  line-height: 1.12;
 }
 
 .day-glance-list {
@@ -1246,6 +1245,10 @@ button {
   .day-glance-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+
+  .day-glance-run-metrics {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 760px) {
@@ -1277,18 +1280,11 @@ button {
   }
 
   .day-glance-run-tile {
-    grid-template-columns: 1fr;
     gap: 0.45rem;
   }
 
-  .day-glance-run-callouts {
-    grid-auto-flow: row;
-    grid-auto-columns: auto;
+  .day-glance-run-metrics {
     grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  .day-glance-run-callout {
-    text-align: left;
   }
 }
 

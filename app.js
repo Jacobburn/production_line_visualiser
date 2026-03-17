@@ -12356,14 +12356,38 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   const overlappingDowntimeMins = intervalsOverlapMinutes(productionIntervals, calculationDowntimeIntervals);
   const netProductionMinutes = Math.max(0, productionMinutes - overlappingDowntimeMins);
   const productionRate = netProductionMinutes > 0 ? productionUnits / netProductionMinutes : 0;
-  const productionTrafficForRate = (rate, netMins) =>
+  const dayGlanceStages = lineContext?.stages?.length ? lineContext.stages : STAGES;
+  const dayGlanceBottleneck = lineContext
+    ? resolveLineBottleneckStage(lineContext, dayGlanceStages, selectedShift, (stageId, shiftValue) =>
+      stageTotalMaxThroughputForLine(lineContext, stageId, shiftValue)
+    )
+    : null;
+  const dayGlanceBottleneckLabel = dayGlanceBottleneck
+    ? stageDisplayName(dayGlanceBottleneck.stage, dayGlanceBottleneck.index)
+    : "Bottleneck not set";
+  const dayGlanceMaxCapacity = Math.max(0, num(dayGlanceBottleneck?.capacity));
+  const formatDayGlanceRate = (value) => `${formatNum(Math.max(0, value), 2)} trays / min`;
+  const formatDayGlanceUtilisation = (value) => `${formatNum(Math.max(0, value), 1)}%`;
+  const dayGlanceRunMetric = (label, value) => `
+    <div class="day-glance-run-callout">
+      <span>${htmlEscape(label)}</span>
+      <strong>${htmlEscape(value)}</strong>
+    </div>
+  `;
+  const productionTrafficForRate = ({ rate = 0, netMins = 0, utilisation = 0, hasCapacity = false } = {}) =>
     netMins <= 0
       ? { className: "red", label: "Red", detail: "No production logged" }
-      : rate >= 10
-        ? { className: "green", label: "Green", detail: "On target" }
-        : rate >= 7
-          ? { className: "amber", label: "Amber", detail: "Monitor" }
-          : { className: "red", label: "Red", detail: "Below target" };
+      : hasCapacity
+        ? utilisation >= 85
+          ? { className: "green", label: "Green", detail: "On target" }
+          : utilisation >= 65
+            ? { className: "amber", label: "Amber", detail: "Monitor" }
+            : { className: "red", label: "Red", detail: "Below target" }
+        : rate >= 10
+          ? { className: "green", label: "Green", detail: "On target" }
+          : rate >= 7
+            ? { className: "amber", label: "Amber", detail: "Monitor" }
+            : { className: "red", label: "Red", detail: "Below target" };
   const laneTotals = {
     shift: `${formatNum(laneMinutes(blocks.shifts), 0)} min`,
     break: `${formatNum(laneMinutes(blocks.breaks), 0)} min`,
@@ -12400,20 +12424,36 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       const computedNetRunMins = Math.max(0, num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift));
       const fallbackNetRunMins = Math.max(0, grossMins - downInRunMins);
       const netRunMins = computedNetRunMins > 0 ? computedNetRunMins : fallbackNetRunMins;
-      const netTraysPerMin = netRunMins > 0 ? units / netRunMins : 0;
-      const traffic = productionTrafficForRate(netTraysPerMin, netRunMins);
+      const grossTraysPerMin = grossMins > 0 ? units / grossMins : Math.max(0, num(row.grossRunRate));
+      const netTraysPerMin = netRunMins > 0 ? units / netRunMins : Math.max(0, num(row.netRunRate));
+      const grossUtilisation = dayGlanceMaxCapacity > 0 ? (grossTraysPerMin / dayGlanceMaxCapacity) * 100 : null;
+      const netUtilisation = dayGlanceMaxCapacity > 0 ? (netTraysPerMin / dayGlanceMaxCapacity) * 100 : null;
+      const traffic = productionTrafficForRate({
+        rate: netTraysPerMin,
+        netMins: netRunMins,
+        utilisation: num(netUtilisation),
+        hasCapacity: dayGlanceMaxCapacity > 0
+      });
+      const runSummary = [
+        `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}`,
+        `${formatNum(units, 0)} trays`,
+        `${formatNum(downInRunMins, 1)} min down`
+      ].join(" | ");
       return `
         <article class="day-glance-run-tile">
           <div class="day-glance-run-main">
             <span class="day-glance-light ${traffic.className}" aria-hidden="true"></span>
             <div class="day-glance-run-copy">
               <h5 class="day-glance-run-title">${htmlEscape(productName)}</h5>
-              <span class="day-glance-run-rate">${formatNum(netTraysPerMin, 2)} net trays / min</span>
+              <span class="day-glance-run-summary">${htmlEscape(runSummary)}</span>
             </div>
           </div>
-          <div class="day-glance-run-callouts">
-            <div class="day-glance-run-callout"><span>Trays</span><strong>${formatNum(units, 0)}</strong></div>
-            <div class="day-glance-run-callout"><span>Down</span><strong>${formatNum(downInRunMins, 1)} min</strong></div>
+          <div class="day-glance-run-metrics">
+            ${dayGlanceRunMetric("Gross utilisation", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation))}
+            ${dayGlanceRunMetric("Net utilisation", netUtilisation === null ? "-" : formatDayGlanceUtilisation(netUtilisation))}
+            ${dayGlanceRunMetric("Max capacity", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set")}
+            ${dayGlanceRunMetric("Net run rate", formatDayGlanceRate(netTraysPerMin))}
+            ${dayGlanceRunMetric("Gross run rate", formatDayGlanceRate(grossTraysPerMin))}
           </div>
         </article>
       `;
@@ -12516,37 +12556,6 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     `;
   };
 
-  const allocationSegments = glance.allocations
-    .filter((segment) => segment.pct > 0)
-    .map((segment) => `<span class="day-glance-seg ${segment.className}" style="width:${segment.pct}%"></span>`)
-    .join("");
-  const allocationLegend = glance.allocations
-    .map(
-      (segment) => `
-        <div class="day-glance-legend-item">
-          <span class="day-glance-dot ${segment.className}"></span>
-          <span>${htmlEscape(segment.label)}</span>
-          <strong>${formatNum(segment.minutes, 0)} min</strong>
-        </div>
-      `
-    )
-    .join("");
-  const topDowntime =
-    glance.topDowntime.length > 0
-      ? `<ul class="day-glance-list">
-          ${glance.topDowntime
-            .map(
-              (entry) => `
-                <li>
-                  <span>${htmlEscape(entry.label)}</span>
-                  <strong>${formatNum(entry.minutes, 1)} min</strong>
-                </li>
-              `
-            )
-            .join("")}
-        </ul>`
-      : `<p class="day-glance-empty">No downtime events in this selection.</p>`;
-
   root.innerHTML = `
     <div class="day-viz-shell">
       <div class="day-viz-inner">
@@ -12569,25 +12578,16 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         <p>${selectedDate} | ${selectedShiftLabel} | Runs: ${formatNum(glance.runCount, 0)} | Downtime events: ${formatNum(glance.downtimeCount, 0)}</p>
       </div>
       <div class="day-glance-grid">
-        <article class="day-glance-card">
-          <h4>Time Allocation</h4>
-          <p class="day-glance-meta">${formatNum(glance.trackedTotal, 0)} tracked minutes</p>
-          <div class="day-glance-stack">
-            ${allocationSegments || `<span class="day-glance-seg fallback"></span>`}
-          </div>
-          <div class="day-glance-legend">${allocationLegend}</div>
-        </article>
-        <article class="day-glance-card">
+        <article class="day-glance-card day-glance-card-runs">
           <h4>Production Runs</h4>
-          <p class="day-glance-meta">Per-run net run rate (net trays/min). Uses net production time for each run.</p>
+          <p class="day-glance-meta">${
+            dayGlanceMaxCapacity > 0
+              ? `Rates are shown per run. Capacity and utilisation use ${htmlEscape(dayGlanceBottleneckLabel)} as the bottleneck max rate baseline.`
+              : "Rates are shown per run. Set a bottleneck stage with max throughput to show capacity and utilisation."
+          }</p>
           <div class="day-glance-run-list">
             ${productionRunTiles || `<p class="day-glance-empty">No production runs in this selection.</p>`}
           </div>
-        </article>
-        <article class="day-glance-card">
-          <h4>Top Downtime Causes</h4>
-          <p class="day-glance-meta">By total logged minutes.</p>
-          ${topDowntime}
         </article>
       </div>
     </section>
