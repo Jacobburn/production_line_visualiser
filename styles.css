@@ -1173,7 +1173,7 @@ button {
 
 .day-glance-run-metrics {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(7, minmax(0, 1fr));
   gap: 0.22rem;
   min-width: 0;
 }
@@ -1181,7 +1181,8 @@ button {
 .day-glance-run-callout {
   border: 1px solid #e2ebf4;
   border-radius: 0.42rem;
-  padding: 0.3rem 0.34rem;
+  min-height: 2.6rem;
+  padding: 0.48rem 0.46rem;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -1277,7 +1278,7 @@ button {
   }
 
   .day-glance-run-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 
   .day-glance-run-tile {

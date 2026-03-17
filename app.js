@@ -12479,11 +12479,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         utilisation: num(netUtilisation),
         hasCapacity: dayGlanceMaxCapacity > 0
       });
-      const runSummary = [
-        `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}`,
-        `${formatNum(units, 0)} trays`,
-        `${formatNum(downInRunMins, 1)} min down`
-      ].join(" | ");
+      const runSummary = `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}`;
       return `
         <article class="day-glance-run-tile">
           <div class="day-glance-run-main">
@@ -12494,6 +12490,8 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
             </div>
           </div>
           <div class="day-glance-run-metrics">
+            ${dayGlanceRunMetric("Trays", formatNum(units, 0), "totalTrays", canonicalProductName)}
+            ${dayGlanceRunMetric("Down", `${formatNum(downInRunMins, 1)} min`, "minutesDown", canonicalProductName)}
             ${dayGlanceRunMetric("Gross utilisation", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation), "grossUtilisation", canonicalProductName)}
             ${dayGlanceRunMetric("Net utilisation", netUtilisation === null ? "-" : formatDayGlanceUtilisation(netUtilisation), "netUtilisation", canonicalProductName)}
             ${dayGlanceRunMetric("Max capacity", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set", "maxCapacity", canonicalProductName)}
@@ -13897,6 +13895,34 @@ function dayRunMetricTrendConfig(metricKey, productName) {
   const safeProductName = normalizeTrendProductName(productName, state);
   const productLabel = safeProductName || "Product";
   const configs = {
+    totalTrays: {
+      title: `${productLabel} Total Trays Trend`,
+      description: "Total trays logged for this product in the selected shift.",
+      legend: "Total trays",
+      aggregate: "sum",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#1f4f8a",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, 0)} trays`,
+      formatTick: (value) => formatNum(value, 0)
+    },
+    minutesDown: {
+      title: `${productLabel} Minutes Down Trend`,
+      description: "Logged downtime minutes that overlapped runs of this product.",
+      legend: "Minutes down",
+      aggregate: "sum",
+      barClass: "bar-down",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#a73838",
+      avgTheme: "down",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, value < 10 ? 1 : 0)} min`,
+      formatTick: (value) => formatNum(value, value < 10 ? 1 : 0)
+    },
     grossUtilisation: {
       title: `${productLabel} Gross Utilisation Trend`,
       description: "Gross run rate for this product divided by bottleneck max capacity.",
@@ -13977,6 +14003,8 @@ function computeDayRunMetricStats(productName, date, shift, data) {
   if (!state || !safeProductName) {
     return {
       hasRuns: false,
+      totalTrays: 0,
+      minutesDown: 0,
       grossUtilisation: 0,
       netUtilisation: 0,
       maxCapacity: 0,
@@ -13985,10 +14013,30 @@ function computeDayRunMetricStats(productName, date, shift, data) {
     };
   }
 
+  const shiftWindows = isFullDayShift(shift)
+    ? []
+    : shiftIntervalsForDate({ shiftRows: (data?.shiftRows || []).filter((row) => row?.date === date) }, date)[shift] || [];
+  const clipIntervalsToShift = (intervals = []) => {
+    if (!shiftWindows.length) return intervals;
+    return intervals.flatMap((interval) =>
+      shiftWindows
+        .map((windowInterval) => {
+          const start = Math.max(num(interval?.start), num(windowInterval?.start));
+          const end = Math.min(num(interval?.end), num(windowInterval?.end));
+          return end > start ? { start, end } : null;
+        })
+        .filter(Boolean)
+    );
+  };
+
   const productRunRows = selectedShiftRowsByDate(data.runRows, date, shift, { line: state }).filter((row) => {
     const rowProductName = normalizeTrendProductName(row?.product, state);
     return rowProductName === safeProductName;
   });
+  const selectedCalculationDowntimeRows = calculationDowntimeRows(selectedShiftRowsByDate(data.downtimeRows, date, shift, { line: state }));
+  const downtimeIntervals = selectedCalculationDowntimeRows.flatMap((row) =>
+    clipIntervalsToShift(intervalsFromTimes(row?.downtimeStart, row?.downtimeFinish))
+  );
   const weightedProductRuns = productRunRows
     .map((row) => ({
       row,
@@ -13997,6 +14045,11 @@ function computeDayRunMetricStats(productName, date, shift, data) {
     .filter((entry) => entry.weight > 0);
   const hasRuns = weightedProductRuns.length > 0;
   const units = weightedProductRuns.reduce((sum, entry) => sum + Math.max(0, num(entry.row?.unitsProduced)) * entry.weight, 0);
+  const minutesDown = weightedProductRuns.reduce((sum, entry) => {
+    const runIntervals = clipIntervalsToShift(intervalsFromTimes(entry.row?.productionStartTime, entry.row?.finishTime));
+    if (!runIntervals.length || !downtimeIntervals.length) return sum;
+    return sum + overlapMinutesBetweenIntervalSets(runIntervals, downtimeIntervals);
+  }, 0);
   const grossMins = weightedProductRuns.reduce((sum, entry) => sum + Math.max(0, num(entry.row?.grossProductionTime)) * entry.weight, 0);
   const netMins = weightedProductRuns.reduce((sum, entry) => sum + Math.max(0, num(entry.row?.netProductionTime)) * entry.weight, 0);
   const grossRunRate = grossMins > 0 ? units / grossMins : 0;
@@ -14010,6 +14063,8 @@ function computeDayRunMetricStats(productName, date, shift, data) {
 
   return {
     hasRuns,
+    totalTrays: Math.max(0, units),
+    minutesDown: Math.max(0, minutesDown),
     grossUtilisation: Math.max(0, grossUtilisation),
     netUtilisation: Math.max(0, netUtilisation),
     maxCapacity,
@@ -14020,6 +14075,8 @@ function computeDayRunMetricStats(productName, date, shift, data) {
 
 function dayRunMetricValueFromStats(metricKey, stats) {
   const safeMetricKey = String(metricKey || "").trim();
+  if (safeMetricKey === "totalTrays") return Math.max(0, num(stats?.totalTrays));
+  if (safeMetricKey === "minutesDown") return Math.max(0, num(stats?.minutesDown));
   if (safeMetricKey === "grossUtilisation") return Math.max(0, num(stats?.grossUtilisation));
   if (safeMetricKey === "netUtilisation") return Math.max(0, num(stats?.netUtilisation));
   if (safeMetricKey === "maxCapacity") return Math.max(0, num(stats?.maxCapacity));
