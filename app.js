@@ -9238,6 +9238,7 @@ function bindVisualiserControls() {
   const lineTrendNextBtn = document.getElementById("lineTrendNextPeriod");
   const lineTrendRangeButtons = Array.from(document.querySelectorAll("[data-line-trend-range]"));
   const dayKpiTriggers = Array.from(document.querySelectorAll("[data-day-kpi-metric]"));
+  const dayRunMetricRoots = [document.getElementById("dayVisualiserCanvas")].filter(Boolean);
   const saveStageSettingsBtn = document.getElementById("saveStageCrewSettingsBtn");
   const dayKeyStageSelect = document.getElementById("dayKeyStageSelect");
   let layoutDragState = null;
@@ -9323,6 +9324,26 @@ function bindVisualiserControls() {
       if (event.key !== "Enter" && event.key !== " ") return;
       event.preventDefault();
       activate();
+    });
+  });
+  dayRunMetricRoots.forEach((root) => {
+    const activateRunMetric = (trigger) => {
+      const metricKey = String(trigger?.dataset?.dayRunMetric || "").trim();
+      const productName = String(trigger?.dataset?.dayRunProduct || "").trim();
+      if (!metricKey || !productName) return;
+      openDayRunProductTrend(metricKey, productName);
+    };
+    root.addEventListener("click", (event) => {
+      const trigger = event.target.closest("[data-day-run-metric]");
+      if (!trigger || !root.contains(trigger)) return;
+      activateRunMetric(trigger);
+    });
+    root.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      const trigger = event.target.closest("[data-day-run-metric]");
+      if (!trigger || !root.contains(trigger)) return;
+      event.preventDefault();
+      activateRunMetric(trigger);
     });
   });
   crewShiftButtons.forEach((btn) => {
@@ -9842,6 +9863,22 @@ function openDayKpiTrend(metricKey) {
   }
   state.trendDateCursor = normalizeWeekdayIsoDate(state.selectedDate || todayISO(), { direction: -1 });
   trendModalContext = { type: "dayKpi", metricKey: safeMetricKey };
+  renderTrendModalContent();
+  openTrendModal();
+}
+
+function normalizeTrendProductName(productName, line = state) {
+  const raw = String(productName || "").trim();
+  if (!raw) return "";
+  return catalogProductCanonicalName(raw, { lineId: line?.id }) || raw;
+}
+
+function openDayRunProductTrend(metricKey, productName) {
+  const safeMetricKey = String(metricKey || "").trim();
+  const safeProductName = normalizeTrendProductName(productName, state);
+  if (!state || !safeMetricKey || !safeProductName) return;
+  state.trendDateCursor = normalizeWeekdayIsoDate(state.selectedDate || todayISO(), { direction: -1 });
+  trendModalContext = { type: "dayRunMetric", metricKey: safeMetricKey, productName: safeProductName };
   renderTrendModalContent();
   openTrendModal();
 }
@@ -12363,14 +12400,24 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     )
     : null;
   const dayGlanceMaxCapacity = Math.max(0, num(dayGlanceBottleneck?.capacity));
+  const canOpenDayRunMetricTrend = rootId === "dayVisualiserCanvas" && appState.appMode === "manager" && Boolean(lineContext?.id);
   const formatDayGlanceRate = (value) => `${formatNum(Math.max(0, value), 2)} trays / min`;
   const formatDayGlanceUtilisation = (value) => `${formatNum(Math.max(0, value), 1)}%`;
-  const dayGlanceRunMetric = (label, value) => `
-    <div class="day-glance-run-callout">
+  const dayGlanceRunMetric = (label, value, metricKey = "", productName = "") => {
+    const safeMetricKey = String(metricKey || "").trim();
+    const safeProductName = String(productName || "").trim();
+    const interactive = canOpenDayRunMetricTrend && safeMetricKey && safeProductName;
+    return `
+    <div class="day-glance-run-callout${interactive ? " day-run-metric-trigger" : ""}"${
+      interactive
+        ? ` data-day-run-metric="${htmlEscape(safeMetricKey)}" data-day-run-product="${htmlEscape(safeProductName)}" role="button" tabindex="0" aria-label="${htmlEscape(`Show ${label} trend for ${safeProductName}`)}"`
+        : ""
+    }>
       <span>${htmlEscape(label)}</span>
       <strong>${htmlEscape(value)}</strong>
     </div>
   `;
+  };
   const productionTrafficForRate = ({ rate = 0, netMins = 0, utilisation = 0, hasCapacity = false } = {}) =>
     netMins <= 0
       ? { className: "red", label: "Red", detail: "No production logged" }
@@ -12411,7 +12458,8 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     .slice()
     .sort((a, b) => String(a.productionStartTime || "").localeCompare(String(b.productionStartTime || "")))
     .map((row, index) => {
-      const productName = String(row.product || "").trim() || `Run ${index + 1}`;
+      const canonicalProductName = normalizeTrendProductName(row?.product, lineContext);
+      const productName = canonicalProductName || `Run ${index + 1}`;
       const units = Math.max(0, num(row.unitsProduced) * timedLogShiftWeight(row, selectedShift));
       const runIntervals = clipRunTileSegmentsToShift(splitAcrossMidnight(parseTimeToMinutes(row.productionStartTime), parseTimeToMinutes(row.finishTime)))
         .map((segment) => toWindowSegment(segment.start, segment.end))
@@ -12446,11 +12494,11 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
             </div>
           </div>
           <div class="day-glance-run-metrics">
-            ${dayGlanceRunMetric("Gross utilisation", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation))}
-            ${dayGlanceRunMetric("Net utilisation", netUtilisation === null ? "-" : formatDayGlanceUtilisation(netUtilisation))}
-            ${dayGlanceRunMetric("Max capacity", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set")}
-            ${dayGlanceRunMetric("Net run rate", formatDayGlanceRate(netTraysPerMin))}
-            ${dayGlanceRunMetric("Gross run rate", formatDayGlanceRate(grossTraysPerMin))}
+            ${dayGlanceRunMetric("Gross utilisation", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation), "grossUtilisation", canonicalProductName)}
+            ${dayGlanceRunMetric("Net utilisation", netUtilisation === null ? "-" : formatDayGlanceUtilisation(netUtilisation), "netUtilisation", canonicalProductName)}
+            ${dayGlanceRunMetric("Max capacity", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set", "maxCapacity", canonicalProductName)}
+            ${dayGlanceRunMetric("Net run rate", formatDayGlanceRate(netTraysPerMin), "netRunRate", canonicalProductName)}
+            ${dayGlanceRunMetric("Gross run rate", formatDayGlanceRate(grossTraysPerMin), "grossRunRate", canonicalProductName)}
           </div>
         </article>
       `;
@@ -13845,6 +13893,141 @@ function dayKpiTrendConfig(metricKey) {
   return configs[String(metricKey || "").trim()] || null;
 }
 
+function dayRunMetricTrendConfig(metricKey, productName) {
+  const safeProductName = normalizeTrendProductName(productName, state);
+  const productLabel = safeProductName || "Product";
+  const configs = {
+    grossUtilisation: {
+      title: `${productLabel} Gross Utilisation Trend`,
+      description: "Gross run rate for this product divided by bottleneck max capacity.",
+      legend: "Gross utilisation",
+      aggregate: "activeAvg",
+      barClass: "bar-units",
+      lineClass: "line-util",
+      dotClass: "dot-util",
+      lineColor: "",
+      avgTheme: "units",
+      scaleFloor: 100,
+      formatValue: (value) => `${formatNum(value, 1)}%`,
+      formatTick: (value) => `${formatNum(value, 0)}%`
+    },
+    netUtilisation: {
+      title: `${productLabel} Net Utilisation Trend`,
+      description: "Net run rate for this product divided by bottleneck max capacity.",
+      legend: "Net utilisation",
+      aggregate: "activeAvg",
+      barClass: "bar-units",
+      lineClass: "line-util",
+      dotClass: "dot-util",
+      lineColor: "",
+      avgTheme: "units",
+      scaleFloor: 100,
+      formatValue: (value) => `${formatNum(value, 1)}%`,
+      formatTick: (value) => `${formatNum(value, 0)}%`
+    },
+    maxCapacity: {
+      title: `${productLabel} Max Capacity Trend`,
+      description: "Bottleneck max capacity baseline used for this product when it ran.",
+      legend: "Max capacity",
+      aggregate: "activeAvg",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#0f766e",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, 2)} trays/min`,
+      formatTick: (value) => formatNum(value, value < 10 ? 2 : 1)
+    },
+    netRunRate: {
+      title: `${productLabel} Net Run Rate Trend`,
+      description: "Trays produced for this product divided by net production minutes.",
+      legend: "Net run rate",
+      aggregate: "activeAvg",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#1f4f8a",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, 2)} trays/min`,
+      formatTick: (value) => formatNum(value, value < 10 ? 2 : 1)
+    },
+    grossRunRate: {
+      title: `${productLabel} Gross Run Rate Trend`,
+      description: "Trays produced for this product divided by gross production minutes.",
+      legend: "Gross run rate",
+      aggregate: "activeAvg",
+      barClass: "bar-units",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#1f4f8a",
+      avgTheme: "units",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, 2)} trays/min`,
+      formatTick: (value) => formatNum(value, value < 10 ? 2 : 1)
+    }
+  };
+
+  return configs[String(metricKey || "").trim()] || null;
+}
+
+function computeDayRunMetricStats(productName, date, shift, data) {
+  const safeProductName = normalizeTrendProductName(productName, state);
+  if (!state || !safeProductName) {
+    return {
+      hasRuns: false,
+      grossUtilisation: 0,
+      netUtilisation: 0,
+      maxCapacity: 0,
+      netRunRate: 0,
+      grossRunRate: 0
+    };
+  }
+
+  const productRunRows = selectedShiftRowsByDate(data.runRows, date, shift, { line: state }).filter((row) => {
+    const rowProductName = normalizeTrendProductName(row?.product, state);
+    return rowProductName === safeProductName;
+  });
+  const weightedProductRuns = productRunRows
+    .map((row) => ({
+      row,
+      weight: Math.max(0, timedLogShiftWeight(row, shift))
+    }))
+    .filter((entry) => entry.weight > 0);
+  const hasRuns = weightedProductRuns.length > 0;
+  const units = weightedProductRuns.reduce((sum, entry) => sum + Math.max(0, num(entry.row?.unitsProduced)) * entry.weight, 0);
+  const grossMins = weightedProductRuns.reduce((sum, entry) => sum + Math.max(0, num(entry.row?.grossProductionTime)) * entry.weight, 0);
+  const netMins = weightedProductRuns.reduce((sum, entry) => sum + Math.max(0, num(entry.row?.netProductionTime)) * entry.weight, 0);
+  const grossRunRate = grossMins > 0 ? units / grossMins : 0;
+  const netRunRate = netMins > 0 ? units / netMins : 0;
+  const bottleneck = resolveLineBottleneckStage(state, getStages(), shift, (stageId, shiftValue) =>
+    stageTotalMaxThroughput(stageId, shiftValue)
+  );
+  const maxCapacity = hasRuns ? Math.max(0, num(bottleneck?.capacity)) : 0;
+  const grossUtilisation = maxCapacity > 0 ? (grossRunRate / maxCapacity) * 100 : 0;
+  const netUtilisation = maxCapacity > 0 ? (netRunRate / maxCapacity) * 100 : 0;
+
+  return {
+    hasRuns,
+    grossUtilisation: Math.max(0, grossUtilisation),
+    netUtilisation: Math.max(0, netUtilisation),
+    maxCapacity,
+    netRunRate: Math.max(0, netRunRate),
+    grossRunRate: Math.max(0, grossRunRate)
+  };
+}
+
+function dayRunMetricValueFromStats(metricKey, stats) {
+  const safeMetricKey = String(metricKey || "").trim();
+  if (safeMetricKey === "grossUtilisation") return Math.max(0, num(stats?.grossUtilisation));
+  if (safeMetricKey === "netUtilisation") return Math.max(0, num(stats?.netUtilisation));
+  if (safeMetricKey === "maxCapacity") return Math.max(0, num(stats?.maxCapacity));
+  if (safeMetricKey === "netRunRate") return Math.max(0, num(stats?.netRunRate));
+  if (safeMetricKey === "grossRunRate") return Math.max(0, num(stats?.grossRunRate));
+  return 0;
+}
+
 function dayKpiTrendValue(metricKey, date, shift, data) {
   const safeMetricKey = String(metricKey || "").trim();
   const metrics = computeLineMetricsFromData(state, date, shift, data);
@@ -13870,7 +14053,62 @@ function aggregateTrendMetricValues(values, mode = "avg") {
   const safeValues = values.filter((value) => Number.isFinite(value));
   if (!safeValues.length) return 0;
   if (mode === "sum") return safeValues.reduce((sum, value) => sum + value, 0);
+  if (mode === "activeAvg") {
+    const activeValues = safeValues.filter((value) => Math.abs(num(value)) > 0.0001);
+    if (!activeValues.length) return 0;
+    return averageTrendMetricValues(activeValues);
+  }
   return averageTrendMetricValues(safeValues);
+}
+
+function buildDayRunMetricTrendSeries(metricKey, productName) {
+  const safeProductName = normalizeTrendProductName(productName, state);
+  const config = dayRunMetricTrendConfig(metricKey, safeProductName);
+  if (!config || !state || !safeProductName) {
+    return { config: null, productName: "", allDates: [], allMonths: [], dailyPoints: [], monthlyPoints: [] };
+  }
+
+  const data = derivedData();
+  const allDates = trendDatesForShift(state.selectedShift, data);
+  const allMonths = Array.from(new Set(allDates.map(monthKey))).sort();
+  const cursorDate = syncTrendDateCursorToAvailableDates(allDates);
+  const windowDates = trendDailyWindowDates(allDates, cursorDate);
+  syncTrendMonthToAvailableMonths(allMonths);
+
+  const dailyPoints = allDates.map((date) => {
+    const stats = computeDayRunMetricStats(safeProductName, date, state.selectedShift, data);
+    return {
+      date,
+      targetDate: stats.hasRuns ? date : "",
+      label: date.slice(5),
+      value: dayRunMetricValueFromStats(metricKey, stats),
+      hasRuns: stats.hasRuns
+    };
+  });
+  const monthlyPoints = allMonths.map((month) => {
+    const monthPoints = dailyPoints.filter((point) => monthKey(point.date) === month);
+    const activePoints = monthPoints.filter((point) => point.hasRuns);
+    return {
+      date: month,
+      targetDate: activePoints[activePoints.length - 1]?.date || "",
+      label: trendMonthPointLabel(month),
+      value: aggregateTrendMetricValues(
+        monthPoints.map((point) => point.value),
+        config.aggregate
+      )
+    };
+  });
+
+  return {
+    config,
+    productName: safeProductName,
+    allDates,
+    allMonths,
+    cursorDate,
+    windowDates,
+    dailyPoints,
+    monthlyPoints
+  };
 }
 
 function buildDayKpiTrendSeries(metricKey) {
@@ -14047,6 +14285,42 @@ function renderDayKpiTrend() {
   renderDayKpiTrendChart(container, points, config, { scalePoints });
 }
 
+function renderDayRunMetricTrend() {
+  const container = document.getElementById("stageTrendChart");
+  const title = document.getElementById("trendTitle");
+  const meta = document.getElementById("trendMeta");
+  const metricKey = String(trendModalContext.metricKey || "").trim();
+  const productName = normalizeTrendProductName(trendModalContext.productName, state);
+  const { config, allDates, allMonths, cursorDate, windowDates, dailyPoints, monthlyPoints } = buildDayRunMetricTrendSeries(metricKey, productName);
+  if (!container || !title || !meta || !config || !state || !productName) return;
+  const isMonthly = state.trendGranularity === "monthly";
+  const hideZeroDays = state.trendShowZeroDays === false;
+  const points = isMonthly
+    ? monthlyPoints
+    : filterTrendWindowPoints(dailyPoints, windowDates, {
+        hideZeroDays,
+        zeroDayPredicate: (point) => isTrendZeroValue(point.value)
+      });
+  const scalePoints = isMonthly ? monthlyPoints : dailyPoints;
+
+  title.textContent = config.title;
+  meta.textContent = `Shift: ${state.selectedShift} | Product: ${productName} | ${
+    state.trendGranularity === "monthly"
+      ? "Monthly aggregated across active run days"
+      : `Rolling ${TREND_DAILY_WINDOW_SIZE}-day view ending ${formatIsoDateLabel(cursorDate, { month: "short", day: "numeric", year: "numeric" })}${hideZeroDays ? " | 0 days hidden" : ""}`
+  } | ${config.description}`;
+  setTrendControlsUI({ allDates, allMonths, cursorDate, windowDates });
+
+  if (points.length < 2) {
+    container.innerHTML = `<div class="empty-chart">Need at least 2 ${
+      isMonthly ? "months" : hideZeroDays ? "visible non-zero dates" : "visible dates"
+    } to draw a trend.</div>`;
+    return;
+  }
+
+  renderDayKpiTrendChart(container, points, config, { scalePoints });
+}
+
 function renderStageTrend() {
   const container = document.getElementById("stageTrendChart");
   const title = document.getElementById("trendTitle");
@@ -14150,6 +14424,10 @@ function renderStageTrend() {
 }
 
 function renderTrendModalContent() {
+  if (String(trendModalContext.type || "").trim() === "dayRunMetric") {
+    renderDayRunMetricTrend();
+    return;
+  }
   if (String(trendModalContext.type || "").trim() === "dayKpi") {
     renderDayKpiTrend();
     return;
@@ -14166,6 +14444,51 @@ function exportTrendModalCsv() {
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-+|-+$/g, "")
       || "trend";
+
+  if (String(trendModalContext.type || "").trim() === "dayRunMetric") {
+    const metricKey = String(trendModalContext.metricKey || "").trim();
+    const productName = normalizeTrendProductName(trendModalContext.productName, state);
+    const { config, dailyPoints, monthlyPoints } = buildDayRunMetricTrendSeries(metricKey, productName);
+    if (!config || !productName || (!dailyPoints.length && !monthlyPoints.length)) {
+      alert("No trend data available to export.");
+      return;
+    }
+    const rows = [
+      ...dailyPoints.map((point) => ({
+        Line: state.name || "Production Line",
+        Shift: state.selectedShift || "Day",
+        TrendType: "Product Run Metric",
+        Product: productName,
+        Metric: config.legend,
+        Granularity: "Daily",
+        PeriodKey: point.date,
+        PeriodLabel: formatIsoDateLabel(point.date, { month: "short", day: "numeric", year: "numeric" }),
+        Value: roundToDecimals(num(point.value), 4),
+        DisplayValue: config.formatValue(point.value)
+      })),
+      ...monthlyPoints.map((point) => ({
+        Line: state.name || "Production Line",
+        Shift: state.selectedShift || "Day",
+        TrendType: "Product Run Metric",
+        Product: productName,
+        Metric: config.legend,
+        Granularity: "Monthly",
+        PeriodKey: point.date,
+        PeriodLabel: formatMonthLabel(point.date),
+        Value: roundToDecimals(num(point.value), 4),
+        DisplayValue: config.formatValue(point.value)
+      }))
+    ];
+    const columns = ["Line", "Shift", "TrendType", "Product", "Metric", "Granularity", "PeriodKey", "PeriodLabel", "Value", "DisplayValue"];
+    downloadTextFile(
+      `${slug(state.name)}-${slug(productName)}-${slug(config.legend)}-trend.csv`,
+      toCsv(rows, columns),
+      "text/csv;charset=utf-8"
+    );
+    addAudit(state, "EXPORT_TREND_CSV", `${productName} ${config.legend} trend CSV exported`);
+    saveState();
+    return;
+  }
 
   if (String(trendModalContext.type || "").trim() === "dayKpi") {
     const metricKey = String(trendModalContext.metricKey || "").trim();

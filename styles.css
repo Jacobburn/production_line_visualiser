@@ -1184,6 +1184,27 @@ button {
   align-content: start;
 }
 
+.day-run-metric-trigger {
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease,
+    background-color 160ms ease;
+}
+
+.day-run-metric-trigger:hover {
+  border-color: #9fb2c4;
+  box-shadow: 0 8px 18px rgba(31, 79, 138, 0.09);
+  transform: translateY(-1px);
+}
+
+.day-run-metric-trigger:focus-visible {
+  outline: none;
+  border-color: #6f8aa5;
+  box-shadow: 0 0 0 3px rgba(31, 79, 138, 0.16);
+}
+
 .day-glance-run-callout span {
   font-size: 0.57rem;
   color: #51687c;
