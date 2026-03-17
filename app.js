@@ -12362,9 +12362,6 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       stageTotalMaxThroughputForLine(lineContext, stageId, shiftValue)
     )
     : null;
-  const dayGlanceBottleneckLabel = dayGlanceBottleneck
-    ? stageDisplayName(dayGlanceBottleneck.stage, dayGlanceBottleneck.index)
-    : "Bottleneck not set";
   const dayGlanceMaxCapacity = Math.max(0, num(dayGlanceBottleneck?.capacity));
   const formatDayGlanceRate = (value) => `${formatNum(Math.max(0, value), 2)} trays / min`;
   const formatDayGlanceUtilisation = (value) => `${formatNum(Math.max(0, value), 1)}%`;
@@ -12574,17 +12571,11 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     </div>
     <section class="day-glance">
       <div class="day-glance-head">
-        <h3>Day at a glance</h3>
+        <h3>Production Runs</h3>
         <p>${selectedDate} | ${selectedShiftLabel} | Runs: ${formatNum(glance.runCount, 0)} | Downtime events: ${formatNum(glance.downtimeCount, 0)}</p>
       </div>
       <div class="day-glance-grid">
         <article class="day-glance-card day-glance-card-runs">
-          <h4>Production Runs</h4>
-          <p class="day-glance-meta">${
-            dayGlanceMaxCapacity > 0
-              ? `Rates are shown per run. Capacity and utilisation use ${htmlEscape(dayGlanceBottleneckLabel)} as the bottleneck max rate baseline.`
-              : "Rates are shown per run. Set a bottleneck stage with max throughput to show capacity and utilisation."
-          }</p>
           <div class="day-glance-run-list">
             ${productionRunTiles || `<p class="day-glance-empty">No production runs in this selection.</p>`}
           </div>
