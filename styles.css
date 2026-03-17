@@ -1183,10 +1183,11 @@ button {
   border-radius: 0.42rem;
   min-height: 2.6rem;
   padding: 0.48rem 0.46rem;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  column-gap: 0.38rem;
+  display: flex;
+  flex-direction: column-reverse;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 0.18rem;
   background: #ffffff;
 }
 
@@ -1215,13 +1216,10 @@ button {
   font-size: 0.57rem;
   color: #51687c;
   line-height: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .day-glance-run-callout strong {
-  font-size: 0.69rem;
+  font-size: 0.95rem;
   color: #2f4559;
   font-variant-numeric: tabular-nums;
   line-height: 1;
