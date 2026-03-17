@@ -12403,16 +12403,17 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   const canOpenDayRunMetricTrend = rootId === "dayVisualiserCanvas" && appState.appMode === "manager" && Boolean(lineContext?.id);
   const formatDayGlanceRate = (value) => `${formatNum(Math.max(0, value), 2)} trays / min`;
   const formatDayGlanceUtilisation = (value) => `${formatNum(Math.max(0, value), 1)}%`;
-  const dayGlanceRunMetric = (label, value, metricKey = "", productName = "") => {
+  const dayGlanceRunMetric = (label, value, metricKey = "", productName = "", tooltipText = "") => {
     const safeMetricKey = String(metricKey || "").trim();
     const safeProductName = String(productName || "").trim();
+    const safeTooltipText = String(tooltipText || "").trim();
     const interactive = canOpenDayRunMetricTrend && safeMetricKey && safeProductName;
     return `
     <div class="day-glance-run-callout${interactive ? " day-run-metric-trigger" : ""}"${
       interactive
         ? ` data-day-run-metric="${htmlEscape(safeMetricKey)}" data-day-run-product="${htmlEscape(safeProductName)}" role="button" tabindex="0" aria-label="${htmlEscape(`Show ${label} trend for ${safeProductName}`)}"`
         : ""
-    }>
+    }${safeTooltipText ? ` data-calc-tooltip="${htmlEscape(safeTooltipText)}"` : ""}>
       <span>${htmlEscape(label)}</span>
       <strong>${htmlEscape(value)}</strong>
     </div>
@@ -12480,6 +12481,23 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         hasCapacity: dayGlanceMaxCapacity > 0
       });
       const runSummary = `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}`;
+      const traysTooltip = `Units produced logged for this run = ${formatNum(units, 0)} trays.`;
+      const downTooltip = `Downtime overlapping this run = ${formatNum(downInRunMins, 1)} min.`;
+      const grossUtilisationTooltip = dayGlanceMaxCapacity > 0
+        ? `Gross run rate / max capacity x 100 = ${formatNum(grossTraysPerMin, 2)} / ${formatNum(dayGlanceMaxCapacity, 2)} x 100 = ${formatNum(grossUtilisation, 1)}%.`
+        : "Gross utilisation needs a bottleneck max capacity.";
+      const netUtilisationTooltip = dayGlanceMaxCapacity > 0
+        ? `Net run rate / max capacity x 100 = ${formatNum(netTraysPerMin, 2)} / ${formatNum(dayGlanceMaxCapacity, 2)} x 100 = ${formatNum(netUtilisation, 1)}%.`
+        : "Net utilisation needs a bottleneck max capacity.";
+      const maxCapacityTooltip = dayGlanceMaxCapacity > 0
+        ? `Bottleneck max rate for this line and shift = ${formatNum(dayGlanceMaxCapacity, 2)} trays / min.`
+        : "Set a bottleneck stage with max throughput to calculate max capacity.";
+      const netRunRateTooltip = netRunMins > 0
+        ? `Trays / net production minutes = ${formatNum(units, 0)} / ${formatNum(netRunMins, 1)} = ${formatNum(netTraysPerMin, 2)} trays / min.`
+        : `Net run rate from logged value = ${formatNum(netTraysPerMin, 2)} trays / min.`;
+      const grossRunRateTooltip = grossMins > 0
+        ? `Trays / gross production minutes = ${formatNum(units, 0)} / ${formatNum(grossMins, 1)} = ${formatNum(grossTraysPerMin, 2)} trays / min.`
+        : `Gross run rate from logged value = ${formatNum(grossTraysPerMin, 2)} trays / min.`;
       return `
         <article class="day-glance-run-tile">
           <div class="day-glance-run-main">
@@ -12490,13 +12508,13 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
             </div>
           </div>
           <div class="day-glance-run-metrics">
-            ${dayGlanceRunMetric("Trays", formatNum(units, 0), "totalTrays", canonicalProductName)}
-            ${dayGlanceRunMetric("Down", `${formatNum(downInRunMins, 1)} min`, "minutesDown", canonicalProductName)}
-            ${dayGlanceRunMetric("Gross utilisation", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation), "grossUtilisation", canonicalProductName)}
-            ${dayGlanceRunMetric("Net utilisation", netUtilisation === null ? "-" : formatDayGlanceUtilisation(netUtilisation), "netUtilisation", canonicalProductName)}
-            ${dayGlanceRunMetric("Max capacity", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set", "maxCapacity", canonicalProductName)}
-            ${dayGlanceRunMetric("Net run rate", formatDayGlanceRate(netTraysPerMin), "netRunRate", canonicalProductName)}
-            ${dayGlanceRunMetric("Gross run rate", formatDayGlanceRate(grossTraysPerMin), "grossRunRate", canonicalProductName)}
+            ${dayGlanceRunMetric("Trays", formatNum(units, 0), "totalTrays", canonicalProductName, traysTooltip)}
+            ${dayGlanceRunMetric("Down", `${formatNum(downInRunMins, 1)} min`, "minutesDown", canonicalProductName, downTooltip)}
+            ${dayGlanceRunMetric("Gross utilisation", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation), "grossUtilisation", canonicalProductName, grossUtilisationTooltip)}
+            ${dayGlanceRunMetric("Net utilisation", netUtilisation === null ? "-" : formatDayGlanceUtilisation(netUtilisation), "netUtilisation", canonicalProductName, netUtilisationTooltip)}
+            ${dayGlanceRunMetric("Max capacity", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set", "maxCapacity", canonicalProductName, maxCapacityTooltip)}
+            ${dayGlanceRunMetric("Net run rate", formatDayGlanceRate(netTraysPerMin), "netRunRate", canonicalProductName, netRunRateTooltip)}
+            ${dayGlanceRunMetric("Gross run rate", formatDayGlanceRate(grossTraysPerMin), "grossRunRate", canonicalProductName, grossRunRateTooltip)}
           </div>
         </article>
       `;
