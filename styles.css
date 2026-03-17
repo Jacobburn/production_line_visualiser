@@ -1178,10 +1178,11 @@ button {
   border: 1px solid #e2ebf4;
   border-radius: 0.42rem;
   padding: 0.3rem 0.34rem;
-  display: grid;
-  gap: 0.06rem;
+  display: flex;
+  align-items: baseline;
+  gap: 0.28rem;
+  flex-wrap: wrap;
   background: #ffffff;
-  align-content: start;
 }
 
 .day-run-metric-trigger {
@@ -1216,6 +1217,7 @@ button {
   color: #2f4559;
   font-variant-numeric: tabular-nums;
   line-height: 1.12;
+  white-space: nowrap;
 }
 
 .day-glance-list {
