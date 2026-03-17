@@ -1178,10 +1178,10 @@ button {
   border: 1px solid #e2ebf4;
   border-radius: 0.42rem;
   padding: 0.3rem 0.34rem;
-  display: flex;
-  align-items: baseline;
-  gap: 0.28rem;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 0.38rem;
   background: #ffffff;
 }
 
@@ -1209,14 +1209,17 @@ button {
 .day-glance-run-callout span {
   font-size: 0.57rem;
   color: #51687c;
-  line-height: 1.05;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .day-glance-run-callout strong {
   font-size: 0.69rem;
   color: #2f4559;
   font-variant-numeric: tabular-nums;
-  line-height: 1.12;
+  line-height: 1;
   white-space: nowrap;
 }
 
