@@ -89,6 +89,7 @@
                 </div>
               </div>
               <button id="managerSettingsTabBtn" class="tab-btn home-btn home-settings-tab hidden" type="button" aria-pressed="false">Settings</button>
+              <button id="homeResetPasswordBtn" class="ghost-btn home-btn hidden" type="button">Reset Password</button>
               <button id="supervisorLogout" class="ghost-btn home-btn hidden" type="button">Logout</button>
               <button id="supervisorMobileMode" class="ghost-btn hidden" type="button">Mobile Mode</button>
               <div class="shift-toggle" role="group" aria-label="App mode">
@@ -672,8 +673,37 @@
         <form id="editSupervisorForm" class="form-grid">
           <input id="editSupervisorName" placeholder="Name" required />
           <input id="editSupervisorUsername" placeholder="Username" required />
-          <input id="editSupervisorPassword" type="password" placeholder="New Password (optional)" />
           <button type="submit">Save Supervisor</button>
+        </form>
+      </div>
+    </div>
+
+    <div id="passwordResetModal" class="modal-overlay" aria-hidden="true">
+      <div class="modal-card stage-settings-modal-card password-reset-modal-card" role="dialog" aria-modal="true" aria-labelledby="passwordResetTitle">
+        <div class="modal-head">
+          <div class="modal-title-block">
+            <h2 id="passwordResetTitle">Reset Password</h2>
+            <p id="passwordResetMeta" class="muted">Update the password for your signed-in account.</p>
+          </div>
+          <button id="closePasswordResetModal" class="ghost-btn" type="button">Close</button>
+        </div>
+        <form id="passwordResetForm" class="form-grid password-reset-form">
+          <label class="password-reset-field" for="passwordResetCurrentPassword">
+            <span>Current Password</span>
+            <input id="passwordResetCurrentPassword" type="password" autocomplete="current-password" required />
+          </label>
+          <label class="password-reset-field" for="passwordResetNewPassword">
+            <span>New Password</span>
+            <input id="passwordResetNewPassword" type="password" minlength="6" autocomplete="new-password" required />
+          </label>
+          <label class="password-reset-field" for="passwordResetConfirmPassword">
+            <span>Confirm New Password</span>
+            <input id="passwordResetConfirmPassword" type="password" minlength="6" autocomplete="new-password" required />
+          </label>
+          <div class="form-submit-actions password-reset-actions">
+            <p id="passwordResetStatus" class="muted password-reset-status" aria-live="polite"></p>
+            <button id="passwordResetSubmit" type="submit">Update Password</button>
+          </div>
         </form>
       </div>
     </div>
@@ -818,6 +848,7 @@
             <button id="lineModeManager" type="button" class="shift-option">Manager App</button>
             <button id="lineModeSupervisor" type="button" class="shift-option">Supervisor App</button>
           </div>
+          <button id="lineWorkspaceResetPasswordBtn" class="ghost-btn home-btn hidden" type="button">Reset Password</button>
           <button id="goHome" class="ghost-btn home-btn" type="button" aria-label="Home">Home</button>
         </div>
       </header>

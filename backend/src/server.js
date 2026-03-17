@@ -54,6 +54,11 @@ const loginSchema = z.object({
   password: z.string().min(1)
 });
 
+const passwordResetSchema = z.object({
+  currentPassword: z.string().min(1).max(120),
+  newPassword: z.string().min(6).max(120)
+});
+
 const lineSchema = z.object({
   name: z.string().min(2).max(120),
   secretKey: z.string().min(4).max(64)
@@ -155,8 +160,7 @@ const supervisorAssignmentsSchema = z.object({
 
 const supervisorUpdateSchema = z.object({
   name: z.string().min(1).max(120),
-  username: z.string().min(3).max(60),
-  password: z.string().min(6).max(120).optional().or(z.literal(''))
+  username: z.string().min(3).max(60)
 });
 
 const shiftLogSchema = z.object({
@@ -1751,6 +1755,42 @@ app.get('/api/me', authMiddleware, asyncRoute(async (req, res) => {
   res.json({ user: req.user });
 }));
 
+app.post('/api/me/password', authMiddleware, asyncRoute(async (req, res) => {
+  const parsed = passwordResetSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid password reset payload' });
+
+  const currentPassword = String(parsed.data.currentPassword || '');
+  const newPassword = String(parsed.data.newPassword || '');
+  const userResult = await dbQuery(
+    `SELECT id, password_hash
+     FROM users
+     WHERE id = $1
+       AND is_active = TRUE`,
+    [req.user.id]
+  );
+  const user = userResult.rows[0] || null;
+  if (!user) return res.status(401).json({ error: 'User inactive or not found' });
+
+  const valid = await comparePassword(currentPassword, user.password_hash);
+  if (!valid) return res.status(401).json({ error: 'Current password is incorrect' });
+
+  const unchanged = await comparePassword(newPassword, user.password_hash);
+  if (unchanged) {
+    return res.status(400).json({ error: 'New password must be different from current password' });
+  }
+
+  const passwordHash = await hashPassword(newPassword);
+  await dbQuery(
+    `UPDATE users
+     SET password_hash = $2,
+         updated_at = NOW()
+     WHERE id = $1`,
+    [req.user.id, passwordHash]
+  );
+
+  return res.json({ ok: true });
+}));
+
 app.get('/api/line-groups', authMiddleware, requireRole('manager'), asyncRoute(async (_req, res) => {
   await ensureLineGroupSchema();
   res.json({ lineGroups: await fetchLineGroups() });
@@ -2932,28 +2972,15 @@ app.patch('/api/supervisors/:supervisorId', authMiddleware, requireRole('manager
 
   const nextName = parsed.data.name.trim();
   const nextUsername = parsed.data.username.trim().toLowerCase();
-  const password = String(parsed.data.password || '').trim();
 
   try {
-    let result;
-    if (password) {
-      const passwordHash = await hashPassword(password);
-      result = await dbQuery(
-        `UPDATE users
-         SET name = $2, username = $3, password_hash = $4, updated_at = NOW()
-         WHERE id = $1 AND role = 'supervisor'
-         RETURNING id, name, username, is_active AS "isActive"`,
-        [supervisorId, nextName, nextUsername, passwordHash]
-      );
-    } else {
-      result = await dbQuery(
-        `UPDATE users
-         SET name = $2, username = $3, updated_at = NOW()
-         WHERE id = $1 AND role = 'supervisor'
-         RETURNING id, name, username, is_active AS "isActive"`,
-        [supervisorId, nextName, nextUsername]
-      );
-    }
+    const result = await dbQuery(
+      `UPDATE users
+       SET name = $2, username = $3, updated_at = NOW()
+       WHERE id = $1 AND role = 'supervisor'
+       RETURNING id, name, username, is_active AS "isActive"`,
+      [supervisorId, nextName, nextUsername]
+    );
     if (!result.rowCount) return res.status(404).json({ error: 'Supervisor not found' });
     return res.json({ supervisor: result.rows[0] });
   } catch (error) {

@@ -144,6 +144,7 @@ let runCrewingPatternModalState = null;
 let dayVizBlockModalState = null;
 let dayVizBlockModalBusy = false;
 let dayVizAddRecordModalState = null;
+let passwordResetModalBusy = false;
 let trendModalContext = { type: "stage", metricKey: "" };
 appState.supervisors = normalizeSupervisors(appState.supervisors, appState.lines);
 appState.lineGroups = normalizeLineGroups(appState.lineGroups);
@@ -5713,7 +5714,6 @@ function bindHome() {
   const editSupervisorForm = document.getElementById("editSupervisorForm");
   const editSupervisorNameInput = document.getElementById("editSupervisorName");
   const editSupervisorUsernameInput = document.getElementById("editSupervisorUsername");
-  const editSupervisorPasswordInput = document.getElementById("editSupervisorPassword");
   const editLineModal = document.getElementById("editLineModal");
   const closeEditLineModalBtn = document.getElementById("closeEditLineModal");
   const editLineForm = document.getElementById("editLineForm");
@@ -6528,7 +6528,6 @@ function bindHome() {
     editingSupervisorId = supervisorId;
     editSupervisorNameInput.value = sup.name || "";
     editSupervisorUsernameInput.value = sup.username || "";
-    editSupervisorPasswordInput.value = "";
     editSupervisorModal.classList.add("open");
     editSupervisorModal.setAttribute("aria-hidden", "false");
     editSupervisorNameInput.focus();
@@ -7600,13 +7599,8 @@ function bindHome() {
     if (!sup) return;
     const name = String(editSupervisorNameInput.value || "").trim();
     const username = String(editSupervisorUsernameInput.value || "").trim().toLowerCase();
-    const password = String(editSupervisorPasswordInput.value || "").trim();
     if (!name || !username) {
       alert("Name and username are required.");
-      return;
-    }
-    if (password && password.length < 6) {
-      alert("New password must be at least 6 characters.");
       return;
     }
     try {
@@ -7616,8 +7610,7 @@ function bindHome() {
         token: session.backendToken,
         body: {
           name,
-          username,
-          password
+          username
         }
       });
       const previousUsername = sup.username;
@@ -11966,6 +11959,151 @@ function bindDayVizAddRecordModal() {
   });
 }
 
+function activePasswordResetSession() {
+  if (appState.appMode === "supervisor") {
+    return appState.supervisorSession?.backendToken ? appState.supervisorSession : null;
+  }
+  return managerBackendSession?.backendToken ? managerBackendSession : null;
+}
+
+function setPasswordResetStatus(message = "", tone = "") {
+  const statusNode = document.getElementById("passwordResetStatus");
+  if (!statusNode) return;
+  statusNode.textContent = String(message || "").trim();
+  statusNode.classList.toggle("is-success", tone === "success");
+  statusNode.classList.toggle("is-error", tone === "error");
+  if (!message) statusNode.classList.remove("is-success", "is-error");
+}
+
+function closePasswordResetModal() {
+  const overlay = document.getElementById("passwordResetModal");
+  const form = document.getElementById("passwordResetForm");
+  const submitBtn = document.getElementById("passwordResetSubmit");
+  passwordResetModalBusy = false;
+  if (form) form.reset();
+  if (submitBtn) {
+    submitBtn.disabled = false;
+    submitBtn.textContent = "Update Password";
+  }
+  setPasswordResetStatus();
+  if (!overlay) return;
+  overlay.classList.remove("open");
+  overlay.setAttribute("aria-hidden", "true");
+}
+
+function openPasswordResetModal() {
+  const overlay = document.getElementById("passwordResetModal");
+  const form = document.getElementById("passwordResetForm");
+  const metaNode = document.getElementById("passwordResetMeta");
+  const currentPasswordInput = document.getElementById("passwordResetCurrentPassword");
+  const session = activePasswordResetSession();
+  if (!overlay || !form || !session?.backendToken) return;
+
+  const roleLabel = session.role === "supervisor" ? "Supervisor" : "Manager";
+  const username = String(session.username || "").trim().toLowerCase();
+  if (metaNode) {
+    metaNode.textContent = username
+      ? `Update the password for your signed-in ${roleLabel.toLowerCase()} account (@${username}).`
+      : `Update the password for your signed-in ${roleLabel.toLowerCase()} account.`;
+  }
+
+  passwordResetModalBusy = false;
+  form.reset();
+  setPasswordResetStatus();
+  overlay.classList.add("open");
+  overlay.setAttribute("aria-hidden", "false");
+  currentPasswordInput?.focus();
+}
+
+async function submitPasswordResetModal(event) {
+  event.preventDefault();
+  const session = activePasswordResetSession();
+  if (!session?.backendToken) {
+    setPasswordResetStatus("Login required.", "error");
+    return;
+  }
+
+  const currentPasswordInput = document.getElementById("passwordResetCurrentPassword");
+  const newPasswordInput = document.getElementById("passwordResetNewPassword");
+  const confirmPasswordInput = document.getElementById("passwordResetConfirmPassword");
+  const submitBtn = document.getElementById("passwordResetSubmit");
+  const currentPassword = String(currentPasswordInput?.value || "");
+  const newPassword = String(newPasswordInput?.value || "");
+  const confirmPassword = String(confirmPasswordInput?.value || "");
+
+  if (!currentPassword || !newPassword || !confirmPassword) {
+    setPasswordResetStatus("Current password, new password and confirmation are required.", "error");
+    return;
+  }
+  if (newPassword.length < 6) {
+    setPasswordResetStatus("New password must be at least 6 characters.", "error");
+    newPasswordInput?.focus();
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    setPasswordResetStatus("New password and confirmation must match.", "error");
+    confirmPasswordInput?.focus();
+    return;
+  }
+
+  passwordResetModalBusy = true;
+  setPasswordResetStatus("Updating password...");
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "Updating...";
+  }
+
+  try {
+    await apiRequest("/api/me/password", {
+      method: "POST",
+      token: session.backendToken,
+      body: {
+        currentPassword,
+        newPassword
+      }
+    });
+    setPasswordResetStatus("Password updated.", "success");
+    const form = document.getElementById("passwordResetForm");
+    form?.reset();
+  } catch (error) {
+    setPasswordResetStatus(String(error?.message || "Could not update password.").trim(), "error");
+    if (currentPasswordInput) currentPasswordInput.value = "";
+    currentPasswordInput?.focus();
+  } finally {
+    passwordResetModalBusy = false;
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "Update Password";
+    }
+  }
+}
+
+function bindPasswordResetModal() {
+  const overlay = document.getElementById("passwordResetModal");
+  const closeBtn = document.getElementById("closePasswordResetModal");
+  const form = document.getElementById("passwordResetForm");
+  const openBtns = [
+    document.getElementById("homeResetPasswordBtn"),
+    document.getElementById("lineWorkspaceResetPasswordBtn")
+  ].filter(Boolean);
+
+  openBtns.forEach((btn) => {
+    btn.addEventListener("click", openPasswordResetModal);
+  });
+  if (!overlay || !closeBtn || !form) return;
+
+  closeBtn.addEventListener("click", closePasswordResetModal);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closePasswordResetModal();
+  });
+  form.addEventListener("submit", submitPasswordResetModal);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && overlay.classList.contains("open")) {
+      closePasswordResetModal();
+    }
+  });
+}
+
 function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameResolver) {
   const blocks = { shifts: [], breaks: [], runs: [], downtime: [], source: {} };
   const allShiftRowsForDate = data.shiftRows.filter((row) => row.date === selectedDate);
@@ -14576,6 +14714,7 @@ function renderHome() {
   const homeTitle = document.getElementById("homeTitle");
   const sidebarBackdrop = document.getElementById("sidebarBackdrop");
   const homeSidebar = document.getElementById("homeSidebar");
+  const homeResetPasswordBtn = document.getElementById("homeResetPasswordBtn");
   const headerLogoutBtn = document.getElementById("supervisorLogout");
   const managerSettingsTabBtn = document.getElementById("managerSettingsTabBtn");
   const homeUserChip = document.getElementById("homeUserChip");
@@ -14586,6 +14725,7 @@ function renderHome() {
   const lineWorkspaceUserAvatar = document.getElementById("lineWorkspaceUserAvatar");
   const lineWorkspaceUserRole = document.getElementById("lineWorkspaceUserRole");
   const lineWorkspaceUserIdentity = document.getElementById("lineWorkspaceUserIdentity");
+  const lineWorkspaceResetPasswordBtn = document.getElementById("lineWorkspaceResetPasswordBtn");
   const managerHome = document.getElementById("managerHome");
   const supervisorHome = document.getElementById("supervisorHome");
   const modeManagerBtn = document.getElementById("modeManager");
@@ -14655,6 +14795,9 @@ function renderHome() {
   }
   const showSupervisorTile = isSupervisor && Boolean(session);
   const showManagerTile = !isSupervisor && managerSessionActive;
+  if (homeResetPasswordBtn) {
+    homeResetPasswordBtn.classList.toggle("hidden", !(showManagerTile || showSupervisorTile));
+  }
   const setUserChip = (roleEl, identityEl, avatarEl, label, username, fallbackAvatar = "M") => {
     const safeLabel = String(label || "").trim() || "Manager";
     const safeUsername = String(username || "").trim() || "manager";
@@ -14667,6 +14810,9 @@ function renderHome() {
   }
   if (lineWorkspaceUserChip) {
     lineWorkspaceUserChip.classList.toggle("hidden", !showManagerTile);
+  }
+  if (lineWorkspaceResetPasswordBtn) {
+    lineWorkspaceResetPasswordBtn.classList.toggle("hidden", !showManagerTile);
   }
   if (showSupervisorTile) {
     const supervisorLabel = String(activeSupervisor?.name || session?.name || session?.username || "Supervisor").trim() || "Supervisor";
@@ -15382,6 +15528,9 @@ function renderAll() {
     line.selectedDate = normalizeWeekdayIsoDate(line.selectedDate || baselineDate, { direction: -1 });
   });
   const managerSessionActive = Boolean(managerBackendSession.backendToken);
+  if (!activePasswordResetSession()?.backendToken) {
+    closePasswordResetModal();
+  }
   if (appState.activeView === "line" && (appState.appMode !== "manager" || !managerSessionActive)) {
     appState.activeView = "home";
   }
@@ -15530,6 +15679,7 @@ async function bootstrapApp() {
     bindStep("bindRunCrewingPatternModal", bindRunCrewingPatternModal);
     bindStep("bindDayVizBlockModal", bindDayVizBlockModal);
     bindStep("bindDayVizAddRecordModal", bindDayVizAddRecordModal);
+    bindStep("bindPasswordResetModal", bindPasswordResetModal);
     bindStep("bindHome", bindHome);
     bindStep("bindDataSubtabs", bindDataSubtabs);
     bindStep("bindVisualiserControls", bindVisualiserControls);

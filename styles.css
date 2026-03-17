@@ -888,6 +888,41 @@ button {
   margin-top: -0.1rem;
 }
 
+.password-reset-modal-card {
+  width: min(540px, 95vw);
+}
+
+.password-reset-form {
+  grid-template-columns: 1fr;
+  gap: 0.72rem;
+}
+
+.password-reset-field > span {
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #607387;
+}
+
+.password-reset-actions {
+  align-items: center;
+  justify-content: space-between;
+}
+
+.password-reset-status {
+  margin: 0;
+  min-height: 1.2em;
+}
+
+.password-reset-status.is-success {
+  color: #127042;
+}
+
+.password-reset-status.is-error {
+  color: #9f1c1c;
+}
+
 .day-viz-block-modal-body {
   display: grid;
   gap: 0.45rem;
@@ -4605,6 +4640,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   color: var(--text-muted-home);
 }
 
+#homeView.dashboard-page #homeResetPasswordBtn.home-btn,
 #homeView.dashboard-page #supervisorLogout.home-btn {
   width: auto;
   min-width: 96px;
@@ -6163,6 +6199,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   }
 
   #homeView.dashboard-page #managerSettingsTabBtn.home-settings-tab,
+  #homeView.dashboard-page #homeResetPasswordBtn.home-btn,
   #homeView.dashboard-page #supervisorLogout.home-btn,
   #homeView.dashboard-page #supervisorMobileMode.ghost-btn {
     width: 100%;
@@ -6220,6 +6257,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
     min-width: 126px;
   }
 
+  #lineWorkspace #lineWorkspaceResetPasswordBtn.home-btn,
   #lineWorkspace #goHome.home-btn {
     width: 100%;
     min-width: 0;
@@ -6330,6 +6368,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   }
 
   #homeView.dashboard-page #managerSettingsTabBtn.home-settings-tab,
+  #homeView.dashboard-page #homeResetPasswordBtn.home-btn,
   #homeView.dashboard-page #supervisorLogout.home-btn,
   #homeView.dashboard-page #supervisorMobileMode.ghost-btn {
     min-height: 40px;
@@ -6345,6 +6384,7 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
     padding: 0 6px;
   }
 
+  #lineWorkspace #lineWorkspaceResetPasswordBtn.home-btn,
   #lineWorkspace #goHome.home-btn {
     min-height: 40px;
   }
