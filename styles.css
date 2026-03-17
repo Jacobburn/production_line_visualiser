@@ -1115,14 +1115,17 @@ button {
   padding: 0.48rem 0.52rem;
   background: #f8fbfe;
   display: grid;
-  gap: 0.46rem;
+  grid-template-columns: minmax(260px, 1.35fr) minmax(0, 5fr);
+  align-items: center;
+  gap: 0.5rem;
 }
 
 .day-glance-run-main {
   display: grid;
   grid-template-columns: auto 1fr;
-  align-items: start;
+  align-items: center;
   gap: 0.38rem;
+  min-width: 0;
 }
 
 .day-glance-light {
@@ -1172,6 +1175,7 @@ button {
   display: grid;
   grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 0.22rem;
+  min-width: 0;
 }
 
 .day-glance-run-callout {
@@ -1275,6 +1279,11 @@ button {
   .day-glance-run-metrics {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .day-glance-run-tile {
+    grid-template-columns: minmax(220px, 1.2fr) minmax(0, 3fr);
+    align-items: start;
+  }
 }
 
 @media (max-width: 760px) {
@@ -1306,6 +1315,7 @@ button {
   }
 
   .day-glance-run-tile {
+    grid-template-columns: 1fr;
     gap: 0.45rem;
   }
 
