@@ -890,6 +890,21 @@ function sortLinesByDisplayOrder(lines) {
   });
 }
 
+function managerLineGroupOptions(activeLineId) {
+  const safeLineId = String(activeLineId || "").trim();
+  const activeLine = safeLineId && appState.lines?.[safeLineId] ? appState.lines[safeLineId] : null;
+  if (!activeLine) return [];
+  const validGroupIds = new Set(normalizeLineGroups(appState.lineGroups).map((group) => group.id));
+  const activeGroupId = String(activeLine?.groupId || "").trim();
+  const activeInNamedGroup = activeGroupId && validGroupIds.has(activeGroupId);
+  const groupLines = sortLinesByDisplayOrder(Object.values(appState.lines || {})).filter((line) => {
+    const lineGroupId = String(line?.groupId || "").trim();
+    const lineInNamedGroup = lineGroupId && validGroupIds.has(lineGroupId);
+    return activeInNamedGroup ? lineGroupId === activeGroupId : !lineInNamedGroup;
+  });
+  return groupLines.some((line) => String(line?.id || "").trim() === safeLineId) ? groupLines : [activeLine];
+}
+
 function homeLineGroupExpandedState() {
   if (!appState.homeLineGroupExpanded || typeof appState.homeLineGroupExpanded !== "object" || Array.isArray(appState.homeLineGroupExpanded)) {
     appState.homeLineGroupExpanded = {};
@@ -5649,6 +5664,7 @@ function bindHome() {
   const managerSettingsTabBtn = document.getElementById("managerSettingsTabBtn");
   const supervisorMobileModeBtn = document.getElementById("supervisorMobileMode");
   const supervisorLineSelect = document.getElementById("supervisorLineSelect");
+  const managerLineGroupSelect = document.getElementById("managerLineGroupSelect");
   const svDateInputs = Array.from(document.querySelectorAll("[data-sv-date]"));
   const svShiftButtons = Array.from(document.querySelectorAll("[data-sv-shift]"));
   const svPrevBtns = Array.from(document.querySelectorAll("[data-sv-prev]"));
@@ -6888,6 +6904,18 @@ function bindHome() {
     saveState();
     renderHome();
   });
+
+  if (managerLineGroupSelect) {
+    managerLineGroupSelect.addEventListener("change", () => {
+      const nextLineId = String(managerLineGroupSelect.value || "").trim();
+      if (!nextLineId || nextLineId === String(appState.activeLineId || "").trim() || !appState.lines?.[nextLineId]) return;
+      appState.activeLineId = nextLineId;
+      appState.activeView = "line";
+      state = appState.lines[nextLineId];
+      saveState();
+      renderAll();
+    });
+  }
 
   if (supervisorActionLineInput) {
     supervisorActionLineInput.addEventListener("change", () => {
@@ -15950,6 +15978,15 @@ function renderAll() {
     closeDayVizAddRecordModal();
   }
   document.getElementById("appTitle").textContent = state.name || "Production Line";
+  const managerLineGroupSelect = document.getElementById("managerLineGroupSelect");
+  if (managerLineGroupSelect) {
+    const groupLines = managerLineGroupOptions(state.id);
+    managerLineGroupSelect.innerHTML = groupLines.length
+      ? groupLines.map((line) => `<option value="${htmlEscape(line.id)}">${htmlEscape(line.name || line.id)}</option>`).join("")
+      : `<option value="${htmlEscape(state.id || "")}">${htmlEscape(state.name || state.id || "Production Line")}</option>`;
+    managerLineGroupSelect.value = String(state.id || "");
+    managerLineGroupSelect.disabled = groupLines.length <= 1;
+  }
   const editBtn = document.getElementById("toggleLayoutEdit");
   const addLineBtn = document.getElementById("addFlowLine");
   const addArrowBtn = document.getElementById("addFlowArrow");

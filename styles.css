@@ -4898,17 +4898,29 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
 #lineWorkspace .manager-workspace-top-controls {
   display: flex;
   align-items: flex-end;
-  justify-content: flex-start;
+  justify-content: space-between;
   gap: 0.85rem;
   margin: 0.2rem 0 0.7rem;
 }
 
 #lineWorkspace .manager-workspace-top-controls .tabs {
+  flex: 1 1 auto;
   margin-left: 0;
   min-height: 44px;
   border-radius: 999px;
   border-color: var(--stroke);
   background: #eef2f6;
+}
+
+#lineWorkspace .manager-line-select-inline {
+  flex: 0 0 280px;
+  min-width: 240px;
+  max-width: 340px;
+}
+
+#lineWorkspace .manager-line-select-inline select {
+  height: 44px;
+  border-radius: var(--control-radius);
 }
 
 #lineWorkspace .manager-workspace-top-controls .tab-btn {
@@ -6331,6 +6343,8 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
   }
 
   #lineWorkspace .manager-workspace-top-controls {
+    flex-direction: column;
+    align-items: stretch;
     margin-top: 0.3rem;
     margin-bottom: 0.65rem;
   }
@@ -6339,6 +6353,11 @@ body:has(#homeView.dashboard-page:not(.hidden)) {
     width: 100%;
     overflow-x: auto;
     flex-wrap: nowrap;
+  }
+
+  #lineWorkspace .manager-line-select-inline {
+    min-width: 0;
+    max-width: none;
   }
 
   #lineWorkspace .manager-workspace-top-controls .tab-btn {
