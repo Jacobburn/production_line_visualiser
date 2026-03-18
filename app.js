@@ -54,6 +54,7 @@ const AUDIT_COLUMNS = ["When", "Actor", "Action", "Details"];
 const DASHBOARD_COLUMNS = ["Line", "Date", "Shift", "Units", "Downtime (min)", "Utilisation (%)", "Net Run Rate (u/min)", "Bottleneck", "Staffing"];
 const SHIFT_OPTIONS = ["Day", "Night", "Full Day"];
 const MANAGER_LINE_TABS = Object.freeze(["visualiser", "dayVisualiser", "lineTrends", "data", "settings"]);
+const HIDDEN_MANAGER_LINE_TABS = Object.freeze(["lineTrends"]);
 const MANAGER_DATA_TABS = Object.freeze(["dataShift", "dataRun", "dataDown", "dataControls"]);
 const LINE_TREND_RANGES = ["day", "week", "month", "quarter"];
 const LOG_ASSIGNABLE_SHIFTS = ["Day", "Night"];
@@ -297,6 +298,11 @@ function parseManagerLineTabId(value) {
   return MANAGER_LINE_TABS.includes(tabId) ? tabId : "";
 }
 
+function isVisibleManagerLineTab(value) {
+  const tabId = parseManagerLineTabId(value);
+  return Boolean(tabId) && !HIDDEN_MANAGER_LINE_TABS.includes(tabId);
+}
+
 function parseManagerDataTabId(value) {
   const tabId = String(value || "").trim();
   return MANAGER_DATA_TABS.includes(tabId) ? tabId : "";
@@ -304,21 +310,29 @@ function parseManagerDataTabId(value) {
 
 function activeManagerLineTabId() {
   const activeStateTab = parseManagerLineTabId(appState.managerLineTab);
-  if (activeStateTab) return activeStateTab;
+  if (isVisibleManagerLineTab(activeStateTab)) return activeStateTab;
   const activeDomTab = parseManagerLineTabId(document.querySelector(".tab-btn[data-tab].active")?.dataset?.tab);
-  if (activeDomTab) return activeDomTab;
+  if (isVisibleManagerLineTab(activeDomTab)) return activeDomTab;
   return "visualiser";
 }
 
 function setActiveManagerLineTab(tabId) {
-  const activeId = parseManagerLineTabId(tabId) || "visualiser";
+  const requestedId = parseManagerLineTabId(tabId);
+  const activeId = isVisibleManagerLineTab(requestedId) ? requestedId : "visualiser";
   document.querySelectorAll(".tab-btn[data-tab]").forEach((btn) => {
-    const isActive = btn.dataset.tab === activeId;
+    const tabKey = String(btn.dataset.tab || "").trim();
+    const isHidden = Boolean(tabKey) && !isVisibleManagerLineTab(tabKey);
+    const isActive = !isHidden && tabKey === activeId;
+    btn.classList.toggle("hidden", isHidden);
     btn.classList.toggle("active", isActive);
     btn.setAttribute("aria-selected", String(isActive));
   });
   document.querySelectorAll(".tab-panel").forEach((panel) => {
-    panel.classList.toggle("active", panel.id === activeId);
+    const panelId = String(panel.id || "").trim();
+    const isManagerPanel = MANAGER_LINE_TABS.includes(panelId);
+    const isHidden = isManagerPanel && !isVisibleManagerLineTab(panelId);
+    panel.classList.toggle("hidden", isHidden);
+    panel.classList.toggle("active", !isHidden && panelId === activeId);
   });
   appState.managerLineTab = activeId;
 }
@@ -354,7 +368,7 @@ function applyRouteSnapshot(route) {
   const dashboardShift = String(route.dashboardShift || "");
   if (SHIFT_OPTIONS.includes(dashboardShift)) appState.dashboardShift = dashboardShift;
   const managerLineTab = parseManagerLineTabId(route.managerLineTab);
-  if (managerLineTab) appState.managerLineTab = managerLineTab;
+  if (isVisibleManagerLineTab(managerLineTab)) appState.managerLineTab = managerLineTab;
   const managerDataTab = parseManagerDataTabId(route.managerDataTab);
   if (managerDataTab) {
     const targetLineId = String(appState.activeLineId || "");

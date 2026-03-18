@@ -546,7 +546,7 @@ button {
 .day-viz-axis-row,
 .day-viz-swimlane {
   display: grid;
-  grid-template-columns: 168px minmax(820px, 1fr);
+  grid-template-columns: 192px minmax(820px, 1fr);
   gap: 0.45rem;
   align-items: stretch;
 }
@@ -578,12 +578,15 @@ button {
 .day-viz-lane-head {
   width: 100%;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
-  gap: 0.4rem;
+  flex-wrap: wrap;
+  gap: 0.4rem 0.5rem;
 }
 
 .day-viz-lane-title {
+  flex: 1 1 auto;
+  min-width: 0;
   font-size: 0.74rem;
   font-weight: 800;
   color: #314456;
@@ -591,12 +594,16 @@ button {
 }
 
 .day-viz-add-record-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   flex-shrink: 0;
-  padding: 0.18rem 0.5rem;
+  min-height: 2.15rem;
+  padding: 0.34rem 0.82rem;
   border-radius: 999px;
-  font-size: 0.64rem;
-  font-weight: 700;
-  line-height: 1.1;
+  font-size: 0.74rem;
+  font-weight: 800;
+  line-height: 1;
   white-space: nowrap;
 }
 
@@ -1311,7 +1318,7 @@ button {
 
   .day-viz-axis-row,
   .day-viz-swimlane {
-    grid-template-columns: 144px minmax(620px, 1fr);
+    grid-template-columns: 172px minmax(620px, 1fr);
   }
 
   .day-glance-grid {
@@ -1341,7 +1348,8 @@ button {
   }
 
   .day-viz-add-record-btn {
-    padding-inline: 0.44rem;
+    width: 100%;
+    padding-inline: 0.7rem;
   }
 
   .day-viz-inner {
