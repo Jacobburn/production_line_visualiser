@@ -12449,14 +12449,20 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     const safeProductName = String(productName || "").trim();
     const safeTooltipText = String(tooltipText || "").trim();
     const interactive = canOpenDayRunMetricTrend && safeMetricKey && safeProductName;
+    const rateMetric = safeMetricKey === "maxCapacity" || safeMetricKey === "netRunRate" || safeMetricKey === "grossRunRate";
+    const safeValue = String(value ?? "").trim();
+    const rateValueMatch = rateMetric ? safeValue.match(/^(.*?)(?:\s+)(trays \/ min)$/) : null;
+    const valueMarkup = rateValueMatch
+      ? `<strong class="day-glance-run-rate-value"><span class="day-glance-run-rate-number">${htmlEscape(rateValueMatch[1])}</span><span class="day-glance-run-rate-unit">${htmlEscape(rateValueMatch[2])}</span></strong>`
+      : `<strong>${htmlEscape(safeValue)}</strong>`;
     return `
-    <div class="day-glance-run-callout${interactive ? " day-run-metric-trigger" : ""}"${
+    <div class="day-glance-run-callout${rateMetric ? " day-glance-run-callout--rate" : ""}${interactive ? " day-run-metric-trigger" : ""}"${
       interactive
         ? ` data-day-run-metric="${htmlEscape(safeMetricKey)}" data-day-run-product="${htmlEscape(safeProductName)}" role="button" tabindex="0" aria-label="${htmlEscape(`Show ${label} trend for ${safeProductName}`)}"`
         : ""
     }${safeTooltipText ? ` data-calc-tooltip="${htmlEscape(safeTooltipText)}"` : ""}>
       <span>${htmlEscape(label)}</span>
-      <strong>${htmlEscape(value)}</strong>
+      ${valueMarkup}
     </div>
   `;
   };

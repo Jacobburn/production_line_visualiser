@@ -1276,6 +1276,30 @@ button {
   white-space: nowrap;
 }
 
+.day-glance-run-callout--rate strong {
+  align-self: stretch;
+  white-space: normal;
+  line-height: 1.05;
+}
+
+.day-glance-run-rate-value {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.06rem;
+}
+
+.day-glance-run-rate-number {
+  white-space: nowrap;
+}
+
+.day-glance-run-rate-unit {
+  font-size: 0.64rem;
+  line-height: 1.05;
+  color: #60778c;
+  white-space: normal;
+}
+
 .day-glance-list {
   margin: 0;
   padding: 0;
