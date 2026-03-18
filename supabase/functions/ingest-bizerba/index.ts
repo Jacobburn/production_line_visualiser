@@ -10,7 +10,7 @@ type BizerbaPayload = {
 };
 
 type BizerbaInsertRow = {
-  id: string;
+  source_id?: string;
   ActualNetWeightValue: number;
   DeviceName: string;
   Date: string;
@@ -50,13 +50,13 @@ function requiredTimestamp(value: unknown, field: string): string {
   return parsed.toISOString();
 }
 
-function requiredId(value: unknown, field: string): string {
+function optionalSourceId(value: unknown, field: string): string | undefined {
   if (value === undefined || value === null) {
-    throw new Error(`Missing or invalid field: ${field}`);
+    return undefined;
   }
   const raw = typeof value === "string" ? value.trim() : String(value).trim();
-  if (!/^\d+$/.test(raw)) {
-    throw new Error(`Missing or invalid field: ${field}; expected integer id`);
+  if (!raw) {
+    throw new Error(`Missing or invalid field: ${field}`);
   }
   return raw;
 }
@@ -92,8 +92,11 @@ function extractPayloads(body: unknown): BizerbaPayload[] {
 
 function buildRow(payload: BizerbaPayload, index: number): BizerbaInsertRow {
   const prefix = `rows[${index}]`;
+  const sourceId = optionalSourceId(payload.id, `${prefix}.id`);
+
   return {
-    id: requiredId(payload.id, `${prefix}.id`),
+    // The vendor's row id is used for idempotency, not as the table PK.
+    ...(sourceId ? { source_id: sourceId } : {}),
     ActualNetWeightValue: requiredNumeric(
       payload.ActualNetWeightValue,
       `${prefix}.ActualNetWeightValue`,
@@ -106,6 +109,36 @@ function buildRow(payload: BizerbaPayload, index: number): BizerbaInsertRow {
       `${prefix}.ArticleNumber`,
     ),
   };
+}
+
+function hasSourceId(
+  row: BizerbaInsertRow,
+): row is BizerbaInsertRow & { source_id: string } {
+  return typeof row.source_id === "string" && row.source_id.length > 0;
+}
+
+async function persistRows(rows: BizerbaInsertRow[]) {
+  const rowsWithSourceId = rows.filter(hasSourceId);
+  const rowsWithoutSourceId = rows.filter((row) => !hasSourceId(row));
+
+  if (rowsWithSourceId.length > 0) {
+    const { error } = await supabase.from("Bizerba_ID").upsert(rowsWithSourceId, {
+      onConflict: "source_id",
+      ignoreDuplicates: true,
+    });
+    if (error) {
+      return error;
+    }
+  }
+
+  if (rowsWithoutSourceId.length > 0) {
+    const { error } = await supabase.from("Bizerba_ID").insert(rowsWithoutSourceId);
+    if (error) {
+      return error;
+    }
+  }
+
+  return null;
 }
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
@@ -147,10 +180,7 @@ Deno.serve(async (req) => {
     }
 
     const rows = payloads.map((payload, index) => buildRow(payload, index));
-    const { error } = await supabase.from("Bizerba_ID").upsert(rows, {
-      onConflict: "id",
-      ignoreDuplicates: true,
-    });
+    const error = await persistRows(rows);
     if (error) {
       return new Response(JSON.stringify({ error: error.message }), {
         status: 400,
