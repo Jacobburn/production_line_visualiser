@@ -1636,7 +1636,9 @@ function computeLineMetricsFromData(line, date, shift, data = derivedDataForLine
   const staffing = staffingSnapshotForSelection(line, selectedRunRows, shift);
   const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, shift), 0);
   const totalDowntime = selectedDownRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, shift), 0);
+  const totalProductionTime = selectedRunRows.reduce((sum, row) => sum + num(row.grossProductionTime) * timedLogShiftWeight(row, shift), 0);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, shift), 0);
+  const changeOverTimeMins = Math.max(0, shiftMins - totalProductionTime);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   const bottleneck = resolveLineBottleneckStage(line, stages, shift, (stageId, selectedShift) =>
     stageTotalMaxThroughputForLine(line, stageId, selectedShift)
@@ -1662,6 +1664,7 @@ function computeLineMetricsFromData(line, date, shift, data = derivedDataForLine
     shift,
     units,
     totalDowntime,
+    changeOverTimeMins,
     lineUtil: Math.max(0, bottleneckUtilGross),
     lineUtilGross: Math.max(0, bottleneckUtil),
     netRunRate,
@@ -13569,13 +13572,16 @@ function renderVisualiser() {
   const selectedShiftRows = selectedRows(data.shiftRows);
   const selectedShift = state.selectedShift;
 
-  const shiftMins = num(selectedShiftRows[0]?.totalShiftTime);
+  const shiftMins = selectedShiftRows.reduce((sum, row) => sum + num(row.totalShiftTime), 0);
   const units = selectedRunRows.reduce((sum, row) => sum + num(row.unitsProduced) * timedLogShiftWeight(row, selectedShift), 0);
   const totalDowntime = selectedDowntimeRows.reduce((sum, row) => sum + num(row.downtimeMins) * timedLogShiftWeight(row, selectedShift), 0);
+  const totalProductionTime = selectedRunRows.reduce((sum, row) => sum + num(row.grossProductionTime) * timedLogShiftWeight(row, selectedShift), 0);
+  const changeOverTimeMins = Math.max(0, shiftMins - totalProductionTime);
   const totalNetTime = selectedRunRows.reduce((sum, row) => sum + num(row.netProductionTime) * timedLogShiftWeight(row, selectedShift), 0);
   const netRunRate = totalNetTime > 0 ? units / totalNetTime : 0;
   const unitsText = formatNum(units, 0);
   const downtimeText = `${formatNum(totalDowntime, 1)} min`;
+  const changeOverTimeText = `${formatNum(changeOverTimeMins, changeOverTimeMins < 10 ? 1 : 0)} min`;
   const runRateText = `${formatNum(netRunRate, 2)} u/min`;
   const setText = (id, value) => {
     const node = document.getElementById(id);
@@ -13587,6 +13593,7 @@ function renderVisualiser() {
   setText("kpiRunRate", runRateText);
   setText("dayKpiUnits", unitsText);
   setText("dayKpiDowntime", downtimeText);
+  setText("dayKpiChangeOverTime", changeOverTimeText);
 
   const map = document.getElementById("lineMap");
   map.innerHTML = "";
@@ -13909,6 +13916,20 @@ function dayKpiTrendConfig(metricKey) {
       formatValue: (value) => `${formatNum(value, 1)}%`,
       formatTick: (value) => `${formatNum(value, 0)}%`
     },
+    changeOverTime: {
+      title: "Change Over Time Trend",
+      description: "Shift time minus gross production run time in the selected shift.",
+      legend: "Change over time",
+      aggregate: "sum",
+      barClass: "bar-down",
+      lineClass: "line-rate",
+      dotClass: "dot-rate",
+      lineColor: "#566b7f",
+      avgTheme: "down",
+      scaleFloor: 1,
+      formatValue: (value) => `${formatNum(value, value < 10 ? 1 : 0)} min`,
+      formatTick: (value) => formatNum(value, value < 10 ? 1 : 0)
+    },
     netRunRate: {
       title: "Net Run Rate Trend",
       description: "Units produced divided by net production minutes.",
@@ -14158,6 +14179,7 @@ function dayKpiTrendValue(metricKey, date, shift, data) {
   if (safeMetricKey === "downtime") return Math.max(0, num(metrics.totalDowntime));
   if (safeMetricKey === "utilisation") return Math.max(0, 100 - Math.max(0, num(metrics.lineUtil)));
   if (safeMetricKey === "utilisationGross") return Math.max(0, num(metrics.lineUtilGross));
+  if (safeMetricKey === "changeOverTime") return Math.max(0, num(metrics.changeOverTimeMins));
   if (safeMetricKey === "netRunRate") return Math.max(0, num(metrics.netRunRate));
   if (safeMetricKey === "keyStageCrew" || safeMetricKey === "keyStageRatePerCrew") {
     const keyStageMetrics = computeDayVisualiserKeyStageMetricsForDate(

@@ -502,7 +502,7 @@ button {
 
 @media (min-width: 1400px) {
   .day-visualiser-kpis {
-    grid-template-columns: repeat(5, minmax(0, 1fr));
+    grid-template-columns: repeat(6, minmax(0, 1fr));
   }
 
   .kpi-grid article.day-key-stage-kpi {
