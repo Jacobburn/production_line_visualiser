@@ -11425,6 +11425,8 @@ function dayVizBlockDetailRows(detail = {}) {
     { label: "Time", value: detail.timeRange || "-" },
     { label: "Duration", value: `${formatNum(Math.max(0, num(detail.durationMins)), 1)} min` }
   ];
+  const runRateText = String(detail.runRateText || "").trim();
+  if (runRateText) rows.push({ label: "Run Rate", value: runRateText });
   if (String(detail.typeKey || "").toLowerCase() === "downtime") {
     rows.push({
       label: "Calculation Status",
@@ -12239,6 +12241,7 @@ function buildDayVisualiserBlocks(data, selectedDate, selectedShift, stageNameRe
         blocks.runs.push({
           ...segment,
           type: "run-main",
+          sourceRow: row,
           title: runLabel,
           sub: `${formatTime12h(row.productionStartTime)} - ${formatTime12h(row.finishTime)}${unitsLabel}`
         });
@@ -12607,6 +12610,9 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
         const durationMins = Math.max(0, num(item.end) - num(item.start));
         const timeRange = `${formatMinutesToClockLabel(item.start)} - ${formatMinutesToClockLabel(item.end)}`;
         const typeLabel = dayVizBlockTypeLabel(item.type);
+        const runRateText = String(item?.type || "").startsWith("run")
+          ? `${formatNum(Math.max(0, num(item?.sourceRow?.netRunRate)), 2)} trays / min`
+          : "";
         blockDetailsById[detailId] = {
           rootId,
           lineId: String(lineContext?.id || ""),
@@ -12620,6 +12626,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
           typeLabel,
           timeRange,
           durationMins,
+          runRateText,
           excludeFromCalculation: Boolean(item.excludeFromCalculation)
         };
         const ariaLabel = `${label}: ${item.title}. ${timeRange}. ${formatNum(durationMins, 1)} minutes.`;
