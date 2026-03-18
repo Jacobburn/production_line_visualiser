@@ -13573,7 +13573,6 @@ function renderVisualiser() {
   setText("kpiRunRate", runRateText);
   setText("dayKpiUnits", unitsText);
   setText("dayKpiDowntime", downtimeText);
-  setText("dayKpiRunRate", runRateText);
 
   const map = document.getElementById("lineMap");
   map.innerHTML = "";
@@ -13681,10 +13680,12 @@ function renderVisualiser() {
   const lineUtilGross = Math.max(0, bottleneckUtilisation);
   const utilisationText = `${formatNum(Math.max(lineUtil, 0), 1)}%`;
   const utilisationGrossText = `${formatNum(Math.max(lineUtilGross, 0), 1)}%`;
+  const speedLossText = `${formatNum(Math.max(0, 100 - Math.max(lineUtil, 0)), 1)}%`;
+  const oeeText = `${formatNum(Math.max(lineUtilGross, 0), 1)}%`;
   setText("kpiUtilisation", utilisationText);
-  setText("dayKpiUtilisation", utilisationText);
+  setText("dayKpiUtilisation", speedLossText);
   setText("kpiUtilisationGross", utilisationGrossText);
-  setText("dayKpiUtilisationGross", utilisationGrossText);
+  setText("dayKpiUtilisationGross", oeeText);
 }
 
 function stageDailyMetrics(line, stage, date, shift, data) {
@@ -13867,9 +13868,9 @@ function dayKpiTrendConfig(metricKey) {
       formatTick: (value) => formatNum(value, value < 10 ? 1 : 0)
     },
     utilisation: {
-      title: "Uptime Utilisation Trend",
-      description: "Utilisation based on bottleneck stage ETC against max throughput.",
-      legend: "Uptime utilisation",
+      title: "Speed Loss Trend",
+      description: "100 minus the day visualiser uptime utilisation value for the bottleneck stage.",
+      legend: "Speed loss",
       aggregate: "avg",
       barClass: "bar-units",
       lineClass: "line-util",
@@ -13881,9 +13882,9 @@ function dayKpiTrendConfig(metricKey) {
       formatTick: (value) => `${formatNum(value, 0)}%`
     },
     utilisationGross: {
-      title: "Gross Utilisation Trend",
-      description: "Gross utilisation before stage downtime is applied.",
-      legend: "Gross utilisation",
+      title: "OEE Trend",
+      description: "OEE for the bottleneck stage based on ETC against max throughput.",
+      legend: "OEE",
       aggregate: "avg",
       barClass: "bar-units",
       lineClass: "line-util",
@@ -14141,7 +14142,7 @@ function dayKpiTrendValue(metricKey, date, shift, data) {
   const metrics = computeLineMetricsFromData(state, date, shift, data);
   if (safeMetricKey === "units") return Math.max(0, num(metrics.units));
   if (safeMetricKey === "downtime") return Math.max(0, num(metrics.totalDowntime));
-  if (safeMetricKey === "utilisation") return Math.max(0, num(metrics.lineUtil));
+  if (safeMetricKey === "utilisation") return Math.max(0, 100 - Math.max(0, num(metrics.lineUtil)));
   if (safeMetricKey === "utilisationGross") return Math.max(0, num(metrics.lineUtilGross));
   if (safeMetricKey === "netRunRate") return Math.max(0, num(metrics.netRunRate));
   if (safeMetricKey === "keyStageCrew" || safeMetricKey === "keyStageRatePerCrew") {
