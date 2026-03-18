@@ -12474,6 +12474,8 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       const netTraysPerMin = netRunMins > 0 ? units / netRunMins : Math.max(0, num(row.netRunRate));
       const grossUtilisation = dayGlanceMaxCapacity > 0 ? (grossTraysPerMin / dayGlanceMaxCapacity) * 100 : null;
       const netUtilisation = dayGlanceMaxCapacity > 0 ? (netTraysPerMin / dayGlanceMaxCapacity) * 100 : null;
+      const speedLoss = netUtilisation === null ? null : 100 - netUtilisation;
+      const bottleneckStageLabel = dayGlanceBottleneck?.stage ? stageDisplayName(dayGlanceBottleneck.stage, dayGlanceBottleneck.index) : "";
       const traffic = productionTrafficForRate({
         rate: netTraysPerMin,
         netMins: netRunMins,
@@ -12484,14 +12486,16 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       const traysTooltip = `Units produced logged for this run = ${formatNum(units, 0)} trays.`;
       const downTooltip = `Downtime overlapping this run = ${formatNum(downInRunMins, 1)} min.`;
       const grossUtilisationTooltip = dayGlanceMaxCapacity > 0
-        ? `Gross run rate / max capacity x 100 = ${formatNum(grossTraysPerMin, 2)} / ${formatNum(dayGlanceMaxCapacity, 2)} x 100 = ${formatNum(grossUtilisation, 1)}%.`
-        : "Gross utilisation needs a bottleneck max capacity.";
-      const netUtilisationTooltip = dayGlanceMaxCapacity > 0
-        ? `Net run rate / max capacity x 100 = ${formatNum(netTraysPerMin, 2)} / ${formatNum(dayGlanceMaxCapacity, 2)} x 100 = ${formatNum(netUtilisation, 1)}%.`
-        : "Net utilisation needs a bottleneck max capacity.";
+        ? `Gross run rate / standard speed x 100 = ${formatNum(grossTraysPerMin, 2)} / ${formatNum(dayGlanceMaxCapacity, 2)} x 100 = ${formatNum(grossUtilisation, 1)}%.`
+        : "OEE needs a standard speed.";
+      const speedLossTooltip = dayGlanceMaxCapacity > 0
+        ? `100 - ((net run rate / standard speed) x 100) = 100 - ((${formatNum(netTraysPerMin, 2)} / ${formatNum(dayGlanceMaxCapacity, 2)}) x 100) = ${formatNum(speedLoss, 1)}%.`
+        : "Speed loss needs a standard speed.";
       const maxCapacityTooltip = dayGlanceMaxCapacity > 0
-        ? `Bottleneck max rate for this line and shift = ${formatNum(dayGlanceMaxCapacity, 2)} trays / min.`
-        : "Set a bottleneck stage with max throughput to calculate max capacity.";
+        ? `Standard speed uses the bottleneck max rate for this line and shift = ${formatNum(dayGlanceMaxCapacity, 2)} trays / min. Current bottleneck stage = ${bottleneckStageLabel || "Not set"}.`
+        : bottleneckStageLabel
+          ? `Current bottleneck stage = ${bottleneckStageLabel}, but its max throughput is not set.`
+          : "Set a bottleneck stage with max throughput to calculate standard speed.";
       const netRunRateTooltip = netRunMins > 0
         ? `Trays / net production minutes = ${formatNum(units, 0)} / ${formatNum(netRunMins, 1)} = ${formatNum(netTraysPerMin, 2)} trays / min.`
         : `Net run rate from logged value = ${formatNum(netTraysPerMin, 2)} trays / min.`;
@@ -12509,10 +12513,10 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
           </div>
           <div class="day-glance-run-metrics">
             ${dayGlanceRunMetric("Trays", formatNum(units, 0), "totalTrays", canonicalProductName, traysTooltip)}
-            ${dayGlanceRunMetric("Down", `${formatNum(downInRunMins, 1)} min`, "minutesDown", canonicalProductName, downTooltip)}
-            ${dayGlanceRunMetric("Gross utilisation", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation), "grossUtilisation", canonicalProductName, grossUtilisationTooltip)}
-            ${dayGlanceRunMetric("Net utilisation", netUtilisation === null ? "-" : formatDayGlanceUtilisation(netUtilisation), "netUtilisation", canonicalProductName, netUtilisationTooltip)}
-            ${dayGlanceRunMetric("Max capacity", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set", "maxCapacity", canonicalProductName, maxCapacityTooltip)}
+            ${dayGlanceRunMetric("Downtime", `${formatNum(downInRunMins, 1)} min`, "minutesDown", canonicalProductName, downTooltip)}
+            ${dayGlanceRunMetric("OEE", grossUtilisation === null ? "-" : formatDayGlanceUtilisation(grossUtilisation), "grossUtilisation", canonicalProductName, grossUtilisationTooltip)}
+            ${dayGlanceRunMetric("Speed loss", speedLoss === null ? "-" : formatDayGlanceUtilisation(speedLoss), "speedLoss", canonicalProductName, speedLossTooltip)}
+            ${dayGlanceRunMetric("Standard speed", dayGlanceMaxCapacity > 0 ? formatDayGlanceRate(dayGlanceMaxCapacity) : "Not set", "maxCapacity", canonicalProductName, maxCapacityTooltip)}
             ${dayGlanceRunMetric("Net run rate", formatDayGlanceRate(netTraysPerMin), "netRunRate", canonicalProductName, netRunRateTooltip)}
             ${dayGlanceRunMetric("Gross run rate", formatDayGlanceRate(grossTraysPerMin), "grossRunRate", canonicalProductName, grossRunRateTooltip)}
           </div>
@@ -13928,9 +13932,9 @@ function dayRunMetricTrendConfig(metricKey, productName) {
       formatTick: (value) => formatNum(value, 0)
     },
     minutesDown: {
-      title: `${productLabel} Minutes Down Trend`,
+      title: `${productLabel} Downtime Trend`,
       description: "Logged downtime minutes that overlapped runs of this product.",
-      legend: "Minutes down",
+      legend: "Downtime",
       aggregate: "sum",
       barClass: "bar-down",
       lineClass: "line-rate",
@@ -13942,9 +13946,9 @@ function dayRunMetricTrendConfig(metricKey, productName) {
       formatTick: (value) => formatNum(value, value < 10 ? 1 : 0)
     },
     grossUtilisation: {
-      title: `${productLabel} Gross Utilisation Trend`,
-      description: "Gross run rate for this product divided by bottleneck max capacity.",
-      legend: "Gross utilisation",
+      title: `${productLabel} OEE Trend`,
+      description: "Gross run rate for this product divided by the bottleneck standard speed.",
+      legend: "OEE",
       aggregate: "activeAvg",
       barClass: "bar-units",
       lineClass: "line-util",
@@ -13955,10 +13959,10 @@ function dayRunMetricTrendConfig(metricKey, productName) {
       formatValue: (value) => `${formatNum(value, 1)}%`,
       formatTick: (value) => `${formatNum(value, 0)}%`
     },
-    netUtilisation: {
-      title: `${productLabel} Net Utilisation Trend`,
-      description: "Net run rate for this product divided by bottleneck max capacity.",
-      legend: "Net utilisation",
+    speedLoss: {
+      title: `${productLabel} Speed Loss Trend`,
+      description: "100 minus the net run rate of this product as a percentage of standard speed.",
+      legend: "Speed loss",
       aggregate: "activeAvg",
       barClass: "bar-units",
       lineClass: "line-util",
@@ -13970,9 +13974,9 @@ function dayRunMetricTrendConfig(metricKey, productName) {
       formatTick: (value) => `${formatNum(value, 0)}%`
     },
     maxCapacity: {
-      title: `${productLabel} Max Capacity Trend`,
-      description: "Bottleneck max capacity baseline used for this product when it ran.",
-      legend: "Max capacity",
+      title: `${productLabel} Standard Speed Trend`,
+      description: "Bottleneck standard speed baseline used for this product when it ran.",
+      legend: "Standard speed",
       aggregate: "activeAvg",
       barClass: "bar-units",
       lineClass: "line-rate",
@@ -14024,7 +14028,7 @@ function computeDayRunMetricStats(productName, date, shift, data) {
       totalTrays: 0,
       minutesDown: 0,
       grossUtilisation: 0,
-      netUtilisation: 0,
+      speedLoss: 0,
       maxCapacity: 0,
       netRunRate: 0,
       grossRunRate: 0
@@ -14078,13 +14082,14 @@ function computeDayRunMetricStats(productName, date, shift, data) {
   const maxCapacity = hasRuns ? Math.max(0, num(bottleneck?.capacity)) : 0;
   const grossUtilisation = maxCapacity > 0 ? (grossRunRate / maxCapacity) * 100 : 0;
   const netUtilisation = maxCapacity > 0 ? (netRunRate / maxCapacity) * 100 : 0;
+  const speedLoss = maxCapacity > 0 ? 100 - netUtilisation : 0;
 
   return {
     hasRuns,
     totalTrays: Math.max(0, units),
     minutesDown: Math.max(0, minutesDown),
     grossUtilisation: Math.max(0, grossUtilisation),
-    netUtilisation: Math.max(0, netUtilisation),
+    speedLoss,
     maxCapacity,
     netRunRate: Math.max(0, netRunRate),
     grossRunRate: Math.max(0, grossRunRate)
@@ -14096,7 +14101,7 @@ function dayRunMetricValueFromStats(metricKey, stats) {
   if (safeMetricKey === "totalTrays") return Math.max(0, num(stats?.totalTrays));
   if (safeMetricKey === "minutesDown") return Math.max(0, num(stats?.minutesDown));
   if (safeMetricKey === "grossUtilisation") return Math.max(0, num(stats?.grossUtilisation));
-  if (safeMetricKey === "netUtilisation") return Math.max(0, num(stats?.netUtilisation));
+  if (safeMetricKey === "speedLoss") return num(stats?.speedLoss);
   if (safeMetricKey === "maxCapacity") return Math.max(0, num(stats?.maxCapacity));
   if (safeMetricKey === "netRunRate") return Math.max(0, num(stats?.netRunRate));
   if (safeMetricKey === "grossRunRate") return Math.max(0, num(stats?.grossRunRate));
