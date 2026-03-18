@@ -1405,13 +1405,6 @@ function resolveLineBottleneckStage(line, stages, shift, capacityForStage) {
     if (explicit) return explicit;
   }
 
-  const proseal = candidates.find((entry) => {
-    const name = String(entry.stage?.name || "").toLowerCase();
-    const matches = Array.isArray(entry.stage?.match) ? entry.stage.match.map((token) => String(token || "").toLowerCase()) : [];
-    return entry.stage.id === "s10" || name.includes("proseal") || matches.includes("proseal");
-  });
-  if (proseal) return proseal;
-
   return candidates.reduce((best, entry) => (entry.capacity < best.capacity ? entry : best), candidates[0]);
 }
 
