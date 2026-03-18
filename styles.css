@@ -433,7 +433,18 @@ button {
 }
 
 .day-visualiser-kpis {
-  align-items: start;
+  align-items: stretch;
+}
+
+.day-visualiser-kpis > article {
+  height: 100%;
+  min-height: 8.6rem;
+}
+
+.kpi-grid article.day-kpi-trigger {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
 }
 
 .day-key-stage-kpi .day-key-stage-select {
@@ -459,7 +470,7 @@ button {
 
 .day-key-stage-metrics {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 0.35rem;
 }
 
@@ -491,38 +502,13 @@ button {
 
 @media (min-width: 1400px) {
   .day-visualiser-kpis {
-    grid-template-columns: repeat(7, minmax(0, 1fr));
-  }
-
-  .day-visualiser-kpis > .day-key-stage-kpi {
-    grid-column: span 2;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
   }
 
   .kpi-grid article.day-key-stage-kpi {
-    display: grid;
-    grid-template-columns: minmax(110px, 0.85fr) minmax(0, 1.15fr);
-    align-items: start;
-    gap: 0.35rem 0.7rem;
-  }
-
-  .day-key-stage-kpi h3 {
-    margin: 0;
-  }
-
-  .day-key-stage-kpi .day-key-stage-select {
-    grid-column: 2;
-    grid-row: 1;
-  }
-
-  .kpi-grid article.day-key-stage-kpi .day-key-stage-name {
-    grid-column: 1 / -1;
-    grid-row: 2;
-  }
-
-  .day-key-stage-metrics {
-    grid-column: 1 / -1;
-    grid-row: 3;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    display: flex;
+    flex-direction: column;
+    gap: 0.38rem;
   }
 }
 
