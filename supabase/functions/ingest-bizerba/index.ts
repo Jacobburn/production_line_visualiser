@@ -124,6 +124,7 @@ async function persistRows(rows: BizerbaInsertRow[]) {
   if (rowsWithSourceId.length > 0) {
     const { error } = await supabase.from("Bizerba_ID").upsert(rowsWithSourceId, {
       onConflict: "source_id",
+      defaultToNull: false,
       ignoreDuplicates: true,
     });
     if (error) {
@@ -132,7 +133,9 @@ async function persistRows(rows: BizerbaInsertRow[]) {
   }
 
   if (rowsWithoutSourceId.length > 0) {
-    const { error } = await supabase.from("Bizerba_ID").insert(rowsWithoutSourceId);
+    const { error } = await supabase.from("Bizerba_ID").insert(rowsWithoutSourceId, {
+      defaultToNull: false,
+    });
     if (error) {
       return error;
     }
