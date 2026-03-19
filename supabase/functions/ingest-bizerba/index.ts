@@ -150,6 +150,33 @@ async function persistRows(rows: BizerbaInsertRow[]): Promise<PersistResult> {
   return parsePersistResult(data);
 }
 
+function formatErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+
+  if (error && typeof error === "object") {
+    const maybeError = error as {
+      code?: unknown;
+      message?: unknown;
+      details?: unknown;
+      hint?: unknown;
+    };
+    const parts = [
+      typeof maybeError.code === "string" ? maybeError.code : "",
+      typeof maybeError.message === "string" ? maybeError.message : "",
+      typeof maybeError.details === "string" ? maybeError.details : "",
+      typeof maybeError.hint === "string" ? maybeError.hint : "",
+    ].filter(Boolean);
+
+    if (parts.length > 0) {
+      return parts.join(" | ");
+    }
+  }
+
+  return "Bad request";
+}
+
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
 const serviceRoleKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const deviceKey = Deno.env.get("BIZERBA_DEVICE_KEY") ?? "";
@@ -201,7 +228,8 @@ Deno.serve(async (req) => {
       headers: { "Content-Type": "application/json" },
     });
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Bad request";
+    console.error("ingest-bizerba failure", error);
+    const message = formatErrorMessage(error);
     return new Response(JSON.stringify({ error: message }), {
       status: 400,
       headers: { "Content-Type": "application/json" },
