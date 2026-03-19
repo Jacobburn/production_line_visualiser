@@ -18,6 +18,11 @@ type BizerbaInsertRow = {
   ArticleNumber: string;
 };
 
+type PersistResult = {
+  insertedCount: number;
+  skippedCount: number;
+};
+
 function requiredString(value: unknown, field: string): string {
   if (typeof value !== "string" || !value.trim()) {
     throw new Error(`Missing or invalid field: ${field}`);
@@ -111,37 +116,38 @@ function buildRow(payload: BizerbaPayload, index: number): BizerbaInsertRow {
   };
 }
 
-function hasSourceId(
-  row: BizerbaInsertRow,
-): row is BizerbaInsertRow & { source_id: string } {
-  return typeof row.source_id === "string" && row.source_id.length > 0;
+function parsePersistResult(data: unknown): PersistResult {
+  const row = Array.isArray(data) ? data[0] : data;
+  const insertedCount = Number(
+    (row as { inserted_count?: unknown } | null)?.inserted_count ?? 0,
+  );
+  const skippedCount = Number(
+    (row as { skipped_count?: unknown } | null)?.skipped_count ?? 0,
+  );
+
+  if (!Number.isInteger(insertedCount) || insertedCount < 0) {
+    throw new Error("Invalid insert count returned from database.");
+  }
+  if (!Number.isInteger(skippedCount) || skippedCount < 0) {
+    throw new Error("Invalid skipped count returned from database.");
+  }
+
+  return {
+    insertedCount,
+    skippedCount,
+  };
 }
 
-async function persistRows(rows: BizerbaInsertRow[]) {
-  const rowsWithSourceId = rows.filter(hasSourceId);
-  const rowsWithoutSourceId = rows.filter((row) => !hasSourceId(row));
+async function persistRows(rows: BizerbaInsertRow[]): Promise<PersistResult> {
+  const { data, error } = await supabase.rpc("ingest_bizerba_rows", {
+    batch_rows: rows,
+  });
 
-  if (rowsWithSourceId.length > 0) {
-    const { error } = await supabase.from("Bizerba_ID").upsert(rowsWithSourceId, {
-      onConflict: "source_id",
-      defaultToNull: false,
-      ignoreDuplicates: true,
-    });
-    if (error) {
-      return error;
-    }
+  if (error) {
+    throw error;
   }
 
-  if (rowsWithoutSourceId.length > 0) {
-    const { error } = await supabase.from("Bizerba_ID").insert(rowsWithoutSourceId, {
-      defaultToNull: false,
-    });
-    if (error) {
-      return error;
-    }
-  }
-
-  return null;
+  return parsePersistResult(data);
 }
 
 const supabaseUrl = Deno.env.get("SUPABASE_URL") ?? "";
@@ -183,15 +189,14 @@ Deno.serve(async (req) => {
     }
 
     const rows = payloads.map((payload, index) => buildRow(payload, index));
-    const error = await persistRows(rows);
-    if (error) {
-      return new Response(JSON.stringify({ error: error.message }), {
-        status: 400,
-        headers: { "Content-Type": "application/json" },
-      });
-    }
+    const result = await persistRows(rows);
 
-    return new Response(JSON.stringify({ ok: true, received: rows.length }), {
+    return new Response(JSON.stringify({
+      ok: true,
+      received: rows.length,
+      inserted: result.insertedCount,
+      skipped: result.skippedCount,
+    }), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
