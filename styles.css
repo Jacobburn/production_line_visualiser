@@ -592,6 +592,27 @@ button {
   white-space: nowrap;
 }
 
+.day-viz-lane-title-btn {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.day-viz-lane-title-btn:hover {
+  color: #1f4f8a;
+  text-decoration: underline;
+  text-underline-offset: 0.12rem;
+}
+
+.day-viz-lane-title-btn:focus-visible {
+  outline: 2px solid #8aa8c4;
+  outline-offset: 2px;
+  border-radius: 0.32rem;
+}
+
 .day-viz-add-record-btn {
   display: inline-flex;
   align-items: center;
@@ -920,6 +941,41 @@ button {
   display: grid;
   gap: 0.45rem;
   padding-top: 0.2rem;
+}
+
+.day-viz-downtime-breakdown-modal-card {
+  width: min(760px, 95vw);
+}
+
+.day-viz-downtime-breakdown-body {
+  display: grid;
+  gap: 0.45rem;
+  padding-top: 0.2rem;
+}
+
+.day-viz-downtime-breakdown-empty {
+  margin: 0;
+  color: #5d7285;
+}
+
+.day-viz-downtime-breakdown-table-wrap {
+  margin-top: 0;
+}
+
+.day-viz-downtime-breakdown-table {
+  width: 100%;
+  min-width: 520px;
+}
+
+.day-viz-downtime-breakdown-table :is(th, td):nth-child(2),
+.day-viz-downtime-breakdown-table :is(th, td):nth-child(3) {
+  text-align: right;
+  white-space: nowrap;
+}
+
+.day-viz-downtime-breakdown-table tfoot th {
+  font-weight: 800;
+  color: #243a4f;
 }
 
 .day-viz-block-modal-actions {

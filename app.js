@@ -144,6 +144,7 @@ let supervisorShiftTileEditId = "";
 let runCrewingPatternModalState = null;
 let dayVizBlockModalState = null;
 let dayVizBlockModalBusy = false;
+let dayVizDowntimeBreakdownModalState = null;
 let dayVizAddRecordModalState = null;
 let passwordResetModalBusy = false;
 let trendModalContext = { type: "stage", metricKey: "" };
@@ -11615,6 +11616,121 @@ function bindDayVizBlockModal() {
   });
 }
 
+function dayVizDowntimeBreakdownBodyHtml(summary = {}) {
+  const entries = Array.isArray(summary?.entries) ? summary.entries : [];
+  const computedTotal = entries.reduce((sum, entry) => sum + Math.max(0, num(entry?.minutes)), 0);
+  const totalMinutes = Math.max(0, num(summary?.totalMinutes) || computedTotal);
+  if (!entries.length || totalMinutes <= 0) {
+    return `<p class="day-viz-downtime-breakdown-empty">No downtime logged for this day and shift selection.</p>`;
+  }
+
+  const rowsHtml = entries
+    .map((entry, index) => {
+      const label = String(entry?.equipmentLabel || "").trim() || "Unspecified equipment";
+      const minutes = Math.max(0, num(entry?.minutes));
+      const sharePct = totalMinutes > 0 ? (minutes / totalMinutes) * 100 : Math.max(0, num(entry?.sharePct));
+      return `
+        <tr>
+          <td>${htmlEscape(`${index + 1}. ${label}`)}</td>
+          <td>${htmlEscape(`${formatNum(minutes, minutes < 10 ? 1 : 0)} min`)}</td>
+          <td>${htmlEscape(`${formatNum(sharePct, 1)}%`)}</td>
+        </tr>
+      `;
+    })
+    .join("");
+
+  return `
+    <div class="table-wrap day-viz-downtime-breakdown-table-wrap">
+      <table class="day-viz-downtime-breakdown-table">
+        <thead>
+          <tr>
+            <th>Equipment</th>
+            <th>Downtime</th>
+            <th>Share</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rowsHtml}
+        </tbody>
+        <tfoot>
+          <tr>
+            <th>Total</th>
+            <th>${htmlEscape(`${formatNum(totalMinutes, 1)} min`)}</th>
+            <th>${entries.length ? "100.0%" : "-"}</th>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  `;
+}
+
+function renderDayVizDowntimeBreakdownModal(summary = dayVizDowntimeBreakdownModalState) {
+  const overlay = document.getElementById("dayVizDowntimeBreakdownModal");
+  const metaNode = document.getElementById("dayVizDowntimeBreakdownMeta");
+  const bodyNode = document.getElementById("dayVizDowntimeBreakdownBody");
+  if (!overlay || !metaNode || !bodyNode) return;
+
+  const safeSummary = {
+    lineId: String(summary?.lineId || ""),
+    lineName: String(summary?.lineName || "Production Line"),
+    date: String(summary?.date || state?.selectedDate || todayISO()),
+    shift: String(summary?.shift || state?.selectedShift || "Day"),
+    shiftLabel: String(summary?.shiftLabel || (state?.selectedShift === "Full Day" ? "All shifts" : state?.selectedShift || "Day")),
+    totalMinutes: Math.max(0, num(summary?.totalMinutes)),
+    entries: Array.isArray(summary?.entries) ? summary.entries : []
+  };
+  const computedTotal = safeSummary.entries.reduce((sum, entry) => sum + Math.max(0, num(entry?.minutes)), 0);
+  if (safeSummary.totalMinutes <= 0 && computedTotal > 0) safeSummary.totalMinutes = computedTotal;
+  dayVizDowntimeBreakdownModalState = safeSummary;
+
+  metaNode.textContent = `${safeSummary.lineName} | ${safeSummary.date} | ${safeSummary.shiftLabel} | Total ${formatNum(safeSummary.totalMinutes, 1)} min`;
+  bodyNode.innerHTML = dayVizDowntimeBreakdownBodyHtml(safeSummary);
+  overlay.classList.add("open");
+  overlay.setAttribute("aria-hidden", "false");
+}
+
+function openDayVizDowntimeBreakdownModal(summary = {}) {
+  renderDayVizDowntimeBreakdownModal(summary);
+}
+
+function closeDayVizDowntimeBreakdownModal() {
+  const overlay = document.getElementById("dayVizDowntimeBreakdownModal");
+  const bodyNode = document.getElementById("dayVizDowntimeBreakdownBody");
+  if (!overlay) return;
+  dayVizDowntimeBreakdownModalState = null;
+  if (bodyNode) bodyNode.innerHTML = "";
+  overlay.classList.remove("open");
+  overlay.setAttribute("aria-hidden", "true");
+}
+
+function bindDayVizDowntimeBreakdownModal() {
+  const overlay = document.getElementById("dayVizDowntimeBreakdownModal");
+  const closeBtn = document.getElementById("closeDayVizDowntimeBreakdownModal");
+  if (!overlay || !closeBtn) return;
+
+  closeBtn.addEventListener("click", closeDayVizDowntimeBreakdownModal);
+  overlay.addEventListener("click", (event) => {
+    if (event.target === overlay) closeDayVizDowntimeBreakdownModal();
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Element)) return;
+    const trigger = event.target.closest("[data-day-viz-downtime-breakdown-trigger]");
+    if (!trigger) return;
+    event.preventDefault();
+    const canvas = trigger.closest(".day-viz-canvas");
+    const details = canvas && typeof canvas === "object" ? canvas.__dayVizDowntimeBreakdown : null;
+    if (!details || typeof details !== "object") return;
+    openDayVizDowntimeBreakdownModal(details);
+  });
+
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && overlay.classList.contains("open")) {
+      closeDayVizDowntimeBreakdownModal();
+    }
+  });
+}
+
 function dayVizAddRecordTypeConfig(recordType) {
   const key = String(recordType || "").trim().toLowerCase();
   if (key === "shift") {
@@ -12360,6 +12476,41 @@ function buildDayAtGlance(blocks, stageNameResolver, selectedShift = "Full Day")
   };
 }
 
+function dayVizDowntimeBreakdownSummary(items = [], stageNameResolver = stageNameById) {
+  const totalsByEquipment = new Map();
+  let totalMinutes = 0;
+
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    const minutes = Math.max(0, num(item?.end) - num(item?.start));
+    if (minutes <= 0) return;
+    const equipmentId = String(item?.sourceRow?.equipment || "").trim();
+    const resolvedLabel = equipmentId ? stageNameResolver(equipmentId) : "";
+    const fallbackLabel = String(item?.title || "").trim();
+    const equipmentLabel = String(resolvedLabel || fallbackLabel || "Unspecified equipment").trim();
+    const key = equipmentId || equipmentLabel.toLowerCase();
+    const existing = totalsByEquipment.get(key) || { equipmentLabel, equipmentId, minutes: 0 };
+    existing.minutes += minutes;
+    totalsByEquipment.set(key, existing);
+    totalMinutes += minutes;
+  });
+
+  const safeTotalMinutes = Math.max(0, totalMinutes);
+  const entries = Array.from(totalsByEquipment.values())
+    .map((entry) => ({
+      equipmentLabel: entry.equipmentLabel,
+      equipmentId: entry.equipmentId,
+      minutes: Math.max(0, num(entry.minutes)),
+      sharePct: safeTotalMinutes > 0 ? (Math.max(0, num(entry.minutes)) / safeTotalMinutes) * 100 : 0
+    }))
+    .sort((a, b) => {
+      const diff = num(b.minutes) - num(a.minutes);
+      if (Math.abs(diff) > 0.0001) return diff;
+      return String(a.equipmentLabel || "").localeCompare(String(b.equipmentLabel || ""));
+    });
+
+  return { totalMinutes: safeTotalMinutes, entries };
+}
+
 function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageNameResolver, lineContext = null) {
   const root = document.getElementById(rootId);
   if (!root) return;
@@ -12373,6 +12524,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
   const glance = buildDayAtGlance(blocks, stageNameResolver, selectedShift);
   const selectedShiftLabel = selectedShift === "Day" || selectedShift === "Night" ? selectedShift : "All shifts";
   const canAddRecords = rootId === "dayVisualiserCanvas" && appState.appMode === "manager" && Boolean(lineContext?.id);
+  const canOpenDowntimeBreakdown = rootId === "dayVisualiserCanvas" && appState.appMode === "manager" && Boolean(lineContext?.id);
 
   const toWindowSegment = (start, end) => {
     if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return null;
@@ -12486,6 +12638,7 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     production: `${formatNum(productionRate, 2)} units / min`,
     downtime: `${formatNum(laneMinutes(blocks.downtime), 1)} min`
   };
+  const downtimeBreakdown = dayVizDowntimeBreakdownSummary(blocks.downtime, stageNameResolver);
   const runTileShiftWindows =
     selectedShift === "Day" || selectedShift === "Night"
       ? shiftIntervalsForDate({ shiftRows: (data.shiftRows || []).filter((row) => row.date === selectedDate) }, selectedDate)[selectedShift] || []
@@ -12655,11 +12808,27 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
       })
       .join("");
 
+    const laneTitle = recordType === "downtime" && canOpenDowntimeBreakdown
+      ? `
+        <button
+          type="button"
+          class="day-viz-lane-title day-viz-lane-title-btn"
+          data-day-viz-downtime-breakdown-trigger="true"
+          data-day-viz-line-id="${htmlEscape(String(lineContext?.id || ""))}"
+          data-day-viz-date="${htmlEscape(selectedDate)}"
+          data-day-viz-shift="${htmlEscape(selectedShift)}"
+          aria-label="${htmlEscape(`Show downtime by equipment for ${selectedDate} (${selectedShiftLabel})`)}"
+        >
+          ${htmlEscape(label)}
+        </button>
+      `
+      : `<span class="day-viz-lane-title">${htmlEscape(label)}</span>`;
+
     return `
       <div class="day-viz-swimlane">
         <div class="day-viz-lane-label">
           <div class="day-viz-lane-head">
-            <span class="day-viz-lane-title">${htmlEscape(label)}</span>
+            ${laneTitle}
             ${addButton}
           </div>
           <span class="day-viz-lane-total">${htmlEscape(totalLabel)}</span>
@@ -12703,6 +12872,15 @@ function renderDayVisualiserTo(rootId, data, selectedDate, selectedShift, stageN
     </section>
   `;
   root.__dayVizBlockDetails = blockDetailsById;
+  root.__dayVizDowntimeBreakdown = {
+    lineId: String(lineContext?.id || ""),
+    lineName: String(lineContext?.name || ""),
+    date: selectedDate,
+    shift: selectedShift,
+    shiftLabel: selectedShiftLabel,
+    totalMinutes: downtimeBreakdown.totalMinutes,
+    entries: downtimeBreakdown.entries
+  };
 }
 
 function renderDayVisualiser() {
@@ -16152,6 +16330,7 @@ async function bootstrapApp() {
     bindStep("bindTabs", bindTabs);
     bindStep("bindRunCrewingPatternModal", bindRunCrewingPatternModal);
     bindStep("bindDayVizBlockModal", bindDayVizBlockModal);
+    bindStep("bindDayVizDowntimeBreakdownModal", bindDayVizDowntimeBreakdownModal);
     bindStep("bindDayVizAddRecordModal", bindDayVizAddRecordModal);
     bindStep("bindPasswordResetModal", bindPasswordResetModal);
     bindStep("bindHome", bindHome);
