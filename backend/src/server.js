@@ -1162,6 +1162,28 @@ function parseBizerbaTimestamp(value) {
   return Number.isNaN(parsed.getTime()) ? null : parsed;
 }
 
+function bizerbaIdTypeSupportsNumericCursor(value) {
+  const type = String(value || '').trim().toLowerCase();
+  return type === 'int2' || type === 'int4' || type === 'int8' || type === 'numeric' || type === 'decimal';
+}
+
+async function fetchBizerbaIdUdtName(client) {
+  try {
+    const result = await client.query(
+      `SELECT columns.udt_name
+       FROM information_schema.columns AS columns
+       WHERE columns.table_schema = 'public'
+         AND columns.table_name = 'Bizerba_ID'
+         AND columns.column_name = 'id'
+       LIMIT 1`
+    );
+    return String(result.rows?.[0]?.udt_name || '').trim().toLowerCase();
+  } catch (error) {
+    if (error?.code === '42P01') return '';
+    throw error;
+  }
+}
+
 function clampNonNegativeInteger(value, fallback = 0) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return fallback;
@@ -1461,6 +1483,8 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
          line_id::TEXT AS "lineId",
          COALESCE(device_name, '') AS "deviceName",
          last_processed_bizerba_id::TEXT AS "lastProcessedBizerbaId",
+         last_processed_timestamp AS "lastProcessedTimestamp",
+         COALESCE(last_processed_bizerba_id_text, '') AS "lastProcessedBizerbaIdText",
          COALESCE(pending_article_number, '') AS "pendingArticleNumber",
          pending_count AS "pendingCount",
          COALESCE(active_run_log_id::TEXT, '') AS "activeRunLogId",
@@ -1481,6 +1505,8 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
     const stateRow = stateResult.rows[0];
     const priorDeviceName = String(stateRow.deviceName || '').trim();
     let lastProcessedId = normalizeBigIntString(stateRow.lastProcessedBizerbaId, '0');
+    let lastProcessedTimestamp = parseBizerbaTimestamp(stateRow.lastProcessedTimestamp);
+    let lastProcessedIdText = String(stateRow.lastProcessedBizerbaIdText || '').trim();
     let pendingArticleNumber = String(stateRow.pendingArticleNumber || '').trim();
     let pendingCount = clampNonNegativeInteger(stateRow.pendingCount, 0);
     let activeState = mapBizerbaAutoStateRowToActiveState(stateRow);
@@ -1495,6 +1521,8 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
         if (closed) summary.closedRuns += 1;
       }
       lastProcessedId = '0';
+      lastProcessedTimestamp = null;
+      lastProcessedIdText = '';
       pendingArticleNumber = '';
       pendingCount = 0;
       activeState = makeEmptyBizerbaAutoActiveState();
@@ -1508,12 +1536,16 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
         if (closed) summary.closedRuns += 1;
       }
       lastProcessedId = '0';
+      lastProcessedTimestamp = null;
+      lastProcessedIdText = '';
       pendingArticleNumber = '';
       pendingCount = 0;
       activeState = makeEmptyBizerbaAutoActiveState();
     }
 
     const productLookup = await fetchBizerbaLineProductLookup(client, lineId);
+    const bizerbaIdUdtName = await fetchBizerbaIdUdtName(client);
+    const useNumericCursor = bizerbaIdTypeSupportsNumericCursor(bizerbaIdUdtName);
     const batchSize = Math.max(10, clampNonNegativeInteger(config.bizerbaAutoProcessBatchSize, 500));
     const hasRowLimit = !fullRescan;
     let remainingRows = hasRowLimit
@@ -1525,19 +1557,39 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
       const fetchLimit = hasRowLimit ? Math.min(batchSize, remainingRows) : batchSize;
       let rowsResult;
       try {
-        rowsResult = await client.query(
-          `SELECT
-             id::TEXT AS id,
-             BTRIM("ArticleNumber") AS "articleNumber",
-             to_char("Date", 'YYYY-MM-DD') AS date,
-             "Timestamp" AS timestamp
-           FROM public."Bizerba_ID"
-           WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
-             AND id > $2::BIGINT
-           ORDER BY id ASC
-           LIMIT $3`,
-          [deviceName, lastProcessedId, fetchLimit]
-        );
+        if (useNumericCursor) {
+          rowsResult = await client.query(
+            `SELECT
+               id::TEXT AS id,
+               BTRIM("ArticleNumber") AS "articleNumber",
+               to_char("Date", 'YYYY-MM-DD') AS date,
+               "Timestamp" AS timestamp
+             FROM public."Bizerba_ID"
+             WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
+               AND id::numeric > $2::numeric
+             ORDER BY id::numeric ASC
+             LIMIT $3`,
+            [deviceName, lastProcessedId, fetchLimit]
+          );
+        } else {
+          rowsResult = await client.query(
+            `SELECT
+               id::TEXT AS id,
+               BTRIM("ArticleNumber") AS "articleNumber",
+               to_char("Date", 'YYYY-MM-DD') AS date,
+               "Timestamp" AS timestamp
+             FROM public."Bizerba_ID"
+             WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
+               AND (
+                 $2::timestamptz IS NULL
+                 OR "Timestamp" > $2::timestamptz
+                 OR ("Timestamp" = $2::timestamptz AND id::TEXT > $3)
+               )
+             ORDER BY "Timestamp" ASC, id::TEXT ASC
+             LIMIT $4`,
+            [deviceName, lastProcessedTimestamp ? lastProcessedTimestamp.toISOString() : null, lastProcessedIdText, fetchLimit]
+          );
+        }
       } catch (error) {
         if (error?.code === '42P01') {
           tableMissing = true;
@@ -1554,11 +1606,14 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
 
       for (const row of rowsResult.rows) {
         summary.processedRows += 1;
-        const rowId = normalizeBigIntString(row.id, lastProcessedId);
-        try {
-          if (BigInt(rowId) > BigInt(lastProcessedId)) lastProcessedId = rowId;
-        } catch {
-          lastProcessedId = rowId;
+        const rowIdText = String(row.id || '').trim();
+        const rowNumericId = normalizeBigIntString(rowIdText, lastProcessedId);
+        if (useNumericCursor) {
+          try {
+            if (BigInt(rowNumericId) > BigInt(lastProcessedId)) lastProcessedId = rowNumericId;
+          } catch {
+            lastProcessedId = rowNumericId;
+          }
         }
 
         const rowTimestamp = parseBizerbaTimestamp(row.timestamp);
@@ -1567,6 +1622,14 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
         const rowDate = normalizeBizerbaAutoDate(row.date, rowTimestamp);
 
         if (!rowTimestamp || !rowDate) continue;
+        if (
+          !lastProcessedTimestamp
+          || rowTimestamp.getTime() > lastProcessedTimestamp.getTime()
+          || (rowTimestamp.getTime() === lastProcessedTimestamp.getTime() && rowIdText > lastProcessedIdText)
+        ) {
+          lastProcessedTimestamp = rowTimestamp;
+          lastProcessedIdText = rowIdText;
+        }
 
         if (activeState.runLogId) {
           let gapMinutes = Number.NaN;
@@ -1682,22 +1745,26 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
        SET
          device_name = $2,
          last_processed_bizerba_id = $3::BIGINT,
-         pending_article_number = $4,
-         pending_count = $5,
-         active_run_log_id = $6::UUID,
-         active_article_number = $7,
-         active_product = $8,
-         active_run_date = $9::date,
-         active_start_timestamp = $10::timestamptz,
-         active_last_date = $11::date,
-         active_last_timestamp = $12::timestamptz,
-         active_units_produced = $13::numeric,
+         last_processed_timestamp = $4::timestamptz,
+         last_processed_bizerba_id_text = $5,
+         pending_article_number = $6,
+         pending_count = $7,
+         active_run_log_id = $8::UUID,
+         active_article_number = $9,
+         active_product = $10,
+         active_run_date = $11::date,
+         active_start_timestamp = $12::timestamptz,
+         active_last_date = $13::date,
+         active_last_timestamp = $14::timestamptz,
+         active_units_produced = $15::numeric,
          updated_at = NOW()
        WHERE line_id = $1`,
       [
         lineId,
         deviceName,
-        lastProcessedId,
+        useNumericCursor ? lastProcessedId : '0',
+        lastProcessedTimestamp ? lastProcessedTimestamp.toISOString() : null,
+        lastProcessedIdText,
         pendingArticleNumber,
         Math.max(0, pendingCount),
         activeState.runLogId || null,
@@ -2415,6 +2482,14 @@ async function ensureBizerbaAutoSchema() {
     await dbQuery(
       `ALTER TABLE bizerba_auto_line_states
        ADD COLUMN IF NOT EXISTS last_processed_bizerba_id BIGINT NOT NULL DEFAULT 0`
+    );
+    await dbQuery(
+      `ALTER TABLE bizerba_auto_line_states
+       ADD COLUMN IF NOT EXISTS last_processed_timestamp TIMESTAMPTZ`
+    );
+    await dbQuery(
+      `ALTER TABLE bizerba_auto_line_states
+       ADD COLUMN IF NOT EXISTS last_processed_bizerba_id_text TEXT NOT NULL DEFAULT ''`
     );
     await dbQuery(
       `ALTER TABLE bizerba_auto_line_states

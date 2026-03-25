@@ -10991,9 +10991,10 @@ function bindDataControls() {
         const activeClosed = Math.max(0, Math.floor(Number(activeLineSummary?.closedRuns || 0)));
         const activeDowntime = Math.max(0, Math.floor(Number(activeLineSummary?.createdDowntime || 0)));
         const activeReason = String(activeLineSummary?.reason || "").trim();
+        const activeError = String(activeLineSummary?.error || "").trim();
 
         alert(
-          `Bizerba full back sync complete.\nTotal rows scanned: ${totalRows}\nRuns created: ${totalRuns}\nRuns closed: ${totalClosed}\nDowntime created: ${totalDowntime}${activeLineSummary ? `\n\nCurrent line:\nRows scanned: ${activeRows}\nRuns created: ${activeRuns}\nRuns closed: ${activeClosed}\nDowntime created: ${activeDowntime}${activeReason ? `\nStatus: ${activeReason}` : ""}` : ""}`
+          `Bizerba full back sync complete.\nTotal rows scanned: ${totalRows}\nRuns created: ${totalRuns}\nRuns closed: ${totalClosed}\nDowntime created: ${totalDowntime}${activeLineSummary ? `\n\nCurrent line:\nRows scanned: ${activeRows}\nRuns created: ${activeRuns}\nRuns closed: ${activeClosed}\nDowntime created: ${activeDowntime}${activeReason ? `\nStatus: ${activeReason}` : ""}${activeError ? `\nError: ${activeError}` : ""}` : ""}`
         );
       } catch (error) {
         alert(`Could not run Bizerba back sync.\n${error?.message || "Please try again."}`);
