@@ -306,7 +306,8 @@ const loadPermanentSampleDataSchema = z.object({
 });
 
 const bizerbaAutoProcessSchema = z.object({
-  fullRescan: z.boolean().optional().default(false)
+  fullRescan: z.boolean().optional().default(false),
+  async: z.boolean().optional().default(true)
 });
 
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -1789,6 +1790,103 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
 }
 
 let bizerbaAutoProcessorInFlight = null;
+const bizerbaAutoProcessJobs = new Map();
+const bizerbaAutoProcessJobRetentionMs = 6 * 60 * 60 * 1000;
+const bizerbaAutoProcessJobMaxEntries = 120;
+
+function createBizerbaAutoProcessJobId() {
+  const timePart = Date.now().toString(36);
+  const randPart = Math.random().toString(36).slice(2, 10);
+  return `bap_${timePart}_${randPart}`;
+}
+
+function mapBizerbaAutoProcessJob(job = {}) {
+  return {
+    id: String(job.id || '').trim(),
+    status: String(job.status || '').trim() || 'unknown',
+    trigger: String(job.trigger || '').trim() || 'manual',
+    fullRescan: Boolean(job.fullRescan),
+    createdAt: String(job.createdAt || ''),
+    startedAt: String(job.startedAt || ''),
+    finishedAt: String(job.finishedAt || ''),
+    requestedByUserId: String(job.requestedByUserId || ''),
+    error: String(job.error || ''),
+    summary: job.summary && typeof job.summary === 'object' ? job.summary : null
+  };
+}
+
+function pruneBizerbaAutoProcessJobs() {
+  const nowMs = Date.now();
+  const entries = Array.from(bizerbaAutoProcessJobs.values()).sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  entries.forEach((job) => {
+    if (!job) return;
+    if (job.status === 'running' || job.status === 'queued') return;
+    const finishedAtMs = Date.parse(String(job.finishedAt || job.createdAt || ''));
+    if (!Number.isFinite(finishedAtMs)) return;
+    if (nowMs - finishedAtMs > bizerbaAutoProcessJobRetentionMs) {
+      bizerbaAutoProcessJobs.delete(job.id);
+    }
+  });
+  const remaining = Array.from(bizerbaAutoProcessJobs.values()).sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  const overflow = Math.max(0, remaining.length - bizerbaAutoProcessJobMaxEntries);
+  if (overflow <= 0) return;
+  for (let i = 0; i < overflow; i += 1) {
+    const job = remaining[i];
+    if (!job) continue;
+    if (job.status === 'running' || job.status === 'queued') continue;
+    bizerbaAutoProcessJobs.delete(job.id);
+  }
+}
+
+function findRunningBizerbaAutoProcessJob() {
+  const jobs = Array.from(bizerbaAutoProcessJobs.values()).sort((a, b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  return jobs.find((job) => job?.status === 'running' || job?.status === 'queued') || null;
+}
+
+function scheduleBizerbaAutoProcessJob({ trigger = 'manual', requestedByUser = null, fullRescan = false } = {}) {
+  pruneBizerbaAutoProcessJobs();
+  const existing = findRunningBizerbaAutoProcessJob();
+  if (existing) return existing;
+
+  const createdAt = new Date().toISOString();
+  const job = {
+    id: createBizerbaAutoProcessJobId(),
+    status: 'queued',
+    trigger: String(trigger || 'manual').trim() || 'manual',
+    fullRescan: Boolean(fullRescan),
+    createdAt,
+    startedAt: '',
+    finishedAt: '',
+    requestedByUserId: String(requestedByUser?.id || '').trim(),
+    error: '',
+    summary: null
+  };
+  bizerbaAutoProcessJobs.set(job.id, job);
+
+  setTimeout(() => {
+    job.status = 'running';
+    job.startedAt = new Date().toISOString();
+    runBizerbaAutoProcessor({
+      trigger: job.trigger,
+      requestedByUser,
+      fullRescan: job.fullRescan
+    })
+      .then((summary) => {
+        job.status = 'completed';
+        job.summary = summary && typeof summary === 'object' ? summary : null;
+      })
+      .catch((error) => {
+        job.status = 'failed';
+        job.error = String(error?.message || error || 'Back sync failed');
+      })
+      .finally(() => {
+        job.finishedAt = new Date().toISOString();
+        pruneBizerbaAutoProcessJobs();
+      });
+  }, 0);
+
+  return job;
+}
 
 async function runBizerbaAutoProcessor({ trigger = 'manual', requestedByUser = null, fullRescan = false } = {}) {
   const shouldFullRescan = Boolean(fullRescan);
@@ -4534,12 +4632,29 @@ app.get('/api/lines/:lineId/bizerba-auto-fill', authMiddleware, asyncRoute(async
 app.post('/api/bizerba/auto-process', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const parsed = bizerbaAutoProcessSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ error: 'Invalid Bizerba auto-process payload' });
+  const shouldRunAsync = parsed.data.async !== false;
+  if (shouldRunAsync) {
+    const job = scheduleBizerbaAutoProcessJob({
+      trigger: 'manual',
+      requestedByUser: req.user,
+      fullRescan: Boolean(parsed.data.fullRescan)
+    });
+    return res.status(202).json({ job: mapBizerbaAutoProcessJob(job) });
+  }
   const summary = await runBizerbaAutoProcessor({
     trigger: 'manual',
     requestedByUser: req.user,
     fullRescan: Boolean(parsed.data.fullRescan)
   });
   return res.json({ summary });
+}));
+
+app.get('/api/bizerba/auto-process/:jobId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  const jobId = String(req.params.jobId || '').trim();
+  if (!jobId) return res.status(400).json({ error: 'Invalid Bizerba auto-process job id' });
+  const job = bizerbaAutoProcessJobs.get(jobId);
+  if (!job) return res.status(404).json({ error: 'Bizerba auto-process job not found' });
+  return res.json({ job: mapBizerbaAutoProcessJob(job) });
 }));
 
 app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) => {

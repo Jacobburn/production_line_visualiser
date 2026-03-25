@@ -10966,16 +10966,50 @@ function bindDataControls() {
       );
       if (!confirmed) return;
 
+      const originalLabel = String(runBizerbaBackSyncBtn.textContent || "Run Bizerba Back Sync");
       runBizerbaBackSyncBtn.disabled = true;
+      runBizerbaBackSyncBtn.textContent = "Back Sync Running...";
       try {
         const session = await ensureManagerBackendSession();
-        const response = await apiRequest("/api/bizerba/auto-process", {
+        const kickoff = await apiRequest("/api/bizerba/auto-process", {
           method: "POST",
           token: session.backendToken,
-          body: { fullRescan: true },
-          timeoutMs: 300000
+          body: { fullRescan: true, async: true },
+          timeoutMs: 30000
         });
-        const summary = response?.summary && typeof response.summary === "object" ? response.summary : {};
+        let summary = kickoff?.summary && typeof kickoff.summary === "object" ? kickoff.summary : null;
+        const jobId = String(kickoff?.job?.id || "").trim();
+        if (!summary && jobId) {
+          const startedAtMs = Date.now();
+          const maxWaitMs = 20 * 60 * 1000;
+          const pollIntervalMs = 2500;
+          let lastError = null;
+          while (Date.now() - startedAtMs < maxWaitMs) {
+            await new Promise((resolve) => window.setTimeout(resolve, pollIntervalMs));
+            try {
+              const statusPayload = await apiRequest(`/api/bizerba/auto-process/${encodeURIComponent(jobId)}`, {
+                token: session.backendToken,
+                timeoutMs: 30000
+              });
+              const job = statusPayload?.job && typeof statusPayload.job === "object" ? statusPayload.job : null;
+              const status = String(job?.status || "").trim().toLowerCase();
+              if (status === "completed") {
+                summary = job?.summary && typeof job.summary === "object" ? job.summary : {};
+                break;
+              }
+              if (status === "failed") {
+                throw new Error(String(job?.error || "Back sync failed"));
+              }
+            } catch (error) {
+              lastError = error;
+            }
+          }
+          if (!summary) {
+            if (lastError) throw lastError;
+            throw new Error("Back sync is still running. Please wait a little longer and try again.");
+          }
+        }
+        if (!summary) summary = {};
         const lineSummaries = Array.isArray(summary.lines) ? summary.lines : [];
         const activeLineSummary = lineSummaries.find((item) => String(item?.lineId || "") === String(state?.id || "")) || null;
         clearBizerbaAutoFillCache();
@@ -11000,6 +11034,7 @@ function bindDataControls() {
         alert(`Could not run Bizerba back sync.\n${error?.message || "Please try again."}`);
       } finally {
         runBizerbaBackSyncBtn.disabled = false;
+        runBizerbaBackSyncBtn.textContent = originalLabel;
       }
     });
   }
