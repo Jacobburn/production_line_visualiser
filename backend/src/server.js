@@ -48,6 +48,8 @@ const bizerbaAutoDowntimeGapMins = 2;
 const bizerbaAutoRunBreakGapMins = 30;
 const bizerbaAutoLogNotePrefix = '[AUTO_BIZERBA]';
 const bizerbaAutoDowntimeReason = 'Bizerba Auto Gap';
+const bizerbaAutoRowFetchTimeoutMs = 120000;
+const bizerbaAutoProbeTimeoutMs = 15000;
 const timeRegex = /^([01]\d|2[0-3]):([0-5]\d)$/;
 const isoDateRegex = /^\d{4}-\d{2}-\d{2}$/;
 const optionalTime = z.string().regex(timeRegex).optional().or(z.literal('')).or(z.null());
@@ -1083,11 +1085,26 @@ async function fetchLineBizerbaAutoFill(lineId) {
          "Timestamp" AS timestamp,
          "ActualNetWeightValue"::FLOAT8 AS "actualNetWeightValue"
        FROM public."Bizerba_ID"
-       WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
+       WHERE "DeviceName" = $1
        ORDER BY "Timestamp" DESC, id DESC
        LIMIT 1`,
       [deviceName]
     );
+    if (!latestResult.rowCount) {
+      latestResult = await dbQuery(
+        `SELECT
+           BTRIM("DeviceName") AS "deviceName",
+           BTRIM("ArticleNumber") AS "articleNumber",
+           "Date"::TEXT AS date,
+           "Timestamp" AS timestamp,
+           "ActualNetWeightValue"::FLOAT8 AS "actualNetWeightValue"
+         FROM public."Bizerba_ID"
+         WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
+         ORDER BY "Timestamp" DESC, id DESC
+         LIMIT 1`,
+        [deviceName]
+      );
+    }
   } catch (error) {
     if (error?.code === '42P01') {
       return {
@@ -1168,6 +1185,11 @@ function bizerbaIdTypeSupportsNumericCursor(value) {
   return type === 'int2' || type === 'int4' || type === 'int8' || type === 'numeric' || type === 'decimal';
 }
 
+function bizerbaIdTypeIsNativeInteger(value) {
+  const type = String(value || '').trim().toLowerCase();
+  return type === 'int2' || type === 'int4' || type === 'int8';
+}
+
 async function fetchBizerbaIdUdtName(client) {
   try {
     const result = await client.query(
@@ -1181,6 +1203,40 @@ async function fetchBizerbaIdUdtName(client) {
     return String(result.rows?.[0]?.udt_name || '').trim().toLowerCase();
   } catch (error) {
     if (error?.code === '42P01') return '';
+    throw error;
+  }
+}
+
+function isBizerbaQueryTimeoutError(error) {
+  const code = String(error?.code || '').trim().toUpperCase();
+  const message = String(error?.message || '').trim().toLowerCase();
+  if (message.includes('query read timeout')) return true;
+  if (message.includes('statement timeout')) return true;
+  if (message.includes('canceling statement due to statement timeout')) return true;
+  return code === '57014';
+}
+
+async function probeBizerbaDeviceRows(client, deviceName) {
+  try {
+    const result = await client.query({
+      text: `SELECT 1
+             FROM public."Bizerba_ID"
+             WHERE "DeviceName" = $1
+             LIMIT 1`,
+      values: [deviceName],
+      query_timeout: bizerbaAutoProbeTimeoutMs
+    });
+    return {
+      tableMissing: false,
+      hasRows: result.rowCount > 0
+    };
+  } catch (error) {
+    if (error?.code === '42P01') {
+      return {
+        tableMissing: true,
+        hasRows: false
+      };
+    }
     throw error;
   }
 }
@@ -1460,7 +1516,8 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
     createdDowntime: 0,
     reachedRowLimit: false,
     skipped: false,
-    reason: ''
+    reason: '',
+    error: ''
   };
 
   if (!z.string().uuid().safeParse(lineId).success || !deviceName) {
@@ -1553,47 +1610,95 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
       ? Math.max(batchSize, clampNonNegativeInteger(config.bizerbaAutoProcessMaxRowsPerLine, 5000))
       : Number.POSITIVE_INFINITY;
     let tableMissing = false;
+    let deviceHasRows = true;
+    const deviceProbe = await probeBizerbaDeviceRows(client, deviceName);
+    tableMissing = deviceProbe.tableMissing;
+    deviceHasRows = deviceProbe.hasRows;
+    if (!tableMissing && !deviceHasRows) {
+      summary.skipped = true;
+      summary.reason = 'no_matching_device_rows';
+    }
 
-    while (!hasRowLimit || remainingRows > 0) {
+    while (!tableMissing && deviceHasRows && (!hasRowLimit || remainingRows > 0)) {
       const fetchLimit = hasRowLimit ? Math.min(batchSize, remainingRows) : batchSize;
       let rowsResult;
       try {
         if (useNumericCursor) {
-          rowsResult = await client.query(
-            `SELECT
-               id::TEXT AS id,
-               BTRIM("ArticleNumber") AS "articleNumber",
-               to_char("Date", 'YYYY-MM-DD') AS date,
-               "Timestamp" AS timestamp
-             FROM public."Bizerba_ID"
-             WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
-               AND id::numeric > $2::numeric
-             ORDER BY id::numeric ASC
-             LIMIT $3`,
-            [deviceName, lastProcessedId, fetchLimit]
-          );
+          if (bizerbaIdTypeIsNativeInteger(bizerbaIdUdtName)) {
+            rowsResult = await client.query({
+              text: `SELECT
+                       id::TEXT AS id,
+                       BTRIM("ArticleNumber") AS "articleNumber",
+                       to_char("Date", 'YYYY-MM-DD') AS date,
+                       "Timestamp" AS timestamp
+                     FROM public."Bizerba_ID"
+                     WHERE "DeviceName" = $1
+                       AND id > $2::BIGINT
+                     ORDER BY id ASC
+                     LIMIT $3`,
+              values: [deviceName, lastProcessedId, fetchLimit],
+              query_timeout: bizerbaAutoRowFetchTimeoutMs
+            });
+          } else {
+            rowsResult = await client.query({
+              text: `SELECT
+                       id::TEXT AS id,
+                       BTRIM("ArticleNumber") AS "articleNumber",
+                       to_char("Date", 'YYYY-MM-DD') AS date,
+                       "Timestamp" AS timestamp
+                     FROM public."Bizerba_ID"
+                     WHERE "DeviceName" = $1
+                       AND id::numeric > $2::numeric
+                     ORDER BY id::numeric ASC
+                     LIMIT $3`,
+              values: [deviceName, lastProcessedId, fetchLimit],
+              query_timeout: bizerbaAutoRowFetchTimeoutMs
+            });
+          }
         } else {
-          rowsResult = await client.query(
-            `SELECT
-               id::TEXT AS id,
-               BTRIM("ArticleNumber") AS "articleNumber",
-               to_char("Date", 'YYYY-MM-DD') AS date,
-               "Timestamp" AS timestamp
-             FROM public."Bizerba_ID"
-             WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
-               AND (
-                 $2::timestamptz IS NULL
-                 OR "Timestamp" > $2::timestamptz
-                 OR ("Timestamp" = $2::timestamptz AND id::TEXT > $3)
-               )
-             ORDER BY "Timestamp" ASC, id::TEXT ASC
-             LIMIT $4`,
-            [deviceName, lastProcessedTimestamp ? lastProcessedTimestamp.toISOString() : null, lastProcessedIdText, fetchLimit]
-          );
+          rowsResult = await client.query({
+            text: `SELECT
+                     id::TEXT AS id,
+                     BTRIM("ArticleNumber") AS "articleNumber",
+                     to_char("Date", 'YYYY-MM-DD') AS date,
+                     "Timestamp" AS timestamp
+                   FROM public."Bizerba_ID"
+                   WHERE "DeviceName" = $1
+                     AND (
+                       $2::timestamptz IS NULL
+                       OR "Timestamp" > $2::timestamptz
+                       OR ("Timestamp" = $2::timestamptz AND id::TEXT > $3)
+                     )
+                   ORDER BY "Timestamp" ASC, id::TEXT ASC
+                   LIMIT $4`,
+            values: [deviceName, lastProcessedTimestamp ? lastProcessedTimestamp.toISOString() : null, lastProcessedIdText, fetchLimit],
+            query_timeout: bizerbaAutoRowFetchTimeoutMs
+          });
         }
       } catch (error) {
         if (error?.code === '42P01') {
           tableMissing = true;
+          break;
+        }
+        if (isBizerbaQueryTimeoutError(error)) {
+          try {
+            const timeoutProbe = await probeBizerbaDeviceRows(client, deviceName);
+            if (timeoutProbe.tableMissing) {
+              tableMissing = true;
+              break;
+            }
+            deviceHasRows = timeoutProbe.hasRows;
+          } catch {
+            // Keep default timeout classification if probe itself fails.
+          }
+          summary.skipped = true;
+          if (!deviceHasRows) {
+            summary.reason = 'no_matching_device_rows';
+            summary.error = '';
+          } else {
+            summary.reason = 'device_query_timeout';
+            summary.error = 'Query read timeout while scanning Bizerba rows for this device.';
+          }
           break;
         }
         throw error;
@@ -1726,6 +1831,8 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
     if (tableMissing) {
       summary.skipped = true;
       summary.reason = 'bizerba_table_missing';
+    } else if (summary.processedRows === 0 && !summary.reason) {
+      summary.reason = deviceHasRows ? 'no_new_rows' : 'no_matching_device_rows';
     }
 
     if (activeState.runLogId && activeState.lastTimestamp) {
@@ -2642,6 +2749,19 @@ async function ensureBizerbaAutoSchema() {
        ON bizerba_auto_line_states (active_run_log_id)
        WHERE active_run_log_id IS NOT NULL`
     );
+    const bizerbaTableCheck = await dbQuery(
+      `SELECT to_regclass('public."Bizerba_ID"')::TEXT AS "tableName"`
+    );
+    if (String(bizerbaTableCheck.rows?.[0]?.tableName || '').trim()) {
+      await dbQuery(
+        `CREATE INDEX IF NOT EXISTS idx_bizerba_id_device_name_id
+         ON public."Bizerba_ID" ("DeviceName", id)`
+      );
+      await dbQuery(
+        `CREATE INDEX IF NOT EXISTS idx_bizerba_id_device_name_timestamp_id_text
+         ON public."Bizerba_ID" ("DeviceName", "Timestamp", (id::TEXT))`
+      );
+    }
     bizerbaAutoSchemaReady = true;
   })()
     .catch((error) => {
