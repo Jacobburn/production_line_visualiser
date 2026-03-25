@@ -305,6 +305,10 @@ const loadPermanentSampleDataSchema = z.object({
   replaceExisting: z.boolean().optional().default(true)
 });
 
+const bizerbaAutoProcessSchema = z.object({
+  fullRescan: z.boolean().optional().default(false)
+});
+
 const asyncRoute = (handler) => (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
 const DATA_SOURCE_CONNECTION_TEST_TIMEOUT_MS = 7000;
 
@@ -1217,17 +1221,34 @@ function mapBizerbaAutoStateRowToActiveState(row = {}) {
   };
 }
 
-function buildBizerbaAutoRunNote(deviceName, articleNumber) {
+function buildBizerbaAutoRunNote(deviceName, articleNumber, productionStartTimestamp = null) {
   const safeDevice = String(deviceName || '').trim();
   const safeArticle = String(articleNumber || '').trim();
-  return `${bizerbaAutoLogNotePrefix} run device=${safeDevice} article=${safeArticle}`;
+  const safeStart = productionStartTimestamp instanceof Date && !Number.isNaN(productionStartTimestamp.getTime())
+    ? productionStartTimestamp.toISOString()
+    : '';
+  return `${bizerbaAutoLogNotePrefix} run device=${safeDevice} article=${safeArticle}${safeStart ? ` start=${safeStart}` : ''}`;
 }
 
-function buildBizerbaAutoDowntimeNote(deviceName, articleNumber, gapMinutes) {
+function buildBizerbaAutoDowntimeNote(deviceName, articleNumber, gapMinutes, downtimeStartTimestamp = null, downtimeFinishTimestamp = null) {
   const safeDevice = String(deviceName || '').trim();
   const safeArticle = String(articleNumber || '').trim();
   const safeGap = Number.isFinite(gapMinutes) ? gapMinutes.toFixed(2) : '0.00';
-  return `${bizerbaAutoLogNotePrefix} downtime device=${safeDevice} article=${safeArticle} gap=${safeGap}m`;
+  const safeStart = downtimeStartTimestamp instanceof Date && !Number.isNaN(downtimeStartTimestamp.getTime())
+    ? downtimeStartTimestamp.toISOString()
+    : '';
+  const safeFinish = downtimeFinishTimestamp instanceof Date && !Number.isNaN(downtimeFinishTimestamp.getTime())
+    ? downtimeFinishTimestamp.toISOString()
+    : '';
+  const parts = [
+    `${bizerbaAutoLogNotePrefix} downtime`,
+    `device=${safeDevice}`,
+    `article=${safeArticle}`,
+    `gap=${safeGap}m`
+  ];
+  if (safeStart) parts.push(`start=${safeStart}`);
+  if (safeFinish) parts.push(`finish=${safeFinish}`);
+  return parts.join(' ');
 }
 
 async function fetchBizerbaLineProductLookup(client, lineId) {
@@ -1266,6 +1287,25 @@ async function insertBizerbaAutoRunLog(client, {
   unitsProduced,
   note
 }) {
+  const existingResult = await client.query(
+    `SELECT id::TEXT AS id
+     FROM run_logs
+     WHERE line_id = $1
+       AND date = $2::date
+       AND production_start_time = ($3::timestamptz)::time
+       AND LOWER(BTRIM(product)) = LOWER(BTRIM($4))
+       AND COALESCE(notes, '') LIKE $5
+     ORDER BY created_at ASC, id ASC
+     LIMIT 1`,
+    [lineId, runDate, productionStartTimestamp.toISOString(), product, `${bizerbaAutoLogNotePrefix}%`]
+  );
+  if (existingResult.rowCount) {
+    return {
+      runLogId: String(existingResult.rows[0].id || '').trim(),
+      created: false
+    };
+  }
+
   const result = await client.query(
     `INSERT INTO run_logs(
        line_id,
@@ -1290,7 +1330,10 @@ async function insertBizerbaAutoRunLog(client, {
       String(note || '').trim()
     ]
   );
-  return String(result.rows?.[0]?.id || '').trim();
+  return {
+    runLogId: String(result.rows?.[0]?.id || '').trim(),
+    created: true
+  };
 }
 
 async function updateBizerbaAutoRunLogFinish(client, {
@@ -1328,6 +1371,28 @@ async function insertBizerbaAutoDowntimeLog(client, {
   if (!(downtimeStartTimestamp instanceof Date) || Number.isNaN(downtimeStartTimestamp.getTime())) return false;
   if (!(downtimeFinishTimestamp instanceof Date) || Number.isNaN(downtimeFinishTimestamp.getTime())) return false;
   if (!downtimeDate) return false;
+  const existingResult = await client.query(
+    `SELECT id
+     FROM downtime_logs
+     WHERE line_id = $1
+       AND date = $2::date
+       AND downtime_start = ($3::timestamptz)::time
+       AND downtime_finish = ($4::timestamptz)::time
+       AND COALESCE(reason, '') = $5
+       AND COALESCE(notes, '') LIKE $6
+     ORDER BY created_at ASC, id ASC
+     LIMIT 1`,
+    [
+      lineId,
+      downtimeDate,
+      downtimeStartTimestamp.toISOString(),
+      downtimeFinishTimestamp.toISOString(),
+      bizerbaAutoDowntimeReason,
+      `${bizerbaAutoLogNotePrefix}%`
+    ]
+  );
+  if (existingResult.rowCount) return false;
+
   await client.query(
     `INSERT INTO downtime_logs(
        line_id,
@@ -1347,18 +1412,25 @@ async function insertBizerbaAutoDowntimeLog(client, {
       downtimeStartTimestamp.toISOString(),
       downtimeFinishTimestamp.toISOString(),
       bizerbaAutoDowntimeReason,
-      buildBizerbaAutoDowntimeNote(deviceName, articleNumber, gapMinutes)
+      buildBizerbaAutoDowntimeNote(
+        deviceName,
+        articleNumber,
+        gapMinutes,
+        downtimeStartTimestamp,
+        downtimeFinishTimestamp
+      )
     ]
   );
   return true;
 }
 
-async function processBizerbaAutoLine(line = {}) {
+async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
   const lineId = String(line.lineId || '').trim();
   const deviceName = String(line.deviceName || '').trim();
   const summary = {
     lineId,
     deviceName,
+    fullRescan: Boolean(fullRescan),
     processedRows: 0,
     createdRuns: 0,
     closedRuns: 0,
@@ -1413,7 +1485,20 @@ async function processBizerbaAutoLine(line = {}) {
     let pendingCount = clampNonNegativeInteger(stateRow.pendingCount, 0);
     let activeState = mapBizerbaAutoStateRowToActiveState(stateRow);
 
-    if (priorDeviceName && priorDeviceName.toLowerCase() !== deviceName.toLowerCase()) {
+    if (fullRescan) {
+      if (activeState.runLogId && activeState.lastTimestamp) {
+        const closed = await updateBizerbaAutoRunLogFinish(client, {
+          runLogId: activeState.runLogId,
+          finishTimestamp: activeState.lastTimestamp,
+          unitsProduced: activeState.unitsProduced
+        });
+        if (closed) summary.closedRuns += 1;
+      }
+      lastProcessedId = '0';
+      pendingArticleNumber = '';
+      pendingCount = 0;
+      activeState = makeEmptyBizerbaAutoActiveState();
+    } else if (priorDeviceName && priorDeviceName.toLowerCase() !== deviceName.toLowerCase()) {
       if (activeState.runLogId && activeState.lastTimestamp) {
         const closed = await updateBizerbaAutoRunLogFinish(client, {
           runLogId: activeState.runLogId,
@@ -1430,11 +1515,14 @@ async function processBizerbaAutoLine(line = {}) {
 
     const productLookup = await fetchBizerbaLineProductLookup(client, lineId);
     const batchSize = Math.max(10, clampNonNegativeInteger(config.bizerbaAutoProcessBatchSize, 500));
-    let remainingRows = Math.max(batchSize, clampNonNegativeInteger(config.bizerbaAutoProcessMaxRowsPerLine, 5000));
+    const hasRowLimit = !fullRescan;
+    let remainingRows = hasRowLimit
+      ? Math.max(batchSize, clampNonNegativeInteger(config.bizerbaAutoProcessMaxRowsPerLine, 5000))
+      : Number.POSITIVE_INFINITY;
     let tableMissing = false;
 
-    while (remainingRows > 0) {
-      const fetchLimit = Math.min(batchSize, remainingRows);
+    while (!hasRowLimit || remainingRows > 0) {
+      const fetchLimit = hasRowLimit ? Math.min(batchSize, remainingRows) : batchSize;
       let rowsResult;
       try {
         rowsResult = await client.query(
@@ -1459,8 +1547,10 @@ async function processBizerbaAutoLine(line = {}) {
       }
 
       if (!rowsResult.rowCount) break;
-      remainingRows -= rowsResult.rowCount;
-      if (remainingRows <= 0) summary.reachedRowLimit = true;
+      if (hasRowLimit) {
+        remainingRows -= rowsResult.rowCount;
+        if (remainingRows <= 0) summary.reachedRowLimit = true;
+      }
 
       for (const row of rowsResult.rows) {
         summary.processedRows += 1;
@@ -1535,14 +1625,15 @@ async function processBizerbaAutoLine(line = {}) {
 
         if (pendingCount < bizerbaAutoMinRunSamples) continue;
 
-        const runLogId = await insertBizerbaAutoRunLog(client, {
+        const runInsert = await insertBizerbaAutoRunLog(client, {
           lineId,
           runDate: rowDate,
           product: mappedProduct,
           productionStartTimestamp: rowTimestamp,
           unitsProduced: 1,
-          note: buildBizerbaAutoRunNote(deviceName, rowArticleNumber)
+          note: buildBizerbaAutoRunNote(deviceName, rowArticleNumber, rowTimestamp)
         });
+        const runLogId = String(runInsert?.runLogId || '').trim();
 
         if (runLogId) {
           activeState = {
@@ -1556,7 +1647,7 @@ async function processBizerbaAutoLine(line = {}) {
             lastTimestamp: rowTimestamp,
             unitsProduced: 1
           };
-          summary.createdRuns += 1;
+          if (runInsert?.created) summary.createdRuns += 1;
         } else {
           activeState = makeEmptyBizerbaAutoActiveState();
         }
@@ -1632,8 +1723,17 @@ async function processBizerbaAutoLine(line = {}) {
 
 let bizerbaAutoProcessorInFlight = null;
 
-async function runBizerbaAutoProcessor({ trigger = 'manual', requestedByUser = null } = {}) {
-  if (bizerbaAutoProcessorInFlight) return bizerbaAutoProcessorInFlight;
+async function runBizerbaAutoProcessor({ trigger = 'manual', requestedByUser = null, fullRescan = false } = {}) {
+  const shouldFullRescan = Boolean(fullRescan);
+  if (bizerbaAutoProcessorInFlight) {
+    try {
+      const runningSummary = await bizerbaAutoProcessorInFlight;
+      if (!shouldFullRescan) return runningSummary;
+    } catch (error) {
+      if (!shouldFullRescan) throw error;
+    }
+  }
+
   bizerbaAutoProcessorInFlight = (async () => {
     await ensureLineGroupSchema();
     await ensureProductCatalogSchema();
@@ -1654,6 +1754,7 @@ async function runBizerbaAutoProcessor({ trigger = 'manual', requestedByUser = n
 
     const summary = {
       trigger: String(trigger || 'manual').trim() || 'manual',
+      fullRescan: shouldFullRescan,
       startedAt: startedAt.toISOString(),
       finishedAt: '',
       lineCount: lineResult.rowCount,
@@ -1670,7 +1771,7 @@ async function runBizerbaAutoProcessor({ trigger = 'manual', requestedByUser = n
       const lineId = String(row.lineId || '').trim();
       const deviceName = String(row.deviceName || '').trim();
       try {
-        const lineSummary = await processBizerbaAutoLine({ lineId, deviceName });
+        const lineSummary = await processBizerbaAutoLine({ lineId, deviceName }, { fullRescan: shouldFullRescan });
         summary.processedRows += clampNonNegativeInteger(lineSummary.processedRows, 0);
         summary.createdRuns += clampNonNegativeInteger(lineSummary.createdRuns, 0);
         summary.closedRuns += clampNonNegativeInteger(lineSummary.closedRuns, 0);
@@ -1702,7 +1803,7 @@ async function runBizerbaAutoProcessor({ trigger = 'manual', requestedByUser = n
         actorName: requestedByUser.name,
         actorRole: requestedByUser.role,
         action: 'RUN_BIZERBA_AUTO_PROCESSOR',
-        details: `Trigger=${summary.trigger}; rows=${summary.processedRows}; runs=${summary.createdRuns}; downtime=${summary.createdDowntime}; lines=${summary.lineCount}; errors=${summary.erroredLines}`
+        details: `Trigger=${summary.trigger}; fullRescan=${summary.fullRescan}; rows=${summary.processedRows}; runs=${summary.createdRuns}; downtime=${summary.createdDowntime}; lines=${summary.lineCount}; errors=${summary.erroredLines}`
       });
     }
 
@@ -4356,9 +4457,12 @@ app.get('/api/lines/:lineId/bizerba-auto-fill', authMiddleware, asyncRoute(async
 }));
 
 app.post('/api/bizerba/auto-process', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  const parsed = bizerbaAutoProcessSchema.safeParse(req.body || {});
+  if (!parsed.success) return res.status(400).json({ error: 'Invalid Bizerba auto-process payload' });
   const summary = await runBizerbaAutoProcessor({
     trigger: 'manual',
-    requestedByUser: req.user
+    requestedByUser: req.user,
+    fullRescan: Boolean(parsed.data.fullRescan)
   });
   return res.json({ summary });
 }));

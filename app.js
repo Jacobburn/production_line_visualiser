@@ -10954,6 +10954,55 @@ function bindDataControls() {
     });
   }
 
+  const runBizerbaBackSyncBtn = document.getElementById("runBizerbaBackSync");
+  if (runBizerbaBackSyncBtn) {
+    runBizerbaBackSyncBtn.addEventListener("click", async () => {
+      if (appState.appMode !== "manager") {
+        alert("Only managers can run Bizerba back sync.");
+        return;
+      }
+      const confirmed = window.confirm(
+        "Run full Bizerba back sync now?\n\nThis scans the full Bizerba table and creates any missing auto production run and downtime records."
+      );
+      if (!confirmed) return;
+
+      runBizerbaBackSyncBtn.disabled = true;
+      try {
+        const session = await ensureManagerBackendSession();
+        const response = await apiRequest("/api/bizerba/auto-process", {
+          method: "POST",
+          token: session.backendToken,
+          body: { fullRescan: true },
+          timeoutMs: 300000
+        });
+        const summary = response?.summary && typeof response.summary === "object" ? response.summary : {};
+        const lineSummaries = Array.isArray(summary.lines) ? summary.lines : [];
+        const activeLineSummary = lineSummaries.find((item) => String(item?.lineId || "") === String(state?.id || "")) || null;
+        clearBizerbaAutoFillCache();
+        await refreshHostedState();
+        renderAll();
+
+        const totalRows = Math.max(0, Math.floor(Number(summary.processedRows || 0)));
+        const totalRuns = Math.max(0, Math.floor(Number(summary.createdRuns || 0)));
+        const totalClosed = Math.max(0, Math.floor(Number(summary.closedRuns || 0)));
+        const totalDowntime = Math.max(0, Math.floor(Number(summary.createdDowntime || 0)));
+        const activeRows = Math.max(0, Math.floor(Number(activeLineSummary?.processedRows || 0)));
+        const activeRuns = Math.max(0, Math.floor(Number(activeLineSummary?.createdRuns || 0)));
+        const activeClosed = Math.max(0, Math.floor(Number(activeLineSummary?.closedRuns || 0)));
+        const activeDowntime = Math.max(0, Math.floor(Number(activeLineSummary?.createdDowntime || 0)));
+        const activeReason = String(activeLineSummary?.reason || "").trim();
+
+        alert(
+          `Bizerba full back sync complete.\nTotal rows scanned: ${totalRows}\nRuns created: ${totalRuns}\nRuns closed: ${totalClosed}\nDowntime created: ${totalDowntime}${activeLineSummary ? `\n\nCurrent line:\nRows scanned: ${activeRows}\nRuns created: ${activeRuns}\nRuns closed: ${activeClosed}\nDowntime created: ${activeDowntime}${activeReason ? `\nStatus: ${activeReason}` : ""}` : ""}`
+        );
+      } catch (error) {
+        alert(`Could not run Bizerba back sync.\n${error?.message || "Please try again."}`);
+      } finally {
+        runBizerbaBackSyncBtn.disabled = false;
+      }
+    });
+  }
+
   const portBreakLogsBtn = document.getElementById("portBreakLogsToDowntime");
   if (portBreakLogsBtn) {
     portBreakLogsBtn.addEventListener("click", async () => {
