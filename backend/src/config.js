@@ -122,5 +122,8 @@ export const config = {
   httpKeepAliveTimeoutMs: parseNumberEnv('HTTP_KEEP_ALIVE_TIMEOUT_MS', 5000, { min: 1000 }),
   bizerbaAutoProcessIntervalMs: parseNumberEnv('BIZERBA_AUTO_PROCESS_INTERVAL_MS', 60000, { min: 0 }),
   bizerbaAutoProcessBatchSize: parseNumberEnv('BIZERBA_AUTO_PROCESS_BATCH_SIZE', 500, { min: 10 }),
-  bizerbaAutoProcessMaxRowsPerLine: parseNumberEnv('BIZERBA_AUTO_PROCESS_MAX_ROWS_PER_LINE', 5000, { min: 10 })
+  bizerbaAutoProcessMaxRowsPerLine: parseNumberEnv('BIZERBA_AUTO_PROCESS_MAX_ROWS_PER_LINE', 5000, { min: 10 }),
+  bizerbaBacksyncEdgeUrl: String(process.env.BIZERBA_BACKSYNC_EDGE_URL || '').trim(),
+  bizerbaBacksyncEdgeKey: String(process.env.BIZERBA_BACKSYNC_EDGE_KEY || '').trim(),
+  bizerbaBacksyncEdgeRequestTimeoutMs: parseNumberEnv('BIZERBA_BACKSYNC_EDGE_REQUEST_TIMEOUT_MS', 45000, { min: 1000 })
 };

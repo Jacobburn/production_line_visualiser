@@ -1027,15 +1027,18 @@ async function resolveCatalogProductNameByArticleNumber(lineId, articleNumber) {
        ) AS product_name
      FROM product_catalog_entries p
      WHERE LOWER(BTRIM(COALESCE(p.catalog_values->>0, ''))) = LOWER($2)
-       AND (
-         p.all_lines = TRUE
-         OR EXISTS (
+     ORDER BY
+       CASE
+         WHEN EXISTS (
            SELECT 1
            FROM unnest(COALESCE(p.line_ids, ARRAY[]::UUID[])) AS mapped_line_id
            WHERE mapped_line_id = $1::UUID
-         )
-       )
-     ORDER BY p.all_lines ASC, p.created_at ASC, p.id ASC
+         ) THEN 0
+         WHEN p.all_lines = TRUE THEN 1
+         ELSE 2
+       END ASC,
+       p.created_at ASC,
+       p.id ASC
      LIMIT 1`,
     [safeLineId, safeArticleNumber]
   );
@@ -1159,7 +1162,35 @@ async function fetchLineBizerbaAutoFill(lineId) {
 }
 
 function bizerbaArticleKey(value) {
-  return String(value || '').trim().toLowerCase();
+  const [first] = bizerbaArticleLookupKeys(value);
+  return first || '';
+}
+
+function normalizeBizerbaNumericArticleKey(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const match = raw.match(/^([+-]?)(\d+)(?:\.(\d+))?$/);
+  if (!match) return '';
+  const sign = match[1] === '-' ? '-' : '';
+  const intPart = String(match[2] || '').replace(/^0+/, '') || '0';
+  const fraction = String(match[3] || '').replace(/0+$/, '');
+  if (!fraction) return `${sign}${intPart}`;
+  return `${sign}${intPart}.${fraction}`;
+}
+
+function bizerbaArticleLookupKeys(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  const lowered = raw.toLowerCase();
+  const compact = lowered.replace(/\s+/g, '');
+  const keys = [];
+  if (compact) keys.push(compact);
+  if (lowered && lowered !== compact) keys.push(lowered);
+  const numericCompact = normalizeBizerbaNumericArticleKey(compact);
+  if (numericCompact && !keys.includes(numericCompact)) keys.push(numericCompact);
+  const numericLowered = normalizeBizerbaNumericArticleKey(lowered);
+  if (numericLowered && !keys.includes(numericLowered)) keys.push(numericLowered);
+  return keys;
 }
 
 function normalizeBigIntString(value, fallback = '0') {
@@ -1337,25 +1368,41 @@ async function fetchBizerbaLineProductLookup(client, lineId) {
        COALESCE(
          NULLIF(BTRIM(p.catalog_values->>1), ''),
          NULLIF(BTRIM(p.catalog_values->>0), '')
-       ) AS product_name
+       ) AS product_name,
+       CASE
+         WHEN EXISTS (
+           SELECT 1
+           FROM unnest(COALESCE(p.line_ids, ARRAY[]::UUID[])) AS mapped_line_id
+           WHERE mapped_line_id = $1::UUID
+         ) THEN 0
+         WHEN p.all_lines = TRUE THEN 1
+         ELSE 2
+       END AS match_rank
      FROM product_catalog_entries p
-     WHERE p.all_lines = TRUE
-        OR EXISTS (
-          SELECT 1
-          FROM unnest(COALESCE(p.line_ids, ARRAY[]::UUID[])) AS mapped_line_id
-          WHERE mapped_line_id = $1::UUID
-        )
-     ORDER BY p.all_lines ASC, p.created_at ASC, p.id ASC`,
+     ORDER BY match_rank ASC, p.created_at ASC, p.id ASC`,
     [lineId]
   );
   const lookup = new Map();
   result.rows.forEach((row) => {
-    const articleKey = bizerbaArticleKey(row.article_key);
     const product = String(row.product_name || '').trim();
-    if (!articleKey || !product || lookup.has(articleKey)) return;
-    lookup.set(articleKey, product);
+    if (!product) return;
+    const articleKeys = bizerbaArticleLookupKeys(row.article_key);
+    articleKeys.forEach((articleKey) => {
+      if (!articleKey || lookup.has(articleKey)) return;
+      lookup.set(articleKey, product);
+    });
   });
   return lookup;
+}
+
+function resolveBizerbaMappedProduct(lookup, articleNumber) {
+  if (!(lookup instanceof Map)) return '';
+  const keys = bizerbaArticleLookupKeys(articleNumber);
+  for (const key of keys) {
+    const product = String(lookup.get(key) || '').trim();
+    if (product) return product;
+  }
+  return '';
 }
 
 async function insertBizerbaAutoRunLog(client, {
@@ -1517,7 +1564,9 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
     reachedRowLimit: false,
     skipped: false,
     reason: '',
-    error: ''
+    error: '',
+    mappedRows: 0,
+    unmappedRows: 0
   };
 
   if (!z.string().uuid().safeParse(lineId).success || !deviceName) {
@@ -1778,7 +1827,11 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
           activeState = makeEmptyBizerbaAutoActiveState();
         }
 
-        const mappedProduct = rowArticleKey ? String(productLookup.get(rowArticleKey) || '').trim() : '';
+        const mappedProduct = rowArticleKey ? resolveBizerbaMappedProduct(productLookup, rowArticleNumber) : '';
+        if (rowArticleKey) {
+          if (mappedProduct) summary.mappedRows += 1;
+          else summary.unmappedRows += 1;
+        }
         if (!rowArticleKey || !mappedProduct) {
           pendingArticleNumber = '';
           pendingCount = 0;
@@ -1833,6 +1886,12 @@ async function processBizerbaAutoLine(line = {}, { fullRescan = false } = {}) {
       summary.reason = 'bizerba_table_missing';
     } else if (summary.processedRows === 0 && !summary.reason) {
       summary.reason = deviceHasRows ? 'no_new_rows' : 'no_matching_device_rows';
+    } else if (!summary.reason && summary.createdRuns === 0) {
+      if (summary.mappedRows === 0 && summary.unmappedRows > 0) {
+        summary.reason = 'no_mapped_articles';
+      } else if (summary.mappedRows > 0) {
+        summary.reason = 'run_start_threshold_not_reached';
+      }
     }
 
     if (activeState.runLogId && activeState.lastTimestamp) {
@@ -1920,6 +1979,89 @@ function mapBizerbaAutoProcessJob(job = {}) {
     error: String(job.error || ''),
     summary: job.summary && typeof job.summary === 'object' ? job.summary : null
   };
+}
+
+function isBizerbaBacksyncEdgeEnabled() {
+  return Boolean(config.bizerbaBacksyncEdgeUrl && config.bizerbaBacksyncEdgeKey);
+}
+
+function buildBizerbaBacksyncEdgeUrl(pathname = '') {
+  const base = String(config.bizerbaBacksyncEdgeUrl || '').trim().replace(/\/+$/, '');
+  const suffix = String(pathname || '').trim().replace(/^\/+/, '');
+  return suffix ? `${base}/${suffix}` : base;
+}
+
+function mapEdgeBizerbaAutoProcessJob(job = {}) {
+  return mapBizerbaAutoProcessJob({
+    id: job.id,
+    status: job.status,
+    trigger: job.trigger,
+    fullRescan: job.fullRescan ?? job.full_rescan,
+    createdAt: job.createdAt ?? job.created_at,
+    startedAt: job.startedAt ?? job.started_at,
+    finishedAt: job.finishedAt ?? job.finished_at,
+    requestedByUserId: job.requestedByUserId ?? job.requested_by_user_id,
+    error: job.error,
+    summary: job.summary
+  });
+}
+
+async function requestBizerbaBacksyncEdge(pathname, {
+  method = 'POST',
+  body = undefined,
+  timeoutMs = config.bizerbaBacksyncEdgeRequestTimeoutMs
+} = {}) {
+  if (!isBizerbaBacksyncEdgeEnabled()) {
+    throw new Error('Bizerba edge backsync is not configured.');
+  }
+  const url = buildBizerbaBacksyncEdgeUrl(pathname);
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timeoutHandle = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  try {
+    const response = await fetch(url, {
+      method,
+      headers: {
+        'Content-Type': 'application/json',
+        'x-backsync-key': config.bizerbaBacksyncEdgeKey
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: controller ? controller.signal : undefined
+    });
+    const raw = await response.text();
+    let payload = {};
+    if (raw) {
+      try {
+        payload = JSON.parse(raw);
+      } catch {
+        payload = { raw };
+      }
+    }
+    if (!response.ok) {
+      const message = String(payload?.error || payload?.message || `Edge request failed (${response.status})`).trim();
+      throw new Error(message || `Edge request failed (${response.status})`);
+    }
+    return payload && typeof payload === 'object' ? payload : {};
+  } catch (error) {
+    if (error?.name === 'AbortError') {
+      throw new Error(`Edge request timed out after ${Math.round(timeoutMs / 1000)} seconds.`);
+    }
+    throw error;
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+async function kickBizerbaBacksyncEdgeWorker(jobId = '') {
+  const safeJobId = String(jobId || '').trim();
+  try {
+    await requestBizerbaBacksyncEdge('bizerba-backsync-worker', {
+      method: 'POST',
+      body: safeJobId ? { jobId: safeJobId } : {},
+      timeoutMs: Math.max(10000, Math.min(30000, config.bizerbaBacksyncEdgeRequestTimeoutMs))
+    });
+  } catch (error) {
+    console.warn('[bizerba-auto] Edge worker kick failed:', error?.message || error);
+  }
 }
 
 function pruneBizerbaAutoProcessJobs() {
@@ -4752,6 +4894,47 @@ app.get('/api/lines/:lineId/bizerba-auto-fill', authMiddleware, asyncRoute(async
 app.post('/api/bizerba/auto-process', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const parsed = bizerbaAutoProcessSchema.safeParse(req.body || {});
   if (!parsed.success) return res.status(400).json({ error: 'Invalid Bizerba auto-process payload' });
+  if (isBizerbaBacksyncEdgeEnabled()) {
+    const shouldRunAsync = parsed.data.async !== false;
+    const kickoffPayload = await requestBizerbaBacksyncEdge('bizerba-backsync-start', {
+      method: 'POST',
+      body: {
+        trigger: 'manual',
+        fullRescan: Boolean(parsed.data.fullRescan),
+        requestedByUserId: String(req.user?.id || '').trim(),
+        requestedByName: String(req.user?.name || '').trim()
+      }
+    });
+    const kickoffJob = mapEdgeBizerbaAutoProcessJob(kickoffPayload?.job || {});
+    if (!kickoffJob.id) {
+      return res.status(502).json({ error: 'Edge backsync did not return a valid job id.' });
+    }
+    await kickBizerbaBacksyncEdgeWorker(kickoffJob.id);
+    if (shouldRunAsync) {
+      return res.status(202).json({ job: kickoffJob });
+    }
+    const waitDeadline = Date.now() + 120000;
+    let latestJob = kickoffJob;
+    while (Date.now() < waitDeadline) {
+      if (latestJob.status === 'completed') {
+        return res.json({ summary: latestJob.summary || {} });
+      }
+      if (latestJob.status === 'failed') {
+        return res.status(500).json({ error: latestJob.error || 'Bizerba edge backsync failed', job: latestJob });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await kickBizerbaBacksyncEdgeWorker(latestJob.id);
+      const statusPayload = await requestBizerbaBacksyncEdge('bizerba-backsync-status', {
+        method: 'POST',
+        body: { jobId: latestJob.id }
+      });
+      latestJob = mapEdgeBizerbaAutoProcessJob(statusPayload?.job || {});
+      if (!latestJob.id) {
+        return res.status(502).json({ error: 'Edge backsync status response was invalid.' });
+      }
+    }
+    return res.status(202).json({ job: latestJob });
+  }
   const shouldRunAsync = parsed.data.async !== false;
   if (shouldRunAsync) {
     const job = scheduleBizerbaAutoProcessJob({
@@ -4772,6 +4955,16 @@ app.post('/api/bizerba/auto-process', authMiddleware, requireRole('manager'), as
 app.get('/api/bizerba/auto-process/:jobId', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
   const jobId = String(req.params.jobId || '').trim();
   if (!jobId) return res.status(400).json({ error: 'Invalid Bizerba auto-process job id' });
+  if (isBizerbaBacksyncEdgeEnabled()) {
+    await kickBizerbaBacksyncEdgeWorker(jobId);
+    const statusPayload = await requestBizerbaBacksyncEdge('bizerba-backsync-status', {
+      method: 'POST',
+      body: { jobId }
+    });
+    const job = mapEdgeBizerbaAutoProcessJob(statusPayload?.job || {});
+    if (!job.id) return res.status(404).json({ error: 'Bizerba auto-process job not found' });
+    return res.json({ job });
+  }
   const job = bizerbaAutoProcessJobs.get(jobId);
   if (!job) return res.status(404).json({ error: 'Bizerba auto-process job not found' });
   return res.json({ job: mapBizerbaAutoProcessJob(job) });
@@ -6239,7 +6432,7 @@ server.on('error', (error) => {
 
 let bizerbaAutoStartupHandle = null;
 let bizerbaAutoIntervalHandle = null;
-if (config.bizerbaAutoProcessIntervalMs > 0) {
+if (!isBizerbaBacksyncEdgeEnabled() && config.bizerbaAutoProcessIntervalMs > 0) {
   const intervalMs = Math.max(10000, Math.floor(config.bizerbaAutoProcessIntervalMs));
   bizerbaAutoStartupHandle = setTimeout(() => {
     runBizerbaAutoProcessor({ trigger: 'startup' })
@@ -6256,6 +6449,8 @@ if (config.bizerbaAutoProcessIntervalMs > 0) {
   }, intervalMs);
   if (typeof bizerbaAutoIntervalHandle.unref === 'function') bizerbaAutoIntervalHandle.unref();
   console.log(`[bizerba-auto] Processor enabled (interval ${intervalMs}ms).`);
+} else if (isBizerbaBacksyncEdgeEnabled()) {
+  console.log('[bizerba-auto] In-process interval processor disabled (edge mode enabled).');
 } else {
   console.log('[bizerba-auto] Processor disabled (BIZERBA_AUTO_PROCESS_INTERVAL_MS <= 0).');
 }

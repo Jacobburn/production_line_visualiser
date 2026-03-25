@@ -389,3 +389,12 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 
 [functions."ingest-bizerba"]
 verify_jwt = false
+
+[functions."bizerba-backsync-start"]
+verify_jwt = false
+
+[functions."bizerba-backsync-worker"]
+verify_jwt = false
+
+[functions."bizerba-backsync-status"]
+verify_jwt = false
