@@ -119,5 +119,8 @@ export const config = {
   dbRetryDelayMs: parseNumberEnv('DB_RETRY_DELAY_MS', 250, { min: 0 }),
   httpRequestTimeoutMs: parseNumberEnv('HTTP_REQUEST_TIMEOUT_MS', 30000, { min: 1000 }),
   httpHeadersTimeoutMs: parseNumberEnv('HTTP_HEADERS_TIMEOUT_MS', 35000, { min: 1000 }),
-  httpKeepAliveTimeoutMs: parseNumberEnv('HTTP_KEEP_ALIVE_TIMEOUT_MS', 5000, { min: 1000 })
+  httpKeepAliveTimeoutMs: parseNumberEnv('HTTP_KEEP_ALIVE_TIMEOUT_MS', 5000, { min: 1000 }),
+  bizerbaAutoProcessIntervalMs: parseNumberEnv('BIZERBA_AUTO_PROCESS_INTERVAL_MS', 60000, { min: 0 }),
+  bizerbaAutoProcessBatchSize: parseNumberEnv('BIZERBA_AUTO_PROCESS_BATCH_SIZE', 500, { min: 10 }),
+  bizerbaAutoProcessMaxRowsPerLine: parseNumberEnv('BIZERBA_AUTO_PROCESS_MAX_ROWS_PER_LINE', 5000, { min: 10 })
 };
