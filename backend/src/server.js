@@ -61,7 +61,8 @@ const passwordResetSchema = z.object({
 
 const lineSchema = z.object({
   name: z.string().min(2).max(120),
-  secretKey: z.string().min(4).max(64)
+  secretKey: z.string().min(4).max(64),
+  deviceName: z.string().max(160).optional().or(z.literal('')).or(z.null())
 });
 
 const lineGroupCreateSchema = z.object({
@@ -213,7 +214,8 @@ const hasAtLeastOneField = (obj) => Object.values(obj).some((value) => value !==
 
 const lineUpdateSchema = z.object({
   name: z.string().trim().min(2).max(120).optional(),
-  groupId: z.string().uuid().optional().or(z.literal('')).or(z.null())
+  groupId: z.string().uuid().optional().or(z.literal('')).or(z.null()),
+  deviceName: z.string().max(160).optional().or(z.literal('')).or(z.null())
 }).refine(hasAtLeastOneField, { message: 'At least one field is required' });
 
 const lineReorderSchema = z.object({
@@ -313,6 +315,11 @@ function normalizeDataSourceKey(sourceName, sourceKey = '') {
 }
 
 function optionalText(value) {
+  const trimmed = String(value || '').trim();
+  return trimmed || null;
+}
+
+function optionalDeviceName(value) {
   const trimmed = String(value || '').trim();
   return trimmed || null;
 }
@@ -987,6 +994,143 @@ async function fetchProductCatalogForUser(user) {
     .filter(Boolean);
 }
 
+function mapBizerbaTimestamp(value) {
+  if (value instanceof Date) return value.toISOString();
+  const raw = String(value || '').trim();
+  if (!raw) return '';
+  const parsed = new Date(raw);
+  return Number.isNaN(parsed.getTime()) ? '' : parsed.toISOString();
+}
+
+async function resolveCatalogProductNameByArticleNumber(lineId, articleNumber) {
+  const safeLineId = String(lineId || '').trim();
+  const safeArticleNumber = String(articleNumber || '').trim();
+  if (!z.string().uuid().safeParse(safeLineId).success || !safeArticleNumber) return '';
+
+  const result = await dbQuery(
+    `SELECT
+       COALESCE(
+         NULLIF(BTRIM(p.catalog_values->>1), ''),
+         NULLIF(BTRIM(p.catalog_values->>0), '')
+       ) AS product_name
+     FROM product_catalog_entries p
+     WHERE LOWER(BTRIM(COALESCE(p.catalog_values->>0, ''))) = LOWER($2)
+       AND (
+         p.all_lines = TRUE
+         OR EXISTS (
+           SELECT 1
+           FROM unnest(COALESCE(p.line_ids, ARRAY[]::UUID[])) AS mapped_line_id
+           WHERE mapped_line_id = $1::UUID
+         )
+       )
+     ORDER BY p.all_lines ASC, p.created_at ASC, p.id ASC
+     LIMIT 1`,
+    [safeLineId, safeArticleNumber]
+  );
+
+  return String(result.rows?.[0]?.product_name || '').trim();
+}
+
+async function fetchLineBizerbaAutoFill(lineId) {
+  const safeLineId = String(lineId || '').trim();
+  if (!z.string().uuid().safeParse(safeLineId).success) return null;
+
+  const lineResult = await dbQuery(
+    `SELECT
+       id::TEXT AS "lineId",
+       COALESCE(device_name, '') AS "deviceName"
+     FROM production_lines
+     WHERE id = $1
+       AND is_active = TRUE
+     LIMIT 1`,
+    [safeLineId]
+  );
+  if (!lineResult.rowCount) return null;
+
+  const deviceName = String(lineResult.rows[0].deviceName || '').trim();
+  if (!deviceName) {
+    return {
+      lineId: safeLineId,
+      deviceName: '',
+      available: false,
+      hasMappedProduct: false,
+      reason: 'line_device_unassigned',
+      articleNumber: '',
+      product: '',
+      date: '',
+      timestamp: '',
+      actualNetWeightValue: null
+    };
+  }
+
+  let latestResult;
+  try {
+    latestResult = await dbQuery(
+      `SELECT
+         BTRIM("DeviceName") AS "deviceName",
+         BTRIM("ArticleNumber") AS "articleNumber",
+         "Date"::TEXT AS date,
+         "Timestamp" AS timestamp,
+         "ActualNetWeightValue"::FLOAT8 AS "actualNetWeightValue"
+       FROM public."Bizerba_ID"
+       WHERE LOWER(BTRIM("DeviceName")) = LOWER($1)
+       ORDER BY "Timestamp" DESC, id DESC
+       LIMIT 1`,
+      [deviceName]
+    );
+  } catch (error) {
+    if (error?.code === '42P01') {
+      return {
+        lineId: safeLineId,
+        deviceName,
+        available: false,
+        hasMappedProduct: false,
+        reason: 'bizerba_table_missing',
+        articleNumber: '',
+        product: '',
+        date: '',
+        timestamp: '',
+        actualNetWeightValue: null
+      };
+    }
+    throw error;
+  }
+
+  if (!latestResult.rowCount) {
+    return {
+      lineId: safeLineId,
+      deviceName,
+      available: false,
+      hasMappedProduct: false,
+      reason: 'no_live_data',
+      articleNumber: '',
+      product: '',
+      date: '',
+      timestamp: '',
+      actualNetWeightValue: null
+    };
+  }
+
+  const latest = latestResult.rows[0];
+  const articleNumber = String(latest.articleNumber || '').trim();
+  const product = await resolveCatalogProductNameByArticleNumber(safeLineId, articleNumber);
+
+  return {
+    lineId: safeLineId,
+    deviceName,
+    available: true,
+    hasMappedProduct: Boolean(product),
+    reason: product ? '' : 'product_not_mapped',
+    articleNumber,
+    product,
+    date: String(latest.date || '').trim(),
+    timestamp: mapBizerbaTimestamp(latest.timestamp),
+    actualNetWeightValue: Number.isFinite(Number(latest.actualNetWeightValue))
+      ? Number(latest.actualNetWeightValue)
+      : null
+  };
+}
+
 async function resolveSupervisorActionAssignee(usernameInput, fallbackName = '') {
   const requestedUsername = normalizeActionAssigneeUsername(usernameInput);
   if (!requestedUsername) return null;
@@ -1303,6 +1447,10 @@ async function ensureLineGroupSchema() {
        ADD COLUMN IF NOT EXISTS display_order INTEGER NOT NULL DEFAULT 0`
     );
     await dbQuery(
+      `ALTER TABLE production_lines
+       ADD COLUMN IF NOT EXISTS device_name TEXT`
+    );
+    await dbQuery(
       `CREATE UNIQUE INDEX IF NOT EXISTS idx_line_groups_name_active_unique
        ON line_groups (LOWER(name))
        WHERE is_active = TRUE`
@@ -1319,6 +1467,13 @@ async function ensureLineGroupSchema() {
       `CREATE INDEX IF NOT EXISTS idx_production_lines_group_display_order
        ON production_lines (group_id, display_order ASC, created_at ASC)
        WHERE is_active = TRUE`
+    );
+    await dbQuery(
+      `CREATE INDEX IF NOT EXISTS idx_production_lines_device_name_active
+       ON production_lines (LOWER(device_name))
+       WHERE is_active = TRUE
+         AND device_name IS NOT NULL
+         AND BTRIM(device_name) <> ''`
     );
     lineGroupSchemaReady = true;
   })()
@@ -2128,6 +2283,7 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
   const managerBaseFields = `
     l.id,
     l.name,
+    COALESCE(l.device_name, '') AS "deviceName",
     l.group_id::TEXT AS "groupId",
     COALESCE(g.name, '') AS "groupName",
     l.display_order AS "displayOrder",
@@ -2143,6 +2299,7 @@ app.get('/api/lines', authMiddleware, asyncRoute(async (req, res) => {
   const supervisorBaseFields = `
     l.id,
     l.name,
+    COALESCE(l.device_name, '') AS "deviceName",
     l.group_id::TEXT AS "groupId",
     COALESCE(g.name, '') AS "groupName",
     l.display_order AS "displayOrder",
@@ -2291,6 +2448,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     ? `SELECT
          l.id,
          l.name,
+         COALESCE(l.device_name, '') AS "deviceName",
          l.group_id::TEXT AS "groupId",
          COALESCE(g.name, '') AS "groupName",
          l.display_order AS "displayOrder",
@@ -2311,6 +2469,7 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
     : `SELECT
          l.id,
          l.name,
+         COALESCE(l.device_name, '') AS "deviceName",
          l.group_id::TEXT AS "groupId",
          COALESCE(g.name, '') AS "groupName",
          l.display_order AS "displayOrder",
@@ -2713,16 +2872,18 @@ app.get('/api/state-snapshot', authMiddleware, asyncRoute(async (req, res) => {
 }));
 
 app.post('/api/lines', authMiddleware, requireRole('manager'), asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
   const parsed = lineSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: 'Invalid line payload' });
 
   try {
     const result = await dbQuery(
-      `INSERT INTO production_lines(name, secret_key, created_by_user_id, display_order)
+      `INSERT INTO production_lines(name, secret_key, device_name, created_by_user_id, display_order)
        VALUES (
          $1,
          $2,
          $3,
+         $4,
          COALESCE((
            SELECT MAX(display_order) + 1
            FROM production_lines
@@ -2733,11 +2894,17 @@ app.post('/api/lines', authMiddleware, requireRole('manager'), asyncRoute(async 
        RETURNING
          id,
          name,
+         COALESCE(device_name, '') AS "deviceName",
          group_id::TEXT AS "groupId",
          display_order AS "displayOrder",
          secret_key AS "secretKey",
          created_at AS "createdAt"`,
-      [parsed.data.name.trim(), parsed.data.secretKey.trim(), req.user.id]
+      [
+        parsed.data.name.trim(),
+        parsed.data.secretKey.trim(),
+        optionalDeviceName(parsed.data.deviceName),
+        req.user.id
+      ]
     );
 
     await writeAudit({
@@ -3443,6 +3610,7 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
       ? `SELECT
            l.id,
            l.name,
+           COALESCE(l.device_name, '') AS "deviceName",
            l.group_id::TEXT AS "groupId",
            COALESCE(g.name, '') AS "groupName",
            l.display_order AS "displayOrder",
@@ -3457,6 +3625,7 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
       : `SELECT
            l.id,
            l.name,
+           COALESCE(l.device_name, '') AS "deviceName",
            l.group_id::TEXT AS "groupId",
            COALESCE(g.name, '') AS "groupName",
            l.display_order AS "displayOrder",
@@ -3493,6 +3662,18 @@ app.get('/api/lines/:lineId', authMiddleware, asyncRoute(async (req, res) => {
   ]);
 
   return res.json({ line: lineResult.rows[0], stages: stages.rows, guides: guides.rows });
+}));
+
+app.get('/api/lines/:lineId/bizerba-auto-fill', authMiddleware, asyncRoute(async (req, res) => {
+  await ensureLineGroupSchema();
+  await ensureProductCatalogSchema();
+  const lineId = req.params.lineId;
+  if (!z.string().uuid().safeParse(lineId).success) return res.status(400).json({ error: 'Invalid line id' });
+  if (!(await hasLineAccess(req.user, lineId))) return res.status(403).json({ error: 'Forbidden' });
+
+  const autoFill = await fetchLineBizerbaAutoFill(lineId);
+  if (!autoFill) return res.status(404).json({ error: 'Line not found' });
+  return res.json({ autoFill });
 }));
 
 app.get('/api/lines/:lineId/logs', authMiddleware, asyncRoute(async (req, res) => {
@@ -3737,7 +3918,9 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
 
   const hasNameUpdate = Object.prototype.hasOwnProperty.call(parsed.data, 'name');
   const hasGroupUpdate = Object.prototype.hasOwnProperty.call(parsed.data, 'groupId');
+  const hasDeviceNameUpdate = Object.prototype.hasOwnProperty.call(parsed.data, 'deviceName');
   const nextName = hasNameUpdate ? parsed.data.name.trim() : null;
+  const nextDeviceName = hasDeviceNameUpdate ? optionalDeviceName(parsed.data.deviceName) : undefined;
   const nextGroupId = hasGroupUpdate
     ? (String(parsed.data.groupId || '').trim() || null)
     : undefined;
@@ -3751,6 +3934,7 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
       `SELECT
          l.id,
          l.name,
+         COALESCE(l.device_name, '') AS "deviceName",
          l.group_id::TEXT AS "groupId",
          COALESCE(g.name, '') AS "groupName",
          l.display_order AS "displayOrder"
@@ -3792,6 +3976,10 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
         params.push(nextDisplayOrder);
       }
     }
+    if (hasDeviceNameUpdate) {
+      setParts.push(`device_name = $${params.length + 1}`);
+      params.push(nextDeviceName);
+    }
 
     const result = await dbQuery(
       `UPDATE production_lines
@@ -3806,6 +3994,7 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
       `SELECT
          l.id,
          l.name,
+         COALESCE(l.device_name, '') AS "deviceName",
          l.group_id::TEXT AS "groupId",
          COALESCE(g.name, '') AS "groupName",
          l.display_order AS "displayOrder",
@@ -3842,6 +4031,18 @@ app.patch('/api/lines/:lineId', authMiddleware, requireRole('manager'), asyncRou
         actorRole: req.user.role,
         action: 'UPDATE_LINE_GROUP',
         details: `Line group changed: ${previousGroup} -> ${nextGroup}`
+      });
+    }
+    if (hasDeviceNameUpdate && String(currentLine.deviceName || '') !== String(updatedLine.deviceName || '')) {
+      const beforeDevice = String(currentLine.deviceName || '').trim() || 'Unassigned';
+      const afterDevice = String(updatedLine.deviceName || '').trim() || 'Unassigned';
+      await writeAudit({
+        lineId,
+        actorUserId: req.user.id,
+        actorName: req.user.name,
+        actorRole: req.user.role,
+        action: 'UPDATE_LINE_DEVICE_NAME',
+        details: `Line device changed: ${beforeDevice} -> ${afterDevice}`
       });
     }
 

@@ -130,6 +130,7 @@ const PRODUCT_CATALOG_COLUMN_COUNT = 12;
 const PRODUCT_CATALOG_ALL_LINES_TOKEN = "*";
 const PRODUCT_CATALOG_ID_ATTR = "data-product-id";
 const PRODUCT_CATALOG_LINES_ATTR = "data-product-line-ids";
+const BIZERBA_AUTOFILL_CACHE_MS = 30000;
 const DATA_SOURCE_PROVIDER_LABELS = {
   sql: "SQL",
   api: "API"
@@ -173,6 +174,8 @@ let managerBackendSession = {
 };
 let pendingManagerDataTabRestore = { lineId: "", tabId: "" };
 const dataSourceConnectionTestState = new Map();
+const bizerbaAutoFillCache = new Map();
+const bizerbaAutoFillInFlight = new Map();
 
 function enforceAppVariantState() {
   if (APP_VARIANT === "supervisor") {
@@ -2310,6 +2313,7 @@ function makeDefaultLine(id, name, { seedSample = false } = {}) {
   const line = {
     id,
     name,
+    deviceName: "",
     groupId: "",
     displayOrder: 0,
     secretKey: generateSecretKey(),
@@ -2351,6 +2355,7 @@ function normalizeLine(id, line) {
     ...line,
     id,
     name: line?.name || base.name,
+    deviceName: String(line?.deviceName || "").trim(),
     selectedDate: normalizeWeekdayIsoDate(line?.selectedDate || base.selectedDate, { direction: -1 }),
     groupId: String(line?.groupId || "").trim(),
     displayOrder: Number.isFinite(displayOrderRaw) ? Math.max(0, Math.floor(displayOrderRaw)) : base.displayOrder,
@@ -3839,7 +3844,8 @@ async function ensureBackendLineId(localLineId, session) {
         token: session.backendToken,
         body: {
           name: appState.lines[localLineId].name,
-          secretKey: appState.lines[localLineId].secretKey || generateSecretKey()
+          secretKey: appState.lines[localLineId].secretKey || generateSecretKey(),
+          deviceName: String(appState.lines[localLineId].deviceName || "").trim()
         }
       });
       const createdId = created?.line?.id;
@@ -3868,6 +3874,7 @@ function clearManagerBackendSession() {
   managerBackendSession.role = "manager";
   managerBackendSession.name = "";
   managerBackendSession.username = "";
+  clearBizerbaAutoFillCache();
   persistAuthSessions();
 }
 
@@ -3877,6 +3884,150 @@ async function ensureManagerBackendSession() {
     throw new Error("Manager login required.");
   }
   return managerBackendSession;
+}
+
+function bizerbaAutoFillCacheKey(lineId) {
+  return String(lineId || "").trim();
+}
+
+function clearBizerbaAutoFillCache(lineId = "") {
+  const safeLineId = bizerbaAutoFillCacheKey(lineId);
+  if (!safeLineId) {
+    bizerbaAutoFillCache.clear();
+    bizerbaAutoFillInFlight.clear();
+    return;
+  }
+  bizerbaAutoFillCache.delete(safeLineId);
+  bizerbaAutoFillInFlight.delete(safeLineId);
+}
+
+function backendSessionForBizerbaAutoFill() {
+  if (appState.appMode === "supervisor" && appState.supervisorSession?.backendToken) {
+    return appState.supervisorSession;
+  }
+  if (managerBackendSession?.backendToken) return managerBackendSession;
+  if (appState.supervisorSession?.backendToken) return appState.supervisorSession;
+  return null;
+}
+
+function hhmmFromIsoTimestamp(isoTimestamp) {
+  const parsed = new Date(String(isoTimestamp || ""));
+  if (Number.isNaN(parsed.getTime())) return "";
+  const hh = String(parsed.getHours()).padStart(2, "0");
+  const mm = String(parsed.getMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+async function fetchLineBizerbaAutoFill(lineId, { force = false } = {}) {
+  const safeLineId = bizerbaAutoFillCacheKey(lineId);
+  if (!UUID_RE.test(safeLineId)) return null;
+  const session = backendSessionForBizerbaAutoFill();
+  if (!session?.backendToken) return null;
+
+  const now = Date.now();
+  const cached = bizerbaAutoFillCache.get(safeLineId);
+  if (!force && cached && now - Number(cached.fetchedAt || 0) < BIZERBA_AUTOFILL_CACHE_MS) {
+    return cached.data || null;
+  }
+  if (!force && bizerbaAutoFillInFlight.has(safeLineId)) {
+    return bizerbaAutoFillInFlight.get(safeLineId);
+  }
+
+  const request = (async () => {
+    try {
+      const payload = await apiRequest(`/api/lines/${encodeURIComponent(safeLineId)}/bizerba-auto-fill`, {
+        token: session.backendToken
+      });
+      const autoFill = payload?.autoFill && typeof payload.autoFill === "object" ? payload.autoFill : null;
+      bizerbaAutoFillCache.set(safeLineId, { fetchedAt: Date.now(), data: autoFill });
+      return autoFill;
+    } catch (error) {
+      console.warn("Bizerba auto-fill fetch failed:", error);
+      return null;
+    } finally {
+      bizerbaAutoFillInFlight.delete(safeLineId);
+    }
+  })();
+
+  bizerbaAutoFillInFlight.set(safeLineId, request);
+  return request;
+}
+
+async function applyManagerRunBizerbaAutoFill() {
+  if (appState.appMode !== "manager" || !state?.id) return;
+  const activeLine = state;
+  if (!String(activeLine.deviceName || "").trim()) return;
+
+  const runForm = document.getElementById("runForm");
+  const productInput = runForm?.querySelector('[name="product"]');
+  const startInput = runForm?.querySelector('[name="productionStartTime"]');
+  if (!productInput || !startInput) return;
+
+  const autoFill = await fetchLineBizerbaAutoFill(activeLine.id);
+  if (!autoFill?.available) return;
+
+  const mappedProduct = String(autoFill.product || "").trim();
+  if (!String(productInput.value || "").trim() && mappedProduct) {
+    productInput.value = mappedProduct;
+  }
+  if (!String(startInput.value || "").trim()) {
+    const startTime = hhmmFromIsoTimestamp(autoFill.timestamp);
+    if (strictTimeValid(startTime)) {
+      startInput.value = startTime;
+      syncNowInputPrefixState(startInput);
+    }
+  }
+}
+
+async function applySupervisorRunBizerbaAutoFill() {
+  const lineId = selectedSupervisorLineId();
+  const line = appState.lines?.[lineId];
+  if (!lineId || !line || !String(line.deviceName || "").trim()) return;
+
+  const productInput = document.getElementById("superRunProduct");
+  const startInput = document.getElementById("superRunProdStart");
+  if (!productInput || !startInput) return;
+
+  const autoFill = await fetchLineBizerbaAutoFill(lineId);
+  if (!autoFill?.available) return;
+
+  const mappedProduct = String(autoFill.product || "").trim();
+  if (!String(productInput.value || "").trim() && mappedProduct) {
+    productInput.value = mappedProduct;
+  }
+  if (!String(startInput.value || "").trim()) {
+    const startTime = hhmmFromIsoTimestamp(autoFill.timestamp);
+    if (strictTimeValid(startTime)) {
+      startInput.value = startTime;
+      syncNowInputPrefixState(startInput);
+    }
+  }
+}
+
+async function applyDayVizRunBizerbaAutoFill(lineId) {
+  const safeLineId = String(lineId || "").trim();
+  if (!UUID_RE.test(safeLineId)) return;
+  const line = appState.lines?.[safeLineId];
+  if (!line || !String(line.deviceName || "").trim()) return;
+
+  const form = document.getElementById("dayVizAddRecordForm");
+  const productInput = form?.querySelector('[name="product"]');
+  const startInput = form?.querySelector('[name="productionStartTime"]');
+  if (!productInput || !startInput) return;
+  if (String(dayVizAddRecordModalState?.type || "").trim() !== "run") return;
+  if (String(dayVizAddRecordModalState?.lineId || "").trim() !== safeLineId) return;
+
+  const autoFill = await fetchLineBizerbaAutoFill(safeLineId);
+  if (!autoFill?.available) return;
+
+  const mappedProduct = String(autoFill.product || "").trim();
+  if (!String(productInput.value || "").trim() && mappedProduct) {
+    productInput.value = mappedProduct;
+  }
+  if (!String(startInput.value || "").trim()) {
+    const startTime = hhmmFromIsoTimestamp(autoFill.timestamp);
+    if (strictTimeValid(startTime)) startInput.value = startTime;
+  }
 }
 
 function fromBackendStageType(stageType) {
@@ -3894,6 +4045,7 @@ function toBackendStageType(stage) {
 function makeLineFromBackend(lineSummary, lineDetail, logs) {
   const lineId = lineSummary.id;
   const line = makeDefaultLine(lineId, lineSummary.name || "Production Line");
+  line.deviceName = String(lineSummary?.deviceName || "").trim();
   line.groupId = String(lineSummary?.groupId || "").trim();
   line.displayOrder = Math.max(0, Math.floor(num(lineSummary?.displayOrder)));
   line.secretKey = lineSummary.secretKey || line.secretKey;
@@ -4067,6 +4219,7 @@ async function refreshHostedState(preferredSession = null) {
     });
 
     appState.lines = hostedLines;
+    clearBizerbaAutoFillCache();
     const snapshotLineGroups = normalizeLineGroups(snapshot?.lineGroups);
     const derivedLineGroups = normalizeLineGroups(
       snapshotLines.map((bundle, index) => ({
@@ -4750,13 +4903,15 @@ async function createLineOnBackend(lineName, secretKey, lineModel) {
     token: session.backendToken,
     body: {
       name: lineName,
-      secretKey
+      secretKey,
+      deviceName: String(lineModel?.deviceName || "").trim()
     }
   });
   const lineId = created?.line?.id;
   if (!lineId) throw new Error("Backend line create failed");
   appState.lines[lineId] = lineModel;
   lineModel.id = lineId;
+  lineModel.deviceName = String(created?.line?.deviceName || lineModel?.deviceName || "").trim();
   lineModel.groupId = String(created?.line?.groupId || "").trim();
   const nextOrder = Number(created?.line?.displayOrder);
   if (Number.isFinite(nextOrder)) lineModel.displayOrder = Math.max(0, Math.floor(nextOrder));
@@ -5745,6 +5900,7 @@ function bindHome() {
   const closeEditLineModalBtn = document.getElementById("closeEditLineModal");
   const editLineForm = document.getElementById("editLineForm");
   const editLineNameInput = document.getElementById("editLineName");
+  const editLineDeviceNameInput = document.getElementById("editLineDeviceName");
   const editLineDeleteBtn = document.getElementById("editLineDeleteBtn");
   const connectDataSourceModal = document.getElementById("connectDataSourceModal");
   const closeConnectDataSourceModalBtn = document.getElementById("closeConnectDataSourceModal");
@@ -5827,6 +5983,7 @@ function bindHome() {
       { fallbackToIdeal: false }
     );
     syncAllNowInputPrefixStates(supervisorRunForm);
+    void applySupervisorRunBizerbaAutoFill();
   };
 
   const resetSupervisorDowntimeFormSelection = () => {
@@ -6573,6 +6730,7 @@ function bindHome() {
     if (!line) return;
     editingLineId = lineId;
     editLineNameInput.value = line.name || "";
+    if (editLineDeviceNameInput) editLineDeviceNameInput.value = String(line.deviceName || "").trim();
     editLineModal.classList.add("open");
     editLineModal.setAttribute("aria-hidden", "false");
     editLineNameInput.focus();
@@ -6603,6 +6761,7 @@ function bindHome() {
         token: session.backendToken
       });
       addAudit(line, "DELETE_LINE", "Line deleted");
+      clearBizerbaAutoFillCache(lineId);
       delete appState.lines[lineId];
       appState.supervisors = (appState.supervisors || []).map((sup) => ({
         ...sup,
@@ -6821,6 +6980,7 @@ function bindHome() {
       appState.activeView = "home";
       clearManagerActionTicketEdit();
     }
+    clearBizerbaAutoFillCache();
     saveState();
     renderAll();
   });
@@ -9217,11 +9377,14 @@ function bindHome() {
     const line = appState.lines?.[lineId];
     if (!line) return;
     const nextName = String(editLineNameInput.value || "").trim();
+    const nextDeviceName = String(editLineDeviceNameInput?.value || "").trim();
     if (nextName.length < 2) {
       alert("Line name must be at least 2 characters.");
       return;
     }
-    if (nextName === line.name) {
+    const nameChanged = nextName !== String(line.name || "").trim();
+    const deviceChanged = nextDeviceName !== String(line.deviceName || "").trim();
+    if (!nameChanged && !deviceChanged) {
       closeEditLineModal();
       return;
     }
@@ -9229,13 +9392,23 @@ function bindHome() {
       const session = await ensureManagerBackendSession();
       const backendLineId = UUID_RE.test(String(lineId)) ? lineId : await ensureBackendLineId(lineId, session);
       if (!backendLineId) throw new Error("Line is not synced to server.");
+      const body = {};
+      if (nameChanged) body.name = nextName;
+      if (deviceChanged) body.deviceName = nextDeviceName || null;
       await apiRequest(`/api/lines/${backendLineId}`, {
         method: "PATCH",
         token: session.backendToken,
-        body: { name: nextName }
+        body
       });
-      line.name = nextName;
-      addAudit(line, "RENAME_LINE", `Line renamed to ${nextName}`);
+      if (nameChanged) {
+        line.name = nextName;
+        addAudit(line, "RENAME_LINE", `Line renamed to ${nextName}`);
+      }
+      if (deviceChanged) {
+        line.deviceName = nextDeviceName;
+        clearBizerbaAutoFillCache(lineId);
+        addAudit(line, "UPDATE_LINE_DEVICE_NAME", `Line device name updated to ${nextDeviceName || "Unassigned"}`);
+      }
       closeEditLineModal();
       saveState();
       await refreshHostedState();
@@ -10061,6 +10234,7 @@ function bindForms() {
     runCrewingPatternInput?.value || "",
     { fallbackToIdeal: false }
   );
+  void applyManagerRunBizerbaAutoFill();
 
   shiftForm.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -10087,10 +10261,17 @@ function bindForms() {
       });
       form.reset();
       setRunCrewingPatternField(runCrewingPatternInput, runCrewingPatternSummary, state, state.selectedShift || "Day", {}, { fallbackToIdeal: false });
+      await applyManagerRunBizerbaAutoFill();
       renderAll();
     } catch (error) {
       alert(`Could not save production run.\n${error?.message || "Please try again."}`);
     }
+  });
+
+  runForm.addEventListener("reset", () => {
+    window.setTimeout(() => {
+      void applyManagerRunBizerbaAutoFill();
+    }, 0);
   });
 
   downtimeForm.addEventListener("submit", async (event) => {
@@ -12051,6 +12232,7 @@ function renderDayVizAddRecordModal() {
       const shift = preferredTimedLogShift(line, selectedDate, startTime, finishTime, fallbackShiftValue(selectedShift));
       setRunCrewingPatternField(patternInput, patternSummary, line, shift, patternInput.value || "", { fallbackToIdeal: false });
     }
+    void applyDayVizRunBizerbaAutoFill(line.id);
   }
 
   const focusTarget = fieldsNode.querySelector('select:not(:disabled), input:not([type="hidden"]):not(:disabled), button:not(:disabled)');
@@ -16258,6 +16440,7 @@ function renderAll() {
   renderVisualiser();
   renderDayVisualiser();
   renderLineTrends();
+  void applyManagerRunBizerbaAutoFill();
   syncLineSettingsSaveUI();
 }
 

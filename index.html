@@ -713,15 +713,16 @@
         <div class="modal-head">
           <div class="modal-title-block">
             <h2 id="editLineTitle">Edit Production Line</h2>
-            <p class="muted">Update the production line name.</p>
+            <p class="muted">Update line name and Bizerba device mapping.</p>
           </div>
           <button id="closeEditLineModal" class="ghost-btn" type="button">Close</button>
         </div>
         <form id="editLineForm" class="form-grid">
           <input id="editLineName" placeholder="Line name" required />
+          <input id="editLineDeviceName" placeholder="Bizerba Device Name (optional)" maxlength="160" />
           <div class="form-submit-actions">
             <button id="editLineDeleteBtn" class="danger" type="button">Delete Line</button>
-            <button type="submit">Save Line Name</button>
+            <button type="submit">Save Line Settings</button>
           </div>
         </form>
       </div>
